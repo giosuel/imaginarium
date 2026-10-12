@@ -479,6 +479,11 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   local cache, use batch verification, or verify only what the newest
   snapshot doesn't cover. The ACL replay (36 ms per 100 changes) can be
   cached by head hash in the same way.
+- **Loro depends on `im` 15.1.0, which RustSec lists as unmaintained**, and
+  so are its `bitmaps` and `sized-chunks` (RUSTSEC-2026-0247/-0248/-0251).
+  These are not vulnerabilities. They are ignored in `deny.toml` with
+  reasons. Re-check on every Loro update and remove the ignores once Loro
+  moves off `im`. Our own code uses `imbl`.
 - **Opening a 10k-shape board takes 339 ms** on this VM (Loro import ~90 ms;
   building the view ~25 µs per node). Optimize in M2, when boards render:
   read nodes in bulk (`LoroTree::get_value_with_meta`) instead of key by
