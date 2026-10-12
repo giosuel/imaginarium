@@ -83,7 +83,7 @@ Spreadsheets (the model reserves room for them), a web editor (a WASM web
 | Document model | **Loro CRDT** + materialized `imbl` view model | 0009 |
 | Native format | `.imag`: encrypted, append-only object pack | 0010, [design](design/file-format.md) |
 | Interchange | DOCX/PPTX via `ooxmlsdk`, ODT/ODP via our own crate, PDF/SVG/PNG export | 0005 |
-| Security | XChaCha20-Poly1305, BLAKE3, Ed25519, HPKE, Argon2id, OPAQUE login | 0011 |
+| Security | XChaCha20-Poly1305, BLAKE3, hybrid PQ (X-Wing, Ed25519 + ML-DSA), Argon2id, OPAQUE login | 0011, 0016 |
 | Collaboration | `imaginarium-hub`: axum + SQLite/Postgres + FS/S3, zero-knowledge relay | 0012 |
 | AI | Capability traits + provider adapters (API, Ollama/llama.cpp, ComfyUI, sd.cpp, ONNX), MCP | 0013 |
 | Add-ons | WASM components (wasmtime, WIT) + declarative packages; AGPL-compatible only | 0006, 0008 |
@@ -372,14 +372,15 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | DOCX/PPTX fidelity | Preserve unknown XML, corpus testing, prioritize features by how often they appear |
 | Vello is pre-1.0 | CPU backend always working, pinned versions, upstream contact |
 
-## 14. Open questions
+## 14. Decisions log and open questions
 
-1. **Format defaults** (format design §11): should local files be plain by
-   default, are thumbnails opt-in, should the default history be 90 days,
-   and should the post-quantum suite be on from the first release?
-2. **CLA vs DCO.** A CLA keeps open the option of relicensing later (for
-   example for app stores). DCO is simpler and more contributor-friendly.
-3. **Phase C order.** Collaboration (M8) comes right after Documents, because
-   it is the business. Is that the order you want, or should presentations
-   come first?
-4. **Hub name.** Is "Imaginarium Hub" fine?
+Decided (2026-10-12):
+- Local files are plain by default, with an optional password or account
+  keys. History keeps 90 days plus named versions. Thumbnails are on.
+  Hybrid post-quantum crypto from the first release (ADR-0016).
+- Phase C order is confirmed: Documents → Collaboration → Presentations.
+
+Open:
+1. **CLA vs DCO.** Recommendation: CLA, to keep dual licensing and App
+   Store options open.
+2. **Hub name.** Is "Imaginarium Hub" fine?
