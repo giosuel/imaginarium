@@ -39,3 +39,7 @@ proptest.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "crypto"
+harness = false
