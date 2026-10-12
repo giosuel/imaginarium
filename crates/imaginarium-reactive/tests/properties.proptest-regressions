@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0bc2be31ea560ccc8eac19ecca9d22b907e0f9448095ae053055b4eb42dce60b # shrinks to (graph, writes) = (Graph { signals: 3, memos: [Sum { inputs: [Signal(0)], modulus: 2 }, Sum { inputs: [Signal(0)], modulus: 2 }, Sum { inputs: [Signal(0)], modulus: 2 }, Sum { inputs: [Signal(1)], modulus: 2 }, Sum { inputs: [Memo(1), Signal(0), Signal(2)], modulus: 4 }], effects: [[Signal(2), Signal(0)], [Signal(0), Signal(1)], [Signal(0), Signal(2), Memo(3)], [Memo(0), Memo(3), Signal(0)]] }, [[(1, 0)], [(0, 0)]])

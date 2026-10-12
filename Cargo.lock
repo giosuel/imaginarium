@@ -1054,6 +1054,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "imaginarium-reactive"
+version = "0.0.1"
+dependencies = [
+ "criterion",
+ "proptest",
+]
+
+[[package]]
 name = "imaginarium-settings"
 version = "0.0.1"
 dependencies = [
