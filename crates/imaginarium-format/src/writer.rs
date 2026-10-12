@@ -164,9 +164,11 @@ impl<F: Write + Seek + Durable> Writer<F> {
         Ok(location)
     }
 
-    /// Commits: writes the index record and the trailer, then syncs to
-    /// stable storage. Encrypted documents need `index_sealer` (the index
-    /// is encrypted under `K_content`, spec §9.1).
+    /// Commits: writes the index record, syncs, writes the trailer and syncs
+    /// again. The first sync keeps the trailer from reaching the disk before
+    /// the records it commits, so a crash never leaves a valid trailer over
+    /// missing data (spec §9.3). Encrypted documents need `index_sealer`
+    /// (the index is encrypted under `K_content`, spec §9.1).
     pub fn commit(&mut self, index_sealer: Option<&dyn RecordSealer>) -> Result<()> {
         self.commit_with_index_id(ObjectId::random()?, index_sealer)
     }
@@ -209,6 +211,8 @@ impl<F: Write + Seek + Durable> Writer<F> {
         };
         self.file.seek(SeekFrom::Start(self.end))?;
         self.file.write_all(&bytes)?;
+        self.file.flush()?;
+        self.file.sync()?;
         self.file.write_all(&trailer.encode())?;
         self.file.flush()?;
         let new_end = self.end + u64::from(index_len) + TRAILER_LEN as u64;

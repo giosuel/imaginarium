@@ -954,3 +954,63 @@ proptest! {
         let _ = Reader::open(Cursor::new(bytes));
     }
 }
+
+/// Storage that logs every write, sync and truncation.
+#[derive(Default)]
+struct Logged {
+    inner: Cursor<Vec<u8>>,
+    log: Vec<Op>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Op {
+    Write(usize),
+    Sync,
+    SetLen,
+}
+
+impl std::io::Write for Logged {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.log.push(Op::Write(buf.len()));
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl std::io::Seek for Logged {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl imaginarium_format::Durable for Logged {
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.log.push(Op::Sync);
+        Ok(())
+    }
+    fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+        self.log.push(Op::SetLen);
+        imaginarium_format::Durable::set_len(&mut self.inner, len)
+    }
+}
+
+#[test]
+fn a_commit_makes_its_records_durable_before_its_trailer() {
+    // If the trailer could reach the disk before the records it commits,
+    // a crash would leave a valid trailer over missing data (spec §9.3).
+    let mut writer = Writer::create(Logged::default(), FileHeader::new(DOC, false)).unwrap();
+    writer.append(&snap(1, b"state")).unwrap();
+    writer.commit(None).unwrap();
+    let log = writer.into_inner().log;
+    let trailer = log
+        .iter()
+        .rposition(|op| *op == Op::Write(imaginarium_format::TRAILER_LEN))
+        .expect("the trailer was written");
+    assert!(
+        log[..trailer].contains(&Op::Sync),
+        "no sync before the trailer: {log:?}"
+    );
+    assert_eq!(log.last(), Some(&Op::Sync), "the trailer itself is synced");
+}
