@@ -270,7 +270,13 @@ impl Record {
 /// byte past the limit.
 fn decompress_bounded(data: &[u8], plain_len: u64) -> Result<Vec<u8>> {
     use std::io::Read;
-    let decoder = zstd::stream::read::Decoder::new(data)
+    let mut decoder = zstd::stream::read::Decoder::new(data)
+        .map_err(|err| FormatError::Decompress(err.to_string()))?;
+    // A frame may ask for a window (up to 128 MiB by default) far larger
+    // than its content. Allow what the content needs, or 8 MiB, which
+    // covers what encoders use at their levels anyway.
+    decoder
+        .window_log_max(window_log_for(plain_len))
         .map_err(|err| FormatError::Decompress(err.to_string()))?;
     let mut out = Vec::with_capacity(usize::try_from(plain_len.min(1 << 20)).unwrap_or(0));
     decoder
@@ -280,11 +286,37 @@ fn decompress_bounded(data: &[u8], plain_len: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The zstd window log for content of `plain_len` bytes: enough to hold it,
+/// at least 2^23 (8 MiB), at most 2^31.
+fn window_log_for(plain_len: u64) -> u32 {
+    let needed = u64::BITS - plain_len.saturating_sub(1).leading_zeros();
+    needed.clamp(23, 31)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DOC: DocId = DocId([5; 16]);
+
+    #[test]
+    fn frames_may_not_ask_for_a_window_beyond_their_content() {
+        use std::io::Write;
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        encoder.include_contentsize(false).unwrap();
+        encoder.window_log(27).unwrap();
+        encoder.write_all(b"tiny").unwrap();
+        let frame = encoder.finish().unwrap();
+        assert!(
+            decompress_bounded(&frame, 4).is_err(),
+            "a 128 MiB window for 4 bytes"
+        );
+        let normal = zstd::bulk::compress(b"tiny", 3).unwrap();
+        assert_eq!(decompress_bounded(&normal, 4).unwrap(), b"tiny");
+        assert_eq!(window_log_for(0), 23);
+        assert_eq!(window_log_for(1 << 30), 30);
+        assert_eq!(window_log_for((1 << 30) + 1), 31);
+    }
 
     /// Toy "cipher" for tests: XOR with a byte, and the AAD must match on
     /// open (tests the plumbing, not crypto).

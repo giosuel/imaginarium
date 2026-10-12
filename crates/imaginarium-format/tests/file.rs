@@ -1049,3 +1049,76 @@ fn a_commit_makes_its_records_durable_before_its_trailer() {
     );
     assert_eq!(log.last(), Some(&Op::Sync), "the trailer itself is synced");
 }
+
+#[test]
+fn the_writer_keeps_to_the_limits_readers_rely_on() {
+    // Spec §4.6: writers MUST NOT exceed the limits. Otherwise the file
+    // holds records its own reader rejects.
+    let mut writer = Writer::create(Cursor::new(Vec::new()), FileHeader::new(DOC, false)).unwrap();
+    let huge_header = RecordBuilder::new(RecordType(0x4001), id(1))
+        .extension_id("x".repeat(70_000))
+        .flags(RecordFlags::SAFE_TO_COPY)
+        .build(&DOC, vec![1], None)
+        .unwrap();
+    assert!(writer.append(&huge_header).is_err());
+    let huge_signature = RecordBuilder::new(RecordType::UPDT, id(2))
+        .stream(pb::Stream::Main)
+        .codec("loro-1")
+        .will_be_signed()
+        .build(&DOC, vec![1], None)
+        .unwrap()
+        .with_signature(vec![0; 20_000]);
+    assert!(writer.append(&huge_signature).is_err());
+    // Blobs over 1 MiB must be segmented (spec §5.3).
+    let big_blob = RecordBuilder::new(RecordType::BLOB, id(3))
+        .build(
+            &DOC,
+            vec![0; imaginarium_format::SEGMENT_THRESHOLD + 1],
+            None,
+        )
+        .unwrap();
+    assert!(writer.append(&big_blob).is_err());
+    let blob = RecordBuilder::new(RecordType::BLOB, id(4))
+        .build(&DOC, vec![0; imaginarium_format::SEGMENT_THRESHOLD], None)
+        .unwrap();
+    writer.append(&blob).unwrap();
+}
+
+#[test]
+fn compaction_treats_reserved_flag_bits_as_unknown_and_writes_its_own_header() {
+    // A newer writer's file: minor 9, an ignorable header flag, and a head
+    // SNAP with reserved flag bit 6 (spec §4.3: a record of unknown type,
+    // here not SAFE_TO_COPY, so compaction drops it).
+    let mut header = FileHeader::new(DOC, false);
+    header.minor = 9;
+    header.flags |= 1 << 20;
+    let mut writer = Writer::create(Cursor::new(Vec::new()), header).unwrap();
+    let future = RecordBuilder::new(RecordType::SNAP, id(7))
+        .stream(pb::Stream::Main)
+        .codec("loro-1")
+        .flags(RecordFlags(0x40))
+        .build(&DOC, b"future".to_vec(), None)
+        .unwrap();
+    writer.append(&meta(1)).unwrap();
+    writer.append(&future).unwrap();
+    writer.commit(None).unwrap();
+    let bytes = writer.into_inner().into_inner();
+    let written = FileHeader::decode(&bytes[..HEADER_LEN]).unwrap();
+    assert_eq!(
+        (written.minor, written.flags),
+        (imaginarium_format::MINOR, 0),
+        "writers write their own minor and zero ignorable flags (spec §4.1)"
+    );
+
+    let mut reader = open(bytes);
+    let (out, report) = compact(
+        &mut reader,
+        Cursor::new(Vec::new()),
+        CompactionPlan::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.dropped_unknown, vec![RecordType::SNAP.0]);
+    let compacted = open(out.into_inner().into_inner());
+    assert_eq!(compacted.index().entries().len(), 1, "only META");
+}

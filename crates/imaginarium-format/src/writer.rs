@@ -90,7 +90,17 @@ pub struct Writer<F> {
 impl<F: Write + Seek + Durable> Writer<F> {
     /// Starts a new file: writes the header at offset 0. The storage should
     /// be empty (e.g. a newly created file).
+    ///
+    /// The header written is this implementation's: its minor version, and
+    /// only the flags it knows (spec §4.1: writers write 0 for the ignorable
+    /// bits). A header copied from a newer file doesn't claim more than this
+    /// writer produces.
     pub fn create(mut file: F, header: FileHeader) -> Result<Self> {
+        let header = FileHeader {
+            minor: crate::header::MINOR,
+            flags: header.flags & crate::header::FLAG_ENCRYPTED,
+            ..header
+        };
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&header.encode())?;
         Ok(Self {
@@ -150,6 +160,7 @@ impl<F: Write + Seek + Durable> Writer<F> {
                 "record has the SIGNED flag but no signature".into(),
             ));
         }
+        check_limits(record)?;
         self.check_encryption(record)?;
         let bytes = record.encode();
         self.file.seek(SeekFrom::Start(self.end))?;
@@ -239,4 +250,34 @@ impl<F: Write + Seek + Durable> Writer<F> {
             None => Ok(()),
         }
     }
+}
+
+/// Spec §4.6 and §5.3: writers MUST NOT exceed what readers must support,
+/// or the file holds records its own reader rejects.
+fn check_limits(record: &Record) -> Result<()> {
+    use crate::record::{Limits, RecordFlags};
+    let limits = Limits::default();
+    let over = |what: &'static str, value: u64, limit: u64| {
+        (value > limit).then_some(FormatError::Limit { what, value, limit })
+    };
+    let header = record.header();
+    let segment_limit = if record.flags().contains(RecordFlags::SEGMENTED) {
+        crate::SEGMENT_LEN as u64
+    } else if record.rtype() == RecordType::BLOB {
+        crate::SEGMENT_THRESHOLD as u64 // larger blobs are segmented
+    } else {
+        limits.max_payload
+    };
+    let problem = over(
+        "hlen",
+        record.header_bytes().len() as u64,
+        limits.max_header,
+    )
+    .or_else(|| over("plen", record.payload().len() as u64, limits.max_payload))
+    .or_else(|| over("plain_len", header.plain_len, segment_limit))
+    .or_else(|| {
+        let signature = record.signature_bytes().map_or(0, <[u8]>::len);
+        over("slen", signature as u64, limits.max_signature)
+    });
+    problem.map_or(Ok(()), Err)
 }

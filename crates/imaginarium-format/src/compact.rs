@@ -7,14 +7,13 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::atomic::AtomicFile;
-use crate::header::FileHeader;
 use crate::index::StreamKey;
 use crate::payload::RecordSealer;
 use crate::pb;
 use crate::reader::{KeyProvider, OpenOptions};
 use crate::record::{Record, RecordFlags, RecordType};
 use crate::writer::Durable;
-use crate::{Reader, Result, Writer};
+use crate::{FormatError, Reader, Result, Writer};
 
 /// Decides whether a record is kept during compaction.
 pub type KeepFn = Box<dyn Fn(&pb::IndexEntry) -> bool>;
@@ -64,8 +63,7 @@ where
     F: Read + Seek,
     G: Write + Seek + Durable,
 {
-    let header = FileHeader { ..*reader.header() };
-    let mut writer = Writer::create(out, header)?;
+    let mut writer = Writer::create(out, *reader.header())?;
     let mut report = CompactionReport::default();
 
     let entries = reader.index().entries().to_vec();
@@ -95,7 +93,13 @@ where
         .collect();
 
     for entry in &entries {
-        let rtype = RecordType(entry.rtype);
+        let flags = RecordFlags(u8::try_from(entry.rflags).unwrap_or(0xFF));
+        // Reserved flag bits make a record one of unknown type (spec §4.3).
+        let rtype = if flags.has_reserved() {
+            RecordType(u32::MAX)
+        } else {
+            RecordType(entry.rtype)
+        };
         let keep_by_policy = match rtype {
             RecordType::META => Some(entry.offset) == latest_meta,
             RecordType::THMB => Some(entry.offset) == latest_thumbnail,
@@ -106,7 +110,6 @@ where
             | RecordType::VERS
             | RecordType::DERV => true,
             _ => {
-                let flags = RecordFlags(u8::try_from(entry.rflags).unwrap_or(0));
                 if !flags.contains(RecordFlags::SAFE_TO_COPY) {
                     report.dropped_unknown.push(entry.rtype);
                 }
@@ -116,6 +119,13 @@ where
         let vetoed = plan.keep.as_ref().is_some_and(|keep| !keep(entry));
         if keep_by_policy && !vetoed {
             let record = reader.read_record(entry)?;
+            // The decision used the index's copy of the flags.
+            if u32::from(record.flags().0) != entry.rflags {
+                return Err(FormatError::Invalid(format!(
+                    "index entry at {} has other flags than its record",
+                    entry.offset
+                )));
+            }
             writer.append(&record)?;
             report.kept += 1;
         } else {
