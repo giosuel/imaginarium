@@ -40,7 +40,7 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 | `color` | `string`: `#RRGGBB` or `#RRGGBBAA`, sRGB, lowercase or uppercase hex |
 | `length` | `number` in **points** (1 pt = 1/72 inch). Views choose the zoom. |
 | `angle` | `number` in degrees, clockwise |
-| `NodeId` | Loro `TreeID` of the node. Its text form is `counter@peer` (decimal), e.g. `12@1234567890`. |
+| `NodeId` | A node's identity (§5.5): 16 lowercase hex characters (64 random bits), stored in the node's `id` key. For nodes without a usable `id`, the node's Loro `TreeID`, written `counter@peer` in decimal (e.g. `12@1234567890`). |
 | `StyleId` | `string`. Generated ids are 32 lowercase hex characters (128 random bits). Names starting with `builtin:` are reserved for built-in styles. |
 | `BlobId` | `string`: the 64 lowercase hex characters of the blob's `ObjectId` (spec §5.2) |
 | `Timestamp` | `int`: Unix time in milliseconds |
@@ -64,6 +64,20 @@ A `main` stream document (spec §3.2) has these root containers:
 Other root containers MUST be preserved and MUST NOT be created, except by
 a later schema version.
 
+**Child containers under map keys** are Loro *mergeable* containers
+(`ensure_mergeable_*`), so peers that create one concurrently get the same
+container and their first edits merge:
+- a node's `g`, `s`, `t`, `a` and `x`;
+- `meta.required_features`;
+- each entry of `assets`.
+
+Exceptions: `gen` (§5.4) and the entries of `styles` (§8) are regular
+containers. A new `gen` replaces the old one as a whole, and each style is
+created once, under a random id.
+
+Mergeable containers need Loro 1.13.1 or later. Readers of `loro-1` (spec
+§3.1) MUST support them.
+
 ## 4. `meta`
 
 | Key | Type | Meaning |
@@ -82,6 +96,7 @@ Each node of the `nodes` tree has a meta map with these keys:
 
 | Key | Type | Meaning |
 |---|---|---|
+| `id` | `string` | **Required.** The node's identity (§5.5), 16 lowercase hex characters. Set at creation, never changed. |
 | `k` | `string` | **Required.** The node kind (§5.1). |
 | `g` | Map | Geometry (§5.2). Nodes that a view lays out itself, such as document paragraphs, omit it. |
 | `s` | Map | Style: `id` (a `StyleId`) plus local overrides of style properties (§8). |
@@ -146,6 +161,23 @@ and attributed (design §3.5).
 | `mask` | `BlobId` |
 | `created_by` | `string`: the actor (§11) |
 | `created` | `Timestamp` |
+
+### 5.5 Identity
+
+References between nodes (connector endpoints, comment anchors, `gen`
+inputs, add-on data) use `NodeId`s, never Loro tree ids. Loro's undo
+re-creates a deleted subtree under **new** tree ids, with the old meta
+maps, so only the stored `id` survives undo and redo.
+
+- Writers generate `id` from 64 random bits when they create a node, and
+  generate new ids when they paste or duplicate nodes.
+- A node without a valid `id` (a missing value, or anything but 16
+  lowercase hex characters) is identified by its tree id.
+- Should two live nodes have the same `id` (for example after two peers
+  concurrently undid the same deletion), the one with the smaller tree id
+  (by peer, then counter) keeps it. The other is identified by its tree
+  id. Every peer derives the same identities, and no repair write is
+  needed.
 
 ## 6. Text
 

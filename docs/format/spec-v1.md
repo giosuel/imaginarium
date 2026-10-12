@@ -52,7 +52,7 @@ can move between files and servers unchanged.
 
 | Codec id | Meaning |
 |---|---|
-| `loro-1` | [Loro](https://loro.dev) 1.x snapshot (`ExportMode::Snapshot` or `ShallowSnapshot`) or update encoding |
+| `loro-1` | [Loro](https://loro.dev) 1.x snapshot (`ExportMode::Snapshot` or `ShallowSnapshot`) or update encoding. Documents use mergeable child containers, so readers need Loro 1.13.1 or later (schema-v1.md §3). |
 
 A reader that doesn't support a record's codec MUST treat the stream as
 unreadable (§10.2). The document schema on top of the codec (containers,

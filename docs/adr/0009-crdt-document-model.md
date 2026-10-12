@@ -26,6 +26,23 @@ authority.
 - Benchmark against Yrs and Automerge on our workloads in M1 before
   freezing this choice.
 
+## Refinements (M1.6, 2026-10-12)
+
+Found while implementing `imaginarium-model`. See `docs/format/schema-v1.md`.
+- **Actors are told apart by commit metadata, not peer ids.**
+  - Each transaction records its actor (`user`, `ai:<session>`,
+    `addon:<id>`, `migration`) as the Loro commit message, so attribution
+    survives in the history.
+  - The user and the assistant have separate undo stacks, which exclude
+    each other's commit origins.
+  - Switching peer ids within one document would break Loro's undo and
+    counters. One random peer id per session is safe.
+- **Node identity doesn't come from Loro.** Loro's undo re-creates deleted
+  nodes under new tree ids, which would silently break every reference
+  across undo and redo. Nodes therefore carry a stable random `id`.
+- **Child containers are mergeable** (Loro ≥ 1.13.1), so concurrent first
+  edits of a node's style, text or geometry share one container.
+
 ## Consequences
 - No migration is needed when collaboration ships.
 - Holding both the CRDT and the view model costs memory. This is measured in M1.
