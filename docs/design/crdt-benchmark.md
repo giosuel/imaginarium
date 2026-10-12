@@ -216,15 +216,34 @@ only library that meets the hard requirements, and it meets every budget
 with a wide margin. Yrs remains the fallback; the `loro-1` codec id in the
 format (§3.1) keeps a migration possible.
 
-Follow-ups for M1.6 (`imaginarium-model`):
+Follow-ups for M1.6 (`imaginarium-model`), with their status after M1.6:
 
 1. Apply remote updates on the worker pool, batched per frame. Show
    progress for large offline merges (tens of ms).
+
+   *Status:* the model applies updates in batches
+   (`Document::apply_remote`), and the threading belongs to the app (M2).
 2. After large imports, measure whether `compact_change_store` or
    `free_history_cache` give back the extra ~20 MiB of history caches.
+
+   *Status:* measured. After building the 10k-shape board,
+   `Document::compact_memory` frees 10 MiB (52.6 → 42.6 MiB). A reopened
+   document needs 30.6 MiB.
 3. Use shallow snapshots for compaction under the ADR-0016 retention
    policy.
+
+   *Status:* `Document::export_shallow` exists. The retention policy comes
+   with history (M5/M8).
 4. Track snapshot sizes on realistic documents. Keep zstd on `SNAP`
    records, since it still saves about 25 % on Loro snapshots.
+
+   *Status:* the model benchmark reports sizes: the board is 2.8 MiB
+   (1.6 MiB shallow), and the 300-page document 0.7 MiB (0.4 MiB).
+   - Stable node ids cost 9 bytes per node.
+   - Mergeable containers cost about 9 % of history, but nothing in
+     shallow snapshots.
 5. Move this benchmark's Loro workloads into criterion benches of the model
    crate, so CI catches regressions against these numbers.
+
+   *Status:* done (`cargo bench -p imaginarium-model`). CI regression
+   gates come in M2.

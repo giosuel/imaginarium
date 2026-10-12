@@ -54,6 +54,7 @@ input ─► command ─► CRDT transaction ─► Loro document ─► diff ev
 | `imaginarium-commands` | Command registry, AI tool bridge, keymaps, palette search |
 | `imaginarium-format` | The `.imag` container (spec v1): records, index, saving, crash recovery, compaction. Fuzzed. Encryption hooks for `imaginarium-crypto`. |
 | `imaginarium-crypto` | End-to-end encryption for `.imag` (spec v1 §6–§8): XChaCha20-Poly1305 records and STREAM blobs, keyrings (Argon2id passwords, post-quantum X-Wing HPKE, folder and link keys), Ed25519 and hybrid Ed25519 + ML-DSA-65 signatures, and the ACL chain |
+| `imaginarium-model` | The document model (schema v1) on the Loro CRDT: typed transactions, an incremental view model for lock-free readers, change sets for fine-grained UI updates, undo per actor (user, assistant), migrations |
 | `imaginarium-app` | Stub binary |
 
 The rest of the layer map is planned; see the

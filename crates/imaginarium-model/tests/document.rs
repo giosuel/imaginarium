@@ -549,3 +549,16 @@ fn undo_and_redo_keep_node_identity_and_references() {
     let peer = open(&doc.export_snapshot().unwrap());
     assert_eq!(peer.view(), doc.view());
 }
+
+#[test]
+fn views_can_go_to_other_threads_and_documents_can_move() {
+    fn send_sync<T: Send + Sync>() {}
+    fn send<T: Send>() {}
+    send_sync::<imaginarium_model::DocumentView>();
+    send_sync::<imaginarium_model::ChangeSet>();
+    send::<Document>();
+    let doc = board();
+    let view = doc.view().clone();
+    let count = std::thread::spawn(move || view.node_count()).join().unwrap();
+    assert_eq!(count, 0);
+}
