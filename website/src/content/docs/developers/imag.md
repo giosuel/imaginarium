@@ -51,18 +51,26 @@ read from the process list.
 |---|---|
 | `--password-stdin` | Reads the password from the first line of standard input, for example `imag verify --password-stdin doc.imag < pw.txt`. |
 | `--password-env VAR` | Reads the password from the environment variable `VAR`. |
-| `--key-file FILE` | A device's or user's X-Wing private key: 64 hex characters, as exported by Imaginarium. Used for shared documents. |
+| `--key-file FILE` | A device's or user's X-Wing private key: 64 hex characters, as exported by Imaginarium. Used for shared documents and documents protected with account keys. |
+| `--owner KEYID` | With `--key-file`: the key id (32 hex characters) of the identity that must have started the document's ACL chain. |
+
+Anyone can wrap a key to your public key, so a recipient key alone doesn't
+prove where a document came from. Only its ACL chain, started by an owner
+you trust, does (spec §6.4.2). Without `--owner`, `imag` accepts a chain
+started by anyone. `verify` then shows a warning that names the owner, and
+`export-json` prints the same warning to standard error. Pass `--owner`
+once you know whose document it should be.
 
 ## Example
 
 ```text
-$ imag verify --key-file owner.key 10a-acl-chain.imag
+$ imag verify --key-file owner.key --owner OWNER-KEY-ID 10a-acl-chain.imag
 imag verify 10a-acl-chain.imag
   ok    records      11 records, all checksums valid
   ok    container    trailer and index valid, 10 entries
   ok    contents     10 records read (3 decrypted)
   ok    blobs        none
-  ok    signatures   ACL chain valid (5 changes, 1 members, epoch 2); 4 records verified
+  ok    signatures   ACL chain valid (5 changes, 1 members, epoch 2, started by OWNER-KEY-ID); 4 records verified
   FAIL  document     can't decode the document: …
 Result: 1 problem found
 ```

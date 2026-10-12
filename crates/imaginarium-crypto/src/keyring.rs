@@ -350,17 +350,30 @@ pub fn keyring_record(
 /// §6.4, §7.3). Otherwise whoever can append to the file (a Hub, say) could
 /// slip in a key it knows for a new epoch.
 pub fn keyrings(doc_id: &DocId, key_records: &[Record]) -> Result<Vec<pb::Keyring>> {
+    let acl = acl_of(doc_id, key_records)?;
+    decode_keyrings(doc_id, key_records, acl.as_ref())
+}
+
+/// The replayed ACL chain among a document's key records, if it has one.
+fn acl_of(doc_id: &DocId, key_records: &[Record]) -> Result<Option<AclState>> {
     let has_acl = key_records
         .iter()
         .any(|record| record.rtype() == RecordType::ACLC);
-    let acl = has_acl
+    has_acl
         .then(|| AclState::replay(doc_id, key_records))
-        .transpose()?;
+        .transpose()
+}
+
+fn decode_keyrings(
+    doc_id: &DocId,
+    key_records: &[Record],
+    acl: Option<&AclState>,
+) -> Result<Vec<pb::Keyring>> {
     key_records
         .iter()
         .filter(|record| record.rtype() == RecordType::KEYR)
         .map(|record| {
-            if let Some(acl) = &acl {
+            if let Some(acl) = acl {
                 acl.verify_keyring(record)?;
             }
             if record.flags().contains(RecordFlags::ENCRYPTED) {
@@ -398,7 +411,8 @@ impl KeyProvider for PasswordKeys {
         key_records: &[Record],
     ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
         let password = self.password.clone();
-        unlock(header, key_records, |epoch, wrap| {
+        let keyrings = keyrings(&header.doc_id, key_records)?;
+        unlock(keyrings, |epoch, wrap| {
             (wrap.kind() == pb::WrapKind::Password)
                 .then(|| unwrap_password(&header.doc_id, epoch, wrap, &password))
         })
@@ -439,7 +453,7 @@ impl KeyProvider for SharedKeys {
         header: &FileHeader,
         key_records: &[Record],
     ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
-        unlock(header, key_records, |epoch, wrap| {
+        unlock(keyrings(&header.doc_id, key_records)?, |epoch, wrap| {
             (wrap.kind() == self.kind && wrap.recipient_id == self.recipient_id)
                 .then(|| unwrap_with_key(&header.doc_id, epoch, wrap, &self.key))
         })
@@ -477,14 +491,39 @@ impl KeyProvider for KnownKeys {
 }
 
 /// Unlocks documents with a device's or user's X-Wing key ([`KeyProvider`]).
+///
+/// Anyone can wrap a key to a public key. Recipient wraps therefore count
+/// only in documents with an ACL chain whose `Genesis` was signed by the
+/// expected owner, and only from keyrings that chain authorizes (spec
+/// §6.4.2, ADR-0018). Otherwise whoever can write to the file could remove
+/// or replace the chain and wrap a key they know.
 pub struct RecipientKeys {
     keypair: XWingKeyPair,
+    /// `None` accepts any owner (inspection tools only).
+    owner: Option<KeyId>,
 }
 
 impl RecipientKeys {
-    /// Uses `keypair` for HPKE wraps addressed to it.
-    pub fn new(keypair: XWingKeyPair) -> Self {
-        Self { keypair }
+    /// Uses `keypair` for HPKE wraps addressed to it, in documents whose ACL
+    /// chain `owner` started: the user's own identity for files protected
+    /// with account keys, or the owner named by the invitation for shared
+    /// documents ([`AclState::genesis_owner`]).
+    pub fn new(keypair: XWingKeyPair, owner: KeyId) -> Self {
+        Self {
+            keypair,
+            owner: Some(owner),
+        }
+    }
+
+    /// Like [`RecipientKeys::new`], but accepts a chain started by anyone.
+    /// That proves nothing about who made the document, so this is only for
+    /// tools that show the owner instead of trusting it, such as
+    /// `imag verify`.
+    pub fn trusting_any_owner(keypair: XWingKeyPair) -> Self {
+        Self {
+            keypair,
+            owner: None,
+        }
     }
 }
 
@@ -494,8 +533,25 @@ impl KeyProvider for RecipientKeys {
         header: &FileHeader,
         key_records: &[Record],
     ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
+        let acl = acl_of(&header.doc_id, key_records)?.ok_or_else(|| {
+            CryptoError::Acl(
+                "recipient keys need an ACL chain: without one, anyone could have \
+                 wrapped the key (spec §6.4.2)"
+                    .into(),
+            )
+        })?;
+        if let Some(owner) = self.owner
+            && acl.genesis_owner() != owner
+        {
+            return Err(CryptoError::Acl(format!(
+                "the chain was started by {:?}, not by the expected owner {owner:?}",
+                acl.genesis_owner()
+            ))
+            .into());
+        }
         let own_id = self.keypair.recipient_id();
-        unlock(header, key_records, |epoch, wrap| {
+        let keyrings = decode_keyrings(&header.doc_id, key_records, Some(&acl))?;
+        unlock(keyrings, |epoch, wrap| {
             (wrap.kind() == pb::WrapKind::Hpke && wrap.recipient_id == own_id.0)
                 .then(|| unwrap_hpke(&header.doc_id, epoch, wrap, &self.keypair))
         })
@@ -506,13 +562,12 @@ impl KeyProvider for RecipientKeys {
 /// least one. Wraps the credential doesn't address return `None`. Failures
 /// of addressed wraps (wrong password) are errors.
 fn unlock(
-    header: &FileHeader,
-    key_records: &[Record],
+    keyrings: Vec<pb::Keyring>,
     mut try_unwrap: impl FnMut(u32, &pb::KeyWrap) -> Option<Result<EpochKey>>,
 ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
     let mut keys = EpochKeys::new();
     let mut last_error = None;
-    for keyring in keyrings(&header.doc_id, key_records)? {
+    for keyring in keyrings {
         for epoch in &keyring.epochs {
             for wrap in &epoch.wraps {
                 match try_unwrap(epoch.epoch, wrap) {
@@ -684,16 +739,16 @@ mod tests {
                 .opener(&header, std::slice::from_ref(&record))
                 .is_err()
         );
+        // Recipient wraps need an ACL chain (ADR-0018). This keyring has
+        // none, so even the addressed device doesn't open it. The ACL tests
+        // cover the accepted case.
         assert!(
-            RecipientKeys::new(device)
-                .opener(&header, std::slice::from_ref(&record))
-                .is_ok()
-        );
-        let stranger = XWingKeyPair::generate(&mut OsRandomness).unwrap();
-        assert!(
-            RecipientKeys::new(stranger)
+            RecipientKeys::trusting_any_owner(device)
                 .opener(&header, &[record])
-                .is_err()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("need an ACL chain")
         );
     }
 }

@@ -30,7 +30,7 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use imaginarium_crypto::{
-    AclState, Argon2Config, EpochKey, OsRandomness, PasswordKeys, Randomness, RecipientKeys,
+    AclState, Argon2Config, EpochKey, KeyId, OsRandomness, PasswordKeys, Randomness, RecipientKeys,
     Suite1Sealer, XWingKeyPair, keyring_record, wrap_password,
 };
 use imaginarium_format::{
@@ -47,8 +47,18 @@ pub enum Credentials {
     None,
     /// A password (password keyring wraps).
     Password(Zeroizing<String>),
-    /// A device's or user's X-Wing key pair (HPKE wraps).
-    Recipient(XWingKeyPair),
+    /// A device's or user's X-Wing key pair (HPKE wraps), for documents
+    /// whose ACL chain `owner` started (ADR-0018).
+    Recipient {
+        /// The key pair.
+        keypair: XWingKeyPair,
+        /// The identity expected to have signed the chain's `Genesis`: the
+        /// user's own for account-key files, the inviting owner for shared
+        /// documents. `None` accepts any owner, which proves nothing about
+        /// who made the document; only inspection tools that show the owner
+        /// instead ([`AclState::genesis_owner`]) use it.
+        owner: Option<KeyId>,
+    },
 }
 
 /// An opened document file.
@@ -95,8 +105,12 @@ pub fn open_reader<F: Read + Seek>(file: F, credentials: Credentials) -> Result<
         Credentials::Password(password) => {
             Reader::open_with(file, options, Some(&mut PasswordKeys::new(&password)))?
         }
-        Credentials::Recipient(pair) => {
-            Reader::open_with(file, options, Some(&mut RecipientKeys::new(pair)))?
+        Credentials::Recipient { keypair, owner } => {
+            let mut keys = match owner {
+                Some(owner) => RecipientKeys::new(keypair, owner),
+                None => RecipientKeys::trusting_any_owner(keypair),
+            };
+            Reader::open_with(file, options, Some(&mut keys))?
         }
     })
 }

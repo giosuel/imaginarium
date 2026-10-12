@@ -194,7 +194,10 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
             },
         )?;
     } else {
-        report.check("signatures", check_acl(&doc_id, &chain, &indexed))?;
+        report.check(
+            "signatures",
+            check_acl(&doc_id, &chain, &indexed, keys.owner_unchecked()),
+        )?;
     }
 
     // 6. The document itself.
@@ -226,8 +229,16 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
     finish(report)
 }
 
-/// Replays the chain and checks every keyring and content signature.
-fn check_acl(doc_id: &imaginarium_format::DocId, chain: &[Record], records: &[Record]) -> Outcome {
+/// Replays the chain and checks every keyring and content signature. With
+/// `owner_unchecked` (a recipient key without `--owner`), nothing showed
+/// that the chain is the document's real one, so a valid chain is a warning
+/// that names its owner (ADR-0018).
+fn check_acl(
+    doc_id: &imaginarium_format::DocId,
+    chain: &[Record],
+    records: &[Record],
+    owner_unchecked: bool,
+) -> Outcome {
     let acl = match AclState::replay(doc_id, chain) {
         Ok(acl) => acl,
         Err(err) => return Outcome::Fail(format!("ACL chain: {err}")),
@@ -249,16 +260,27 @@ fn check_acl(doc_id: &imaginarium_format::DocId, chain: &[Record], records: &[Re
             }
         }
     }
-    if problems.is_empty() {
-        Outcome::Ok(format!(
-            "ACL chain valid ({} changes, {} members, epoch {}); {verified} records verified",
-            acl.next_index(),
-            acl.members().len(),
-            acl.epoch()
+    let owner = hex(&acl.genesis_owner().0);
+    let summary = format!(
+        "ACL chain valid ({} changes, {} members, epoch {}, started by {owner}); \
+         {verified} records verified",
+        acl.next_index(),
+        acl.members().len(),
+        acl.epoch()
+    );
+    if !problems.is_empty() {
+        Outcome::Fail(summarize(&problems))
+    } else if owner_unchecked {
+        Outcome::Warn(format!(
+            "{summary}, but the owner wasn't checked: pass --owner {owner} if you trust it"
         ))
     } else {
-        Outcome::Fail(summarize(&problems))
+        Outcome::Ok(summary)
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn summarize(problems: &[String]) -> String {

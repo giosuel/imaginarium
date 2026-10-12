@@ -14,6 +14,20 @@ use crate::keys::KeyArgs;
 pub(crate) fn run(path: &Path, keys: &KeyArgs, compact: bool, out: &mut dyn Write) -> Result<()> {
     let opened = imaginarium_io_native::open_path(path, keys.credentials()?)
         .with_context(|| format!("opening {}", path.display()))?;
+    if keys.owner_unchecked()
+        && let Some(acl) = &opened.acl
+    {
+        let owner: String = acl
+            .genesis_owner()
+            .0
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        eprintln!(
+            "warning: the document's owner wasn't checked; its ACL chain was started by \
+             {owner} (pass --owner {owner} if you trust it)"
+        );
+    }
     let value = json!({
         "doc_id": opened.header.doc_id.to_string(),
         "encrypted": opened.header.is_encrypted(),

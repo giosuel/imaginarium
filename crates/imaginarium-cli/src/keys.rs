@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use imaginarium_crypto::XWingKeyPair;
+use imaginarium_crypto::{KeyId, XWingKeyPair};
 use imaginarium_io_native::Credentials;
 use zeroize::Zeroizing;
 
@@ -25,12 +25,23 @@ pub(crate) struct KeyArgs {
     /// exported by Imaginarium).
     #[arg(long, value_name = "FILE")]
     pub key_file: Option<PathBuf>,
+    /// With --key-file: the key id (32 hex characters) of the identity that
+    /// must have started the document's ACL chain. Without it, any owner is
+    /// accepted, and `verify` shows who it was.
+    #[arg(long, value_name = "KEYID", requires = "key_file")]
+    pub owner: Option<String>,
 }
 
 impl KeyArgs {
     /// Whether any credential was given.
     pub(crate) fn given(&self) -> bool {
         self.password_stdin || self.password_env.is_some() || self.key_file.is_some()
+    }
+
+    /// Whether a recipient key is used without an expected owner, so the
+    /// document's origin isn't checked (ADR-0018).
+    pub(crate) fn owner_unchecked(&self) -> bool {
+        self.key_file.is_some() && self.owner.is_none()
     }
 
     /// The credentials. Reads stdin or the key file once.
@@ -58,9 +69,18 @@ impl KeyArgs {
                 decode_hex(text.trim())
                     .with_context(|| format!("{} isn't a hex key", path.display()))?,
             );
-            let pair =
+            let keypair =
                 XWingKeyPair::from_private_bytes(&bytes).context("not an X-Wing private key")?;
-            return Ok(Credentials::Recipient(pair));
+            let owner = match &self.owner {
+                Some(text) => Some(
+                    decode_hex(text)
+                        .ok()
+                        .and_then(|bytes| KeyId::from_slice(&bytes))
+                        .context("--owner takes a key id of 32 hex characters")?,
+                ),
+                None => None,
+            };
+            return Ok(Credentials::Recipient { keypair, owner });
         }
         Ok(Credentials::None)
     }

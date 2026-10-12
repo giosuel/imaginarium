@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use imaginarium_crypto::{Argon2Config, XWingKeyPair};
+use imaginarium_crypto::{Argon2Config, IdentityKey, XWingKeyPair};
 use imaginarium_io_native::{Protection, SaveOptions, save_new_path};
 use imaginarium_model::{Actor, Document, DocumentKind, NodeKind, Parent};
 use zeroize::Zeroizing;
@@ -232,14 +232,46 @@ fn verify_checks_the_acl_chain_of_the_test_vectors() {
         None,
         &[],
     );
+    // Identity seeds 0x10… and 0x11… (same README).
+    let owner_id: String = IdentityKey::from_seeds(&[0x10; 32], &[0x11; 32])
+        .public()
+        .key_id()
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let summary = format!("ACL chain valid (5 changes, 1 members, epoch 2, started by {owner_id})");
+    assert!(out.stdout.contains(&summary), "{}", out.stdout);
+    // Without --owner, nothing shows the chain is the document's real one
+    // (ADR-0018): a warning that names the owner.
+    assert!(out.stdout.contains("warn  signatures"), "{}", out.stdout);
     assert!(
-        out.stdout
-            .contains("ACL chain valid (5 changes, 1 members, epoch 2)"),
+        out.stdout.contains(&format!("pass --owner {owner_id}")),
         "{}",
         out.stdout
     );
     // The vectors hold placeholder bytes, not real Loro data: the document check fails.
     assert!(out.stdout.contains("FAIL  document"), "{}", out.stdout);
+
+    let vector_10a = vector("10a-acl-chain.imag");
+    let args = |owner: &str| {
+        [
+            "verify",
+            "--key-file",
+            s(&key_file),
+            "--owner",
+            owner,
+            s(&vector_10a),
+        ]
+        .map(str::to_owned)
+    };
+    let pinned = args(&owner_id);
+    let out = imag(&pinned.each_ref().map(String::as_str), None, &[]);
+    assert!(out.stdout.contains("ok    signatures"), "{}", out.stdout);
+    let wrong = args(&"ab".repeat(16));
+    let out = imag(&wrong.each_ref().map(String::as_str), None, &[]);
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains("expected owner"), "{}", out.stdout);
 
     let out = imag(
         &[
