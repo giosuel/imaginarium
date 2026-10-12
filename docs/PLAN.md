@@ -109,6 +109,7 @@ about UI, networking or AI.
  toolkit     ui · reactive · render · text
  core        model (Loro + view model) · commands · format · crypto · protocol
  support     profiling · test-utils · addon-api (public, semver-stable)
+ tooling     xtask (repo automation, never a dependency of product crates)
 ```
 
 | Crate | Responsibility |

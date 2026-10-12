@@ -101,16 +101,27 @@ session must be able to continue from `STATUS.md` alone.
 
 ## Build and check commands
 
-The workspace is created in M0 step 1; update this section when it exists.
+The toolchain is pinned in `rust-toolchain.toml`, and rustup installs it
+automatically on first use.
 
 ```sh
-cargo build --workspace
+cargo build --workspace                                   # debug build
+cargo run -p imaginarium-app                              # run the app (binary: `imaginarium`)
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo deny check            # licenses (AGPL-compatible) + advisories
-cargo xtask check-layers    # layering + SPDX header check (added in M0)
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo xtask help                                          # list repo automation tasks
+cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
+
+Not available yet:
+- `cargo xtask check-layers` (layering and SPDX header check) arrives in M0.2.
+- `cargo deny check` arrives with CI in M0.3 (`cargo install --locked cargo-deny`).
+
+Workspace layout: product crates live in `crates/imaginarium-<name>/`,
+repo tooling in `xtask/`. Shared lints and profiles are in the root
+`Cargo.toml`. Every crate sets `[lints] workspace = true`.
 
 ## Decisions and docs
 
