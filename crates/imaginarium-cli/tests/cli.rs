@@ -322,3 +322,28 @@ fn bad_arguments_and_missing_keys_are_errors() {
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("inspect") && out.stdout.contains("export-json"));
 }
+
+#[test]
+fn a_closed_pipe_is_not_an_error() {
+    let dir = scratch("pipe");
+    let file = dir.join("plain.imag");
+    sample(&file, Protection::None);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imag"))
+        .args(["export-json", s(&file)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // like `| head` closing early
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -94,9 +94,25 @@ fn main() -> ExitCode {
     match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
+        // The reader went away (`imag … | head`): stop quietly, like other tools.
+        Err(err) if is_broken_pipe(&err) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("imag: {err:#}");
             ExitCode::from(ERROR)
         }
     }
+}
+
+fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let kind = cause
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind)
+            .or_else(|| {
+                cause
+                    .downcast_ref::<serde_json::Error>()
+                    .and_then(serde_json::Error::io_error_kind)
+            });
+        kind == Some(std::io::ErrorKind::BrokenPipe)
+    })
 }
