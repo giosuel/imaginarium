@@ -491,7 +491,13 @@ fn tampering_with_an_encrypted_index_is_detected() {
         recover: false,
         ..OpenOptions::default()
     };
-    assert!(Reader::open_with(Cursor::new(bytes), strict, Some(&mut keys)).is_err());
+    assert!(Reader::open_with(Cursor::new(bytes.clone()), strict, Some(&mut keys)).is_err());
+    // Recovery doesn't paper over it either: a wrong key or tampering is
+    // reported, not "repaired" by scanning around the index (spec §9.5).
+    let err = Reader::open_with(Cursor::new(bytes), OpenOptions::default(), Some(&mut keys))
+        .err()
+        .unwrap();
+    assert!(err.is_key_problem(), "{err}");
 }
 
 // --- Crash safety, property-based ------------------------------------------
