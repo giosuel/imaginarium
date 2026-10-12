@@ -15,6 +15,13 @@ pub enum ReadOnlyReason {
     NewerSchema(i64),
     /// The document's schema is older, and there is no migration path.
     NoMigration(i64),
+    /// Migrating from schema version `from` failed (and was rolled back).
+    MigrationFailed {
+        /// The version the failed migration started from.
+        from: i64,
+        /// Why it failed.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ReadOnlyReason {
@@ -35,6 +42,12 @@ impl std::fmt::Display for ReadOnlyReason {
             }
             Self::NoMigration(version) => {
                 write!(f, "there is no migration from its schema version {version}")
+            }
+            Self::MigrationFailed { from, reason } => {
+                write!(
+                    f,
+                    "migrating it from schema version {from} failed: {reason}"
+                )
             }
         }
     }

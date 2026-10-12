@@ -737,3 +737,100 @@ fn removing_a_duplicated_node_inside_a_subtree_keeps_the_view_consistent() {
         "the other copy has the id now"
     );
 }
+
+#[test]
+fn remote_changes_that_need_a_newer_reader_make_the_document_read_only() {
+    // A newer peer bumps the schema, or starts using a feature this version
+    // doesn't know: this reader must stop writing (schema-v1.md §10).
+    let mut newer = board();
+    let mut reader = open(&newer.export_snapshot().unwrap());
+    let before = newer.version();
+    newer
+        .set_schema_version_for_tests(imaginarium_model::SCHEMA_VERSION + 1)
+        .unwrap();
+    reader
+        .apply_remote(&[&newer.export_updates_since(&before).unwrap()])
+        .unwrap();
+    assert_eq!(
+        reader.mode(),
+        &Mode::ReadOnly(ReadOnlyReason::NewerSchema(
+            imaginarium_model::SCHEMA_VERSION + 1
+        ))
+    );
+    assert!(reader.transact(&Actor::User, |t| t.set_title("x")).is_err());
+
+    let mut newer = board();
+    let mut reader = open(&newer.export_snapshot().unwrap());
+    let before = newer.version();
+    newer
+        .transact(&Actor::User, |t| t.require_feature("linked-frames"))
+        .unwrap();
+    reader
+        .apply_remote(&[&newer.export_updates_since(&before).unwrap()])
+        .unwrap();
+    assert_eq!(
+        reader.mode(),
+        &Mode::ReadOnly(ReadOnlyReason::MissingFeatures(vec![
+            "linked-frames".into()
+        ]))
+    );
+}
+
+#[test]
+fn documents_that_open_read_only_are_not_migrated() {
+    // An old schema plus a feature this version doesn't know: read-only,
+    // so the migration must not write to it either.
+    let mut old = board();
+    old.transact(&Actor::User, |t| t.require_feature("linked-frames"))
+        .unwrap();
+    let bytes = downgrade_to_version_0(&mut old);
+    let migrations = [Migration {
+        from: 0,
+        apply: rename_preset,
+    }];
+    let doc = Document::open_with(
+        &[&bytes],
+        &OpenOptions {
+            migrations: &migrations,
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        doc.mode(),
+        Mode::ReadOnly(ReadOnlyReason::MissingFeatures(_))
+    ));
+    assert_eq!(doc.view().meta().schema_version(), Some(0), "not migrated");
+}
+
+/// A migration that gives up.
+fn failing_migration(_: &mut imaginarium_model::Transaction<'_>) -> imaginarium_model::Result<()> {
+    Err(ModelError::Invalid("can't migrate this".into()))
+}
+
+#[test]
+fn a_failing_migration_opens_the_document_read_only() {
+    let mut old = board();
+    let bytes = downgrade_to_version_0(&mut old);
+    let migrations = [Migration {
+        from: 0,
+        apply: failing_migration,
+    }];
+    let doc = Document::open_with(
+        &[&bytes],
+        &OpenOptions {
+            migrations: &migrations,
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            doc.mode(),
+            Mode::ReadOnly(ReadOnlyReason::MigrationFailed { from: 0, .. })
+        ),
+        "{:?}",
+        doc.mode()
+    );
+    assert_eq!(doc.view().meta().schema_version(), Some(0));
+}

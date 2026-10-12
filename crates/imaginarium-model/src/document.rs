@@ -99,6 +99,9 @@ pub struct Document {
     /// [`undo_manager`]).
     undo_message: Arc<Mutex<String>>,
     mode: Mode,
+    /// The features this reader understands (from [`OpenOptions`]), to
+    /// check `meta.required_features` again after remote changes.
+    known_features: Vec<String>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -187,6 +190,11 @@ impl Document {
         };
         result.map_err(|err| ModelError::Decode(err.to_string()))?;
         let mut document = Self::wrap(doc, options.undo);
+        document.known_features = options
+            .known_features
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect();
         document.check_schema(options)?;
         Ok(document)
     }
@@ -208,15 +216,22 @@ impl Document {
             inbox,
             _subscription: subscription,
             mode: Mode::Editable,
+            known_features: schema::KNOWN_FEATURES
+                .iter()
+                .map(|f| (*f).to_owned())
+                .collect(),
         }
     }
 
+    /// Checks the schema version and required features on open, and runs
+    /// migrations. A document this version may only read is not migrated
+    /// (that would write to it), and a failed migration opens it read-only.
     fn check_schema(&mut self, options: &OpenOptions<'_>) -> Result<()> {
         let mut version = self.view.meta.schema_version.ok_or_else(|| {
             ModelError::Decode("not an Imaginarium document: meta.schema_version is missing".into())
         })?;
-        if version > schema::SCHEMA_VERSION {
-            self.mode = Mode::ReadOnly(ReadOnlyReason::NewerSchema(version));
+        if let Some(reason) = self.read_only_reason() {
+            self.mode = Mode::ReadOnly(reason);
             return Ok(());
         }
         while version < schema::SCHEMA_VERSION {
@@ -225,24 +240,42 @@ impl Document {
                 return Ok(());
             };
             let next = version + 1;
-            self.transact(&Actor::Migration, |t| {
+            let migrated = self.transact(&Actor::Migration, |t| {
                 (migration.apply)(t)?;
                 t.set_schema_version(next)
-            })?;
+            });
+            if let Err(err) = migrated {
+                self.mode = Mode::ReadOnly(ReadOnlyReason::MigrationFailed {
+                    from: version,
+                    reason: err.to_string(),
+                });
+                return Ok(());
+            }
             version = next;
+        }
+        if let Some(reason) = self.read_only_reason() {
+            self.mode = Mode::ReadOnly(reason);
+        }
+        Ok(())
+    }
+
+    /// Why this version may only read the document as it is now: a newer
+    /// schema, or required features it doesn't know (schema-v1.md §10).
+    fn read_only_reason(&self) -> Option<ReadOnlyReason> {
+        if let Some(version) = self.view.meta.schema_version
+            && version > schema::SCHEMA_VERSION
+        {
+            return Some(ReadOnlyReason::NewerSchema(version));
         }
         let missing: Vec<String> = self
             .view
             .meta
             .required_features
             .iter()
-            .filter(|f| !options.known_features.contains(&f.as_str()))
+            .filter(|f| !self.known_features.contains(f))
             .cloned()
             .collect();
-        if !missing.is_empty() {
-            self.mode = Mode::ReadOnly(ReadOnlyReason::MissingFeatures(missing));
-        }
-        Ok(())
+        (!missing.is_empty()).then_some(ReadOnlyReason::MissingFeatures(missing))
     }
 
     /// The current view: cheap to clone, safe to send to other threads.
@@ -338,7 +371,16 @@ impl Document {
                 .map(|_| ()),
         };
         result.map_err(|err| ModelError::Decode(err.to_string()))?;
-        Ok(self.drain(ChangeOrigin::Remote))
+        let changes = self.drain(ChangeOrigin::Remote);
+        // A newer peer may have bumped the schema or required a feature:
+        // from then on this version must not write.
+        if changes.meta
+            && self.mode == Mode::Editable
+            && let Some(reason) = self.read_only_reason()
+        {
+            self.mode = Mode::ReadOnly(reason);
+        }
+        Ok(changes)
     }
 
     fn manager(&mut self, scope: UndoScope) -> &mut UndoManager {
