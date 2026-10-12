@@ -277,8 +277,10 @@ fn apply_text(
     if node.text_container.as_ref() != Some(target) || node.text.is_none() {
         return false;
     }
-    if let Some(text) = Arc::make_mut(node).text.as_mut() {
-        text.apply_delta(delta);
+    if let Some(text) = Arc::make_mut(node).text.as_mut()
+        && !text.apply_delta(delta)
+    {
+        return false;
     }
     dirty.text_touched.insert(id);
     true

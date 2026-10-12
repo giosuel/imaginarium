@@ -255,6 +255,7 @@ impl PartialEq for DocumentView {
             && self.pages == other.pages
             && self.ext == other.ext
             && self.handles == other.handles
+            && self.owners == other.owners
             && self.shadowed == other.shadowed
     }
 }

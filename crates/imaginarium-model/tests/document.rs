@@ -889,3 +889,35 @@ fn a_failed_text_edit_writes_nothing() {
     assert!(changes.is_empty(), "{changes:?}");
     assert!(doc.view().node(id).unwrap().text().is_none());
 }
+
+#[test]
+fn a_failed_transaction_inside_an_undo_group_splits_it_cleanly() {
+    let mut doc = board();
+    let id = shape(&mut doc, Parent::Root, 0.0);
+    let x = |doc: &Document| doc.view().node(id).unwrap().geometry().unwrap().x;
+    let drag = |doc: &mut Document, x: f64| {
+        doc.transact(&Actor::User, |t| {
+            t.set_geometry(id, Geometry::new(x, 0.0, 10.0, 10.0))
+        })
+        .unwrap();
+    };
+    doc.begin_undo_group(UndoScope::User).unwrap();
+    drag(&mut doc, 1.0);
+    drag(&mut doc, 2.0);
+    let failed = doc.transact(&Actor::User, |t| {
+        t.set_geometry(id, Geometry::new(99.0, 0.0, 10.0, 10.0))?;
+        Err::<(), _>(ModelError::Invalid("gave up".into()))
+    });
+    assert!(failed.is_err());
+    drag(&mut doc, 3.0);
+    doc.end_undo_group(UndoScope::User);
+    assert_eq!(x(&doc), 3.0);
+    assert_consistent(&doc);
+    // Loro needs the group closed while the failed edit is reverted: the
+    // drag becomes two steps, before and after the failure.
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(x(&doc), 2.0);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(x(&doc), 0.0);
+    assert_consistent(&doc);
+}

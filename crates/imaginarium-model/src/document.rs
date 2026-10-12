@@ -102,6 +102,8 @@ pub struct Document {
     /// The features this reader understands (from [`OpenOptions`]), to
     /// check `meta.required_features` again after remote changes.
     known_features: Vec<String>,
+    /// Whether an undo group is open, by [`UndoScope`] (user, assistant).
+    open_groups: [bool; 2],
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -220,6 +222,7 @@ impl Document {
                 .iter()
                 .map(|f| (*f).to_owned())
                 .collect(),
+            open_groups: [false; 2],
         }
     }
 
@@ -335,6 +338,18 @@ impl Document {
         if self.doc.get_pending_txn_len() == 0 {
             return Ok(());
         }
+        // Loro wants open groups closed before pausing. A failed
+        // transaction in the middle of a drag therefore splits the drag
+        // into two undo steps.
+        let groups = self.open_groups;
+        for (scope, open) in [UndoScope::User, UndoScope::Assistant]
+            .into_iter()
+            .zip(groups)
+        {
+            if open {
+                self.manager(scope).group_end();
+            }
+        }
         self.undo_user.pause();
         self.undo_ai.pause();
         self.commit(actor);
@@ -343,6 +358,14 @@ impl Document {
         self.undo_user.resume();
         self.undo_ai.resume();
         self.drain(ChangeOrigin::Local(actor.clone()));
+        for (scope, open) in [UndoScope::User, UndoScope::Assistant]
+            .into_iter()
+            .zip(groups)
+        {
+            if open {
+                self.manager(scope).group_start()?;
+            }
+        }
         reverted.map_err(ModelError::from)
     }
 
@@ -370,8 +393,11 @@ impl Document {
                 .import_batch(&updates.iter().map(|u| u.to_vec()).collect::<Vec<_>>())
                 .map(|_| ()),
         };
-        result.map_err(|err| ModelError::Decode(err.to_string()))?;
+        // Drain first: a batch that fails partway may have applied (and
+        // reported) some changes, which must not end up under the next
+        // change's origin.
         let changes = self.drain(ChangeOrigin::Remote);
+        result.map_err(|err| ModelError::Decode(err.to_string()))?;
         // A newer peer may have bumped the schema or required a feature:
         // from then on this version must not write.
         if changes.meta
@@ -420,8 +446,8 @@ impl Document {
             let done = if undo { manager.undo() } else { manager.redo() };
             // `on_pop` set them again after the last step, too.
             self.doc.clear_next_commit_options();
-            let done = done?;
             let mut changes = self.drain(ChangeOrigin::Undo(scope));
+            let done = done?;
             let ghosts = self.remove_ghosts(&changes, &message, scope)?;
             if !done {
                 return Ok(None);
@@ -491,12 +517,14 @@ impl Document {
     /// [`Document::end_undo_group`].
     pub fn begin_undo_group(&mut self, scope: UndoScope) -> Result<()> {
         self.manager(scope).group_start()?;
+        self.open_groups[scope as usize] = true;
         Ok(())
     }
 
     /// Ends the group started with [`Document::begin_undo_group`].
     pub fn end_undo_group(&mut self, scope: UndoScope) {
         self.manager(scope).group_end();
+        self.open_groups[scope as usize] = false;
     }
 
     /// The current version.

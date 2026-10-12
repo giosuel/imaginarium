@@ -402,10 +402,22 @@ impl TextView {
         out
     }
 
-    /// Applies a delta of a text event.
-    pub(crate) fn apply_delta(&mut self, delta: &[TextDelta]) {
-        let mut pos = 0;
+    /// Applies a delta of a text event. `false` if the delta doesn't fit
+    /// this text (the view and the CRDT disagree): the caller then re-reads
+    /// the text instead of trusting what was applied.
+    #[must_use]
+    pub(crate) fn apply_delta(&mut self, delta: &[TextDelta]) -> bool {
+        let mut pos: usize = 0;
         for op in delta {
+            let fits = match op {
+                TextDelta::Retain { retain: len, .. } | TextDelta::Delete { delete: len } => {
+                    pos.checked_add(*len).is_some_and(|end| end <= self.len())
+                }
+                TextDelta::Insert { .. } => pos <= self.len(),
+            };
+            if !fits {
+                return false;
+            }
             match op {
                 TextDelta::Retain { retain, attributes } => {
                     if let Some(changes) = attributes.as_ref().filter(|a| !a.is_empty()) {
@@ -444,6 +456,7 @@ impl TextView {
                 }
             }
         }
+        true
     }
 
     /// The paragraph containing character `pos`, or `None` at the end.
@@ -727,6 +740,33 @@ mod tests {
     use super::*;
     use loro::{ExpandType, LoroDoc, StyleConfig, StyleConfigMap};
 
+    #[test]
+    fn deltas_that_do_not_fit_are_refused_not_panicked_on() {
+        let doc = LoroDoc::new();
+        let text = doc.get_text("t");
+        text.insert(0, "abc\n").unwrap();
+        let mut view = TextView::from_delta(&text.to_delta());
+        for delta in [
+            vec![TextDelta::Delete { delete: 10 }],
+            vec![
+                TextDelta::Retain {
+                    retain: 9,
+                    attributes: None,
+                },
+                TextDelta::Insert {
+                    insert: "x".into(),
+                    attributes: None,
+                },
+            ],
+            vec![TextDelta::Retain {
+                retain: usize::MAX,
+                attributes: None,
+            }],
+        ] {
+            assert!(!view.apply_delta(&delta));
+        }
+    }
+
     /// Applies `edits` to a Loro text holding `initial` and checks that the
     /// incrementally updated view equals a view built from scratch.
     fn check_with(initial: &str, edits: impl FnOnce(&loro::LoroText)) {
@@ -762,7 +802,7 @@ mod tests {
         edits(&text);
         doc.commit();
         for delta in deltas.lock().unwrap().iter() {
-            view.apply_delta(delta);
+            assert!(view.apply_delta(delta));
         }
         assert_eq!(view, TextView::from_delta(&text.to_delta()));
         assert_eq!(view.to_plain_string(), text.to_string());
