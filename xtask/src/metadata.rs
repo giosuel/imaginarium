@@ -5,6 +5,7 @@
 //! Only the fields the checks need are deserialized. Everything else in the
 //! JSON is ignored, so new cargo versions don't break the tasks.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -14,6 +15,8 @@ use serde::Deserialize;
 pub(crate) struct Metadata {
     /// Workspace member packages. With `--no-deps`, only members are listed.
     pub(crate) packages: Vec<Package>,
+    /// Absolute path of the workspace root directory.
+    pub(crate) workspace_root: PathBuf,
 }
 
 /// A workspace member package.

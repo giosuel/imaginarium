@@ -289,6 +289,8 @@ fn check_dependencies(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::metadata::Dependency;
 
@@ -324,7 +326,10 @@ mod tests {
                 all.push(package(name, vec![]));
             }
         }
-        Metadata { packages: all }
+        Metadata {
+            packages: all,
+            workspace_root: PathBuf::from("/ws"),
+        }
     }
 
     #[test]
@@ -384,6 +389,7 @@ mod tests {
                 package("high", vec![dep("imaginarium-test-utils", None)]),
                 package("imaginarium-test-utils", vec![]),
             ],
+            workspace_root: PathBuf::from("/ws"),
         };
         assert_eq!(
             check(&md, table),
@@ -398,6 +404,7 @@ mod tests {
                 package("high", vec![dep("imaginarium-test-utils", Some("dev"))]),
                 package("imaginarium-test-utils", vec![]),
             ],
+            workspace_root: PathBuf::from("/ws"),
         };
         assert_eq!(check(&md_dev, table), vec![]);
     }
