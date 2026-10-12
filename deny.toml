@@ -1,0 +1,65 @@
+# cargo-deny: license, security-advisory, ban and source checks for all
+# dependencies. CI runs `cargo deny check` on every PR.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check the dependency graph of every platform we ship on, not only the host.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+# Include optional features (e.g. `tracy`), so they are checked too.
+all-features = true
+
+[advisories]
+# Known vulnerabilities and unmaintained crates fail the check. To ignore an
+# advisory, add `{ id = "RUSTSEC-…", reason = "…" }` with a justification.
+ignore = []
+
+[licenses]
+# Every dependency must be compatible with AGPL-3.0-or-later (ADR-0008).
+# Extend this list only after reviewing compatibility, in its own commit.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+# The list anticipates future dependencies, so unused entries are fine.
+unused-allowed-license = "allow"
+exceptions = []
+
+[licenses.private]
+# Our own crates are `publish = false` and AGPL-licensed. `cargo xtask
+# check-layers` verifies their license, so cargo-deny skips them.
+ignore = true
+
+[bans]
+# The GPU/windowing ecosystem often has duplicate versions; warn, don't fail.
+multiple-versions = "warn"
+# No `*` version requirements. Workspace path dependencies are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+  { crate = "openssl", reason = "use rustls for TLS (ADR-0011)" },
+  { crate = "openssl-sys", reason = "use rustls for TLS (ADR-0011)" },
+]
+
+[sources]
+# Only crates.io. Git dependencies need an explicit, reviewed exception.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
