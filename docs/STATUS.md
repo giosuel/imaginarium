@@ -9,16 +9,17 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.7 `imaginarium-cli` (`imag`)** (see the M1 checklist below). Use **xhigh/max effort** for M1.
-- **Code status:** Cargo workspace with 9 crates. Working: `xtask` (repo
+- **Next step:** **M1.8 wrap-up** (see the M1 checklist below): code review of M1, two-week-rule automation, weekly fuzzing, tag `v0.0.2-m1`.
+- **Code status:** Cargo workspace with 11 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
   (registry, args/JSON Schema, keymaps, palette search),
   `imaginarium-format` (the `.imag` container), `imaginarium-crypto`
   (encryption, keyrings, signatures, ACL chain) and `imaginarium-model`
-  (the document on Loro, view model, undo). The app only prints its
-  version.
+  (the document on Loro, view model, undo), `imaginarium-io-native`
+  (`.imag` files as documents) and `imaginarium-cli` (`imag inspect`,
+  `verify`, `export-json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -451,12 +452,32 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   - Profile:
     - bench build + run: 2 min 17 s wall, 182 CPU-s, 804 MB peak;
     - property soak (2,000 cases): 14 s.
-- [ ] **M1.7 `imaginarium-cli` (`imag`)** ← **next**: `inspect`, `verify`,
-  `export-json`. It combines format, crypto and model:
-  - open (with keys), list records;
-  - verify CRCs, signatures and the ACL chain;
-  - dump the document (`Document::to_value`).
-- [ ] **M1.8 Wrap-up**:
+- [x] **M1.7 `imaginarium-cli` (`imag`)** (done 2026-10-12, branch
+  `feat/m1.7-cli`, stacked on #17):
+  - New crate **`imaginarium-io-native`** (features layer).
+    - Opens `.imag` files as model `Document`s: password or X-Wing key;
+      the main stream from snapshot plus updates, in index order; `META`;
+      recovery; the ACL chain.
+    - Saves new files: unencrypted, or password-encrypted with a keyring.
+      Saving to a path is atomic (temporary file, sync, rename).
+    - It's the app's load/save path too. Incremental saves come in M2.
+  - **`imag`**:
+    - `inspect` reads the plaintext framing, so it works without keys;
+      `--json` for scripts.
+    - `verify` checks record CRCs, trailer and index (or recovery),
+      decryption of every record, blobs, keyrings, signatures and the ACL
+      chain, and the document. Exit code 1 on problems, 2 if it couldn't
+      run.
+    - `export-json` prints the decrypted document.
+    - Secrets come only from stdin, an environment variable or a key
+      file, never from arguments.
+  - Website page `developers/imag`, linked in the sidebar.
+  - Tests:
+    - 4 io-native round trips (plain, password, atomic path, documentless
+      vectors);
+    - 6 CLI tests running the binary: corrupt bytes, an interrupted save,
+      a wrong password, and vectors 10a, 10b and 10c with the owner key.
+- [ ] **M1.8 Wrap-up** ← **next**:
   - code review, publish the test vectors, update the website docs;
   - **automate the two-week rule**: an xtask check of **every** entry of
     every committed `Cargo.lock` (main and `benchmarks/*`), not only new

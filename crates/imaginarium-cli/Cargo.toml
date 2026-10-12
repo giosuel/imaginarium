@@ -1,0 +1,30 @@
+[package]
+name = "imaginarium-cli"
+description = "The imag command-line tool: inspect, verify and export Imaginarium documents (.imag)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "imag"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+imaginarium-crypto.workspace = true
+imaginarium-format.workspace = true
+imaginarium-io-native.workspace = true
+imaginarium-model.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
