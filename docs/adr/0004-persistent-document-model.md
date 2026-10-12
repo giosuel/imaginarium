@@ -1,6 +1,6 @@
 # 0004. Persistent document model with operation log
 
-- Status: Accepted
+- Status: Superseded by 0009
 - Date: 2026-10-12
 
 ## Context
