@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Normative protobuf schema of the .imag format, version 1.
+// See docs/format/spec-v1.md. Section references (§) point there.
+//
+// Evolution rules (§10):
+// - Field numbers are never reused or renumbered. Removed fields are
+//   `reserved`.
+// - New fields are optional. Readers ignore unknown fields, and writers
+//   that rewrite a message they read SHOULD preserve them.
+// - Enums always have an UNSPECIFIED = 0 value. Readers treat unknown enum
+//   values as "not understood", never as a default.
+
+syntax = "proto3";
+
+package imaginarium.imag.v1;
+
+// ---------------------------------------------------------------------------
+// Record framing (§4)
+// ---------------------------------------------------------------------------
+
+// Which CRDT document (or add-on namespace) a SNAP/UPDT record belongs to.
+enum Stream {
+  STREAM_UNSPECIFIED = 0;
+  // The document itself.
+  STREAM_MAIN = 1;
+  // Comments and discussions (separate CRDT, §3).
+  STREAM_DISCUSSION = 2;
+  // Add-on data. `RecordHeader.extension_id` names the add-on.
+  STREAM_EXTENSION = 3;
+}
+
+// Per-record metadata. Serialized in plaintext and covered by the record's
+// AEAD as associated data (§6.3), so it is authenticated but not secret.
+message RecordHeader {
+  // Object identity (§5.2): 32 bytes. Random for most types,
+  // content-addressed (keyed BLAKE3) for BLOB and DERV.
+  bytes object_id = 1;
+  // For SNAP/UPDT: which CRDT document.
+  Stream stream = 2;
+  // Required when stream = STREAM_EXTENSION, or for extension record types
+  // 0x4000–0x7FFF. Reverse-DNS add-on id, e.g. "org.example.charts".
+  string extension_id = 3;
+  // Key epoch of an encrypted record (§6.2). 0 in unencrypted files.
+  uint32 epoch = 4;
+  // Crypto suite of an encrypted record (§6.1). 0 = not encrypted.
+  uint32 suite = 5;
+  // Length of the payload plaintext after decryption and decompression.
+  // Readers MUST reject payloads that would decompress beyond it (§4.4).
+  uint64 plain_len = 6;
+  // For SNAP/UPDT: CRDT codec, e.g. "loro-1" (§3.1).
+  string codec = 7;
+  // For segments of a SEGMENTED blob (§5.3).
+  Segment segment = 8;
+  // For DERV: what kind of derived data, e.g. "mip-pyramid", "search-index".
+  string derived_kind = 9;
+  // Writer-local sequence number, increasing within one writer and stream.
+  // Used for ordering diagnostics only. CRDTs don't need it for merging.
+  uint64 seq = 10;
+}
+
+// One segment of a large blob (§5.3).
+message Segment {
+  // Zero-based index of this segment.
+  uint32 index = 1;
+  // Total number of segments of the blob.
+  uint32 count = 2;
+  // Total plaintext size of the whole blob, in bytes.
+  uint64 total_len = 3;
+  // STREAM nonce prefix (19 bytes, random per blob) for encrypted blobs.
+  // Identical in every segment of the blob. Empty when unencrypted.
+  bytes nonce_prefix = 4;
+}
+
+// Optional signature of a record, stored after the payload when the
+// SIGNED flag is set (§7).
+message Signature {
+  // Signature algorithm.
+  SignatureAlgorithm algorithm = 1;
+  // Key id of the signer (§7.1): 16 bytes.
+  bytes key_id = 2;
+  // Ed25519: 64 bytes. Hybrid: Ed25519 signature (64) followed by the
+  // ML-DSA-65 signature (3309).
+  bytes signature = 3;
+}
+
+enum SignatureAlgorithm {
+  SIGNATURE_ALGORITHM_UNSPECIFIED = 0;
+  // Ed25519 (RFC 8032, pure). Device keys, frequent records.
+  SIGNATURE_ALGORITHM_ED25519 = 1;
+  // Ed25519 + ML-DSA-65 (FIPS 204, pure, empty context). Both MUST verify.
+  // Authority records.
+  SIGNATURE_ALGORITHM_ED25519_MLDSA65 = 2;
+}
+
+// ---------------------------------------------------------------------------
+// META (0x01): container-level document metadata (§5.4)
+// ---------------------------------------------------------------------------
+
+message DocumentMeta {
+  // Spec major.minor this file was written against, e.g. "1.0".
+  string format_version = 1;
+  // Producing application and version, e.g. "Imaginarium 0.3.1".
+  string created_with = 2;
+  // Unix time of document creation, in milliseconds.
+  uint64 created_unix_ms = 3;
+  // Logical features a reader MUST understand to edit safely (§10.3).
+  repeated string required_features = 4;
+  // Secret key for content-addressed BlobIds (§5.2): 32 random bytes,
+  // fixed for the document's lifetime. Only present inside an encrypted
+  // META (encrypted files) or a plaintext META (unencrypted files).
+  bytes blob_id_key = 5;
+}
+
+// ---------------------------------------------------------------------------
+// KEYR (0x02): keyring with wrapped epoch keys (§6.4)
+// ---------------------------------------------------------------------------
+
+message Keyring {
+  // Every epoch whose key a reader may need (old records stay readable).
+  repeated EpochKeys epochs = 1;
+}
+
+message EpochKeys {
+  // Epoch number, starting at 1 and increasing by 1 at each rotation.
+  uint32 epoch = 1;
+  // The epoch key DEK_e, wrapped once per recipient.
+  repeated KeyWrap wraps = 2;
+}
+
+message KeyWrap {
+  WrapKind kind = 1;
+  // Recipient id: user or device key id (HPKE), folder id or link id, or
+  // empty for PASSWORD.
+  bytes recipient_id = 2;
+  // PASSWORD only.
+  Argon2Params argon2 = 3;
+  // HPKE only: encapsulated key `enc` (§6.4.2).
+  bytes hpke_enc = 4;
+  // PASSWORD, FOLDER_KEY, LINK_KEY: the 24-byte XChaCha20-Poly1305 nonce.
+  bytes nonce = 5;
+  // The wrapped DEK_e: AEAD ciphertext followed by the 16-byte tag.
+  bytes ciphertext = 6;
+}
+
+enum WrapKind {
+  WRAP_KIND_UNSPECIFIED = 0;
+  // Argon2id(password) → KEK → AEAD (§6.4.1).
+  WRAP_KIND_PASSWORD = 1;
+  // HPKE base mode to a user or device key (§6.4.2).
+  WRAP_KIND_HPKE = 2;
+  // AEAD under a folder key (shared folders, §6.4.3).
+  WRAP_KIND_FOLDER_KEY = 3;
+  // AEAD under a share-link key that lives only in the URL fragment (§6.4.3).
+  WRAP_KIND_LINK_KEY = 4;
+}
+
+message Argon2Params {
+  // Memory in KiB.
+  uint32 memory_kib = 1;
+  // Iterations.
+  uint32 iterations = 2;
+  // Parallelism (lanes).
+  uint32 parallelism = 3;
+  // Salt: 16 random bytes.
+  bytes salt = 4;
+}
+
+// ---------------------------------------------------------------------------
+// VERS (0x07): named version (§5.4)
+// ---------------------------------------------------------------------------
+
+message NamedVersion {
+  // User-given label, e.g. "Sent to client".
+  string label = 1;
+  // Codec-specific version frontier of the main stream (e.g. a Loro
+  // frontiers encoding), enough to check out that version.
+  bytes frontier = 2;
+  // Codec of `frontier`, e.g. "loro-1".
+  string codec = 3;
+  // Unix time in milliseconds.
+  uint64 created_unix_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// ACLC (0x08): access-control chain (§8)
+// ---------------------------------------------------------------------------
+
+message AclChange {
+  // BLAKE3 of the complete previous ACLC record (§8.2). 32 zero bytes for
+  // the genesis change.
+  bytes prev_hash = 1;
+  // Position in the chain: 0 for genesis, then +1 each change.
+  uint64 index = 2;
+  oneof change {
+    Genesis genesis = 10;
+    AddMember add_member = 11;
+    SetRole set_role = 12;
+    RemoveMember remove_member = 13;
+    AddDevice add_device = 14;
+    RemoveDevice remove_device = 15;
+    RotateEpoch rotate_epoch = 16;
+  }
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_VIEWER = 1;
+  ROLE_COMMENTER = 2;
+  ROLE_EDITOR = 3;
+  ROLE_ADMIN = 4;
+  ROLE_OWNER = 5;
+}
+
+// A user identity: hybrid authority public keys.
+message Identity {
+  // Ed25519 public key (32 bytes).
+  bytes ed25519_public_key = 1;
+  // ML-DSA-65 public key (1952 bytes).
+  bytes mldsa65_public_key = 2;
+  // X-Wing public key (1216 bytes) for HPKE key wrapping to this user.
+  bytes xwing_public_key = 3;
+}
+
+// A device of a user: signs frequent records, receives wrapped keys.
+message Device {
+  // Ed25519 public key (32 bytes).
+  bytes ed25519_public_key = 1;
+  // X-Wing public key (1216 bytes) for HPKE key wrapping to this device.
+  bytes xwing_public_key = 2;
+}
+
+message Genesis {
+  // The creating user, who becomes the owner.
+  Identity owner = 1;
+  // The creating device.
+  Device device = 2;
+  // First key epoch (always 1).
+  uint32 epoch = 3;
+}
+
+message AddMember {
+  Identity member = 1;
+  Role role = 2;
+}
+
+message SetRole {
+  // Key id of the member's identity (§7.1).
+  bytes member_id = 1;
+  Role role = 2;
+}
+
+message RemoveMember {
+  bytes member_id = 1;
+}
+
+message AddDevice {
+  // The member the device belongs to.
+  bytes member_id = 1;
+  Device device = 2;
+}
+
+message RemoveDevice {
+  bytes member_id = 1;
+  // Key id of the device (§7.1).
+  bytes device_id = 2;
+}
+
+message RotateEpoch {
+  // The new epoch (previous + 1). Its key is wrapped in a KEYR record only
+  // for the members and devices current after this change.
+  uint32 epoch = 1;
+}
+
+// ---------------------------------------------------------------------------
+// INDX (0x3FFF): index of the records in the file (§9)
+// ---------------------------------------------------------------------------
+
+message Index {
+  repeated IndexEntry entries = 1;
+  // Latest snapshot per stream, plus the updates that follow it.
+  repeated StreamHead heads = 2;
+  // Byte offset of the previous index record, or 0 if this is the first.
+  uint64 previous_index_offset = 3;
+}
+
+message IndexEntry {
+  // Record type.
+  uint32 rtype = 1;
+  bytes object_id = 2;
+  Stream stream = 3;
+  string extension_id = 4;
+  // Byte offset of the record's first byte (its rtype varint).
+  uint64 offset = 5;
+  // Total length of the record in bytes, from rtype through the CRC.
+  uint64 length = 6;
+  // The record's flags byte.
+  uint32 rflags = 7;
+  uint32 epoch = 8;
+}
+
+message StreamHead {
+  Stream stream = 1;
+  string extension_id = 2;
+  // object_id of the latest SNAP of this stream (empty if there is none).
+  bytes snapshot_id = 3;
+  // object_ids of the UPDT records after that snapshot, in apply order.
+  repeated bytes update_ids = 4;
+}
