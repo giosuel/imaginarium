@@ -16,12 +16,16 @@
 //!   git (see [`tracked`]).
 //! - `dev-profile [--write]`: check (or regenerate) the dev-profile overrides
 //!   for build-time-only crates in the root `Cargo.toml` (see [`mod@dev_profile`]).
+//! - `dep-age [--days N]`: the two-week rule for every committed `Cargo.lock`
+//!   (see [`dep_age`]). It needs the network, so `check` doesn't run it; CI
+//!   runs it separately.
 //!
 //! # Adding a task
 //! Write a `fn(&[String]) -> ExitCode` and add it to [`TASKS`]. Tasks print
 //! human-readable output and signal failure through a non-zero exit code, so
 //! CI can run them directly.
 
+mod dep_age;
 mod dev_profile;
 mod headers;
 mod layers;
@@ -66,6 +70,11 @@ const TASKS: &[Task] = &[
         name: "dev-profile",
         about: "Check build-time crate overrides in Cargo.toml (--write to update)",
         run: dev_profile,
+    },
+    Task {
+        name: "dep-age",
+        about: "Check that every locked crate version is at least 14 days old (needs network)",
+        run: dep_age_task,
     },
     Task {
         name: "help",
@@ -113,6 +122,68 @@ fn check_all(args: &[String]) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(FAILED)
+    }
+}
+
+/// `cargo xtask dep-age [--days N]`
+fn dep_age_task(args: &[String]) -> ExitCode {
+    let days = match args {
+        [] => 14,
+        [flag, n] if flag == "--days" => match n.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("error: --days needs a number");
+                return ExitCode::from(2);
+            }
+        },
+        _ => {
+            eprintln!("usage: cargo xtask dep-age [--days N]");
+            return ExitCode::from(2);
+        }
+    };
+    let root = match metadata::load() {
+        Ok(metadata) => metadata.workspace_root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    match dep_age::check(&root, days) {
+        Ok((files, packages, findings)) if findings.is_empty() => {
+            println!(
+                "dep-age: ok ({packages} crate versions in {files} lockfiles, all at least {days} days old)"
+            );
+            ExitCode::SUCCESS
+        }
+        Ok((_, _, findings)) => {
+            eprintln!(
+                "dep-age: {} crate version(s) younger than {days} days:",
+                findings.len()
+            );
+            for finding in &findings {
+                let package = &finding.package;
+                let fix = match &finding.suggestion {
+                    Some(version) => format!(
+                        "cargo update -p {}@{} --precise {version}",
+                        package.name, package.version
+                    ),
+                    None => "no older compatible version; wait, or add an exception with a reason"
+                        .into(),
+                };
+                eprintln!(
+                    "  - {} {} (published {}, {} days ago): {fix}",
+                    package.name, package.version, finding.published, finding.age_days
+                );
+            }
+            eprintln!(
+                "Security fixes may be listed in xtask/dep-age-exceptions.txt with a reason (MAINTAINERS.md)."
+            );
+            ExitCode::from(FAILED)
+        }
+        Err(err) => {
+            eprintln!("dep-age: couldn't run: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

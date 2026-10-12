@@ -54,7 +54,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   deps:
-    name: deps (cargo-deny, cargo-machete)
+    name: deps (cargo-deny, cargo-machete, dep-age)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -68,6 +68,8 @@ jobs:
         run: cargo deny --locked check
       - name: cargo-machete (unused dependencies)
         run: cargo machete
+      - name: Two-week rule (every committed Cargo.lock)
+        run: cargo xtask dep-age
 
   test:
     name: test (${{ matrix.name }})
