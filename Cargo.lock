@@ -21,3 +21,7 @@ version = "0.0.1"
 [[package]]
 name = "imaginarium-test-utils"
 version = "0.0.1"
+
+[[package]]
+name = "xtask"
+version = "0.0.1"
