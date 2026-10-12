@@ -1,0 +1,13 @@
+# Line endings: LF in the repository and in every checkout, on every OS.
+# Our tools (xtask checks, generated Cargo.toml blocks, rustfmt) assume LF,
+# and Windows checkouts with core.autocrlf would otherwise convert them.
+* text=auto eol=lf
+
+# Binary files are never converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.woff2 binary
+*.imag binary

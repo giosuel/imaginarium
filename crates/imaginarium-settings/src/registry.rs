@@ -145,8 +145,10 @@ impl Registry {
     pub fn set_value(&mut self, key: &str, value: Value) -> Result<(), SettingsError> {
         let declaration = self.declaration(key)?;
         declaration.validate(&value)?;
+        let value = declaration.normalize(value);
         let key = declaration.key();
         let old = self.effective(declaration);
+        self.forget_preserved(declaration);
         if value == declaration.default_dyn() {
             self.values.remove(key);
         } else {
@@ -161,8 +163,18 @@ impl Registry {
         let declaration = self.declaration(key)?;
         let old = self.effective(declaration);
         self.values.remove(declaration.key());
+        self.forget_preserved(declaration);
         self.notify_if_changed(declaration, old);
         Ok(())
+    }
+
+    /// Drops a file value preserved for this key because this version
+    /// couldn't read it. Called when the user sets or resets the setting, so
+    /// their choice wins on the next save.
+    fn forget_preserved(&mut self, declaration: &dyn AnySetting) {
+        if let Some(unknown) = self.unknown.get_mut(&declaration.meta().scope) {
+            unknown.remove(declaration.key());
+        }
     }
 
     /// The effective dynamic value of a registered key.
@@ -433,6 +445,19 @@ mod tests {
             "kind mismatch"
         );
         assert_eq!(r.get(&ZOOM).unwrap(), 1.0, "failed sets change nothing");
+    }
+
+    #[test]
+    fn dynamic_values_are_normalized_to_the_setting_type() {
+        let mut r = registry();
+        let changes = Arc::new(Mutex::new(0));
+        let sink = Arc::clone(&changes);
+        r.subscribe(move |_| *sink.lock().unwrap() += 1);
+        r.set_value("canvas.zoom", Value::Int(1)).unwrap(); // equals the 1.0 default
+        assert!(!r.is_modified("canvas.zoom"));
+        assert_eq!(*changes.lock().unwrap(), 0, "no spurious change");
+        r.set_value("canvas.zoom", Value::Int(2)).unwrap();
+        assert_eq!(r.value("canvas.zoom").unwrap(), Value::Float(2.0));
     }
 
     #[test]
