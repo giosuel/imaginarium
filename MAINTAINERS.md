@@ -61,6 +61,13 @@ session must be able to continue from `STATUS.md` alone.
 
 Remote: `origin` = <https://github.com/giosuel/imaginarium> (public).
 
+The branch rules for `main` are versioned in
+[`.github/rulesets/main.json`](.github/rulesets/main.json). To change a rule,
+edit the file in a PR. The owner then imports it under Settings → Rules →
+Rulesets. Agents push with the owner's token, so the ruleset requires 0
+approvals (GitHub forbids self-approval) and has no bypass actors. Any
+bypass would apply to agents too.
+
 1. **Never commit directly to `main`.** Start each unit of work on a branch
    cut from an up-to-date `main` (`git switch main && git pull && git switch
    -c <branch>`).
@@ -85,6 +92,36 @@ Remote: `origin` = <https://github.com/giosuel/imaginarium> (public).
    and continue with the next step on a new branch. The next step may be
    started on a branch based on the unmerged PR branch if it depends on it.
    Say so in the PR description.
+
+## Reporting to the owner (mandatory)
+
+1. **Every change goes into `main` through a PR** (see above). There are no
+   exceptions, not even for docs.
+2. **Screenshots:** whenever there is a runnable version with something
+   visible (from the M2 prototype onwards), take screenshots and **send them
+   to the owner directly**. Never commit them. For UI changes, send a
+   before/after pair, and mention the screenshots in the PR description.
+3. **Profile heavy tasks.** Measure every heavy task (clean and incremental
+   builds, release builds, the test suite, clippy, benchmarks, website
+   builds) and report:
+   - wall time,
+   - CPU utilization (are all cores saturated?),
+   - peak memory and swap,
+   - the machine specs.
+
+   Report this in the PR description and to the owner, so they can judge
+   whether the development machine is a bottleneck. Flag a bottleneck
+   explicitly, for example "clean release build takes more than 10 minutes
+   with all cores at 100 %: more cores would help", or "the linker hits the
+   RAM limit and swaps: more RAM is needed". Use `cargo build --timings` for
+   per-crate build cost.
+4. **Never commit generated artifacts:** screenshots, profiling outputs
+   (timings HTML, tracy captures, flamegraphs, perf data, reports), or any
+   agent or tool files. Keep them in the agent's scratch directory or in the
+   git-ignored `artifacts/` and `profiling/` directories. The only shared
+   rules file is this one, `MAINTAINERS.md`. Test fixtures that the test
+   suite needs (e.g. golden images under a crate's `tests/`) are source code,
+   not artifacts, and are committed.
 
 ## Architecture invariants (do not break)
 

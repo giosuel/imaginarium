@@ -76,6 +76,10 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     reviewed), `cargo machete`, `xtask check-layers`, and a DCO sign-off
     check.
   - AC: the CI workflow runs green on the PR that introduces it, on all 3 OSes.
+  - Then add a `required_status_checks` rule with the CI job names to
+    `.github/rulesets/main.json`, and ask the owner to re-import it.
+  - Note: pushing `.github/workflows/*` requires the owner's token to have
+    "Workflows: read and write" permission.
 - [ ] **M0.4 `imaginarium-profiling`**
   - `tracing` subscriber setup (env filter, pretty/JSON).
   - Optional `tracy` feature (`tracing-tracy`).
