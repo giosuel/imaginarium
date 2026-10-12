@@ -55,8 +55,36 @@ session must be able to continue from `STATUS.md` alone.
 - **Never commit agent or tool files.** This includes `CLAUDE.md`,
   `CLAUDE.local.md`, `AGENTS.md`, `.claude/`, `.cursor/` and the other tool
   directories listed in `.gitignore`. Check `git status` before every commit.
-- Branch: `main` (no remote yet; the owner adds it later). Never force-push
-  or rewrite published history.
+- **Never force-push or rewrite published history.**
+
+## Pull request workflow (mandatory)
+
+Remote: `origin` = <https://github.com/giosuel/imaginarium> (public).
+
+1. **Never commit directly to `main`.** Start each unit of work on a branch
+   cut from an up-to-date `main` (`git switch main && git pull && git switch
+   -c <branch>`).
+   - Branch names: `<type>/<short-topic>`, e.g. `feat/m0.2-xtask-layers`,
+     `docs/sync-protocol`, `fix/format-trailer-crc`.
+   - One branch and PR per STATUS step (e.g. M0.2), or smaller.
+2. Inside the branch, still **commit after every module, refactor and
+   decision**. Don't squash locally: the commit history is part of the
+   record.
+3. Before opening the PR, run every check from "Build and check commands",
+   and update `docs/STATUS.md` in the same PR (tick the step, set the next
+   one).
+4. Push (`git push -u origin <branch>`) and open the PR with `gh pr create`
+   against `main`. Fill in the template (`.github/pull_request_template.md`).
+   AI agents end the PR description with the attribution lines provided by
+   the harness.
+5. **The owner reviews and merges.** Agents don't merge their own PRs unless
+   the owner explicitly says so for that PR.
+   - Merge strategy: **merge commit** (no squash, no rebase-merge). This keeps
+     the per-module commits and their SHAs, which `STATUS.md` references.
+6. After the merge: `git switch main && git pull`, delete the local branch,
+   and continue with the next step on a new branch. The next step may be
+   started on a branch based on the unmerged PR branch if it depends on it.
+   Say so in the PR description.
 
 ## Architecture invariants (do not break)
 

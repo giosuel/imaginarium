@@ -13,7 +13,9 @@ Last updated: 2026-10-12
 - **Code status:** Cargo workspace with 6 skeleton crates. Builds, tests,
   clippy, fmt and docs are all green. There is no functionality yet beyond
   the app printing its version and `cargo xtask help`.
-- **Remote:** none yet. The owner adds it later. Commit locally.
+- **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
+  goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
+  request workflow").
 - **Environment seen in the planning session:** Linux, Rust 1.99.0 stable,
   Node 22 / npm 10 (for the website). `cargo-deny` and `cargo-machete` are
   not installed yet (`cargo install --locked cargo-deny cargo-machete`).
@@ -54,8 +56,8 @@ Commit after each item. Each item lists its acceptance criteria (AC).
       with an ADR. Core crates add `#![forbid(unsafe_code)]` themselves.
     - Dev profile builds dependencies at `opt-level = 2`. There is a
       `profiling` profile (release + debug info).
-    - The workspace version is `0.0.1`. `repository`/`homepage` are added
-      to the workspace package once the remote exists.
+    - The workspace version is `0.0.1`. `repository` is set. `homepage`
+      follows once the website is deployed (M0.7).
 - [ ] **M0.2 xtask checks** ← **next**
   - `cargo xtask check-layers`: verify that crate dependencies respect the
     layer map (define the layer table in `xtask`, mirroring PLAN §4.1) and
@@ -73,8 +75,7 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     BSD-2/3, ISC, Zlib, MPL-2.0, Unicode-3.0, LGPL/GPL-3.0-compatible as
     reviewed), `cargo machete`, `xtask check-layers`, and a DCO sign-off
     check.
-  - AC: the workflow YAML is valid (it can't run until there is a remote;
-    note that here).
+  - AC: the CI workflow runs green on the PR that introduces it, on all 3 OSes.
 - [ ] **M0.4 `imaginarium-profiling`**
   - `tracing` subscriber setup (env filter, pretty/JSON).
   - Optional `tracy` feature (`tracing-tracy`).
