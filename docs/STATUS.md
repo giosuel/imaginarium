@@ -9,7 +9,12 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.8 wrap-up** (see the M1 checklist below): code review of M1, two-week-rule automation, weekly fuzzing, tag `v0.0.2-m1`.
+- **Next step:** finish **M1.8**: once the owner has merged PR #19 (tooling)
+  and the review PR (`fix/m1.8-review`), tag **`v0.0.2-m1`** (annotated, on
+  the merge commit in `main`). Then **M2: UI prototype gate** (PLAN §11,
+  ADR-0007): first break M2 into steps (`reactive`, a minimal `ui`, the tile
+  renderer, a stress-test app, the six pass criteria) and add them here as
+  a checklist.
 - **Code status:** Cargo workspace with 11 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -70,6 +75,13 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
   -mmin -120`), and check our own deleted-but-open files (`lsof +L1`).
   Then report when, how much, and the likely cause. Never touch other
   users' files.
+- **`/tmp` filled up too** (2026-10-12, ~20:20): 12 GB used, 76 MB free.
+  The read-only check found 9.3 GB in another Claude session's scratchpad
+  (project `somedesk`, same Unix user): two Cargo `target/` dirs, a
+  Playwright Chromium and the Android command-line tools. It didn't grow
+  over the minute watched. Ours was 25 MB. Our tests must not use
+  `std::env::temp_dir()` (one format test did; it now uses
+  `target/test-scratch`).
 - The linker is the default `rust-lld`. `clang` is present, `mold`/`sccache`
   are not.
 - **Baseline**: clean build of the planned heavy stack (Vello/wgpu, winit,
@@ -486,12 +498,40 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   - [x] **weekly CI fuzz job** (`.github/workflows/fuzz.yml`): every
     format target for 10 minutes on Mondays, seeded with the test vectors,
     crashing inputs uploaded as artifacts;
-  - [ ] **code review of M1** (separate reviewer agents at medium effort,
-    one each for crypto, format, model, io-native + CLI): fix the
-    confirmed findings test-first, on branch `fix/m1.8-review`;
-  - [ ] spec and schema from "Draft 1" to normative, update the website
-    docs;
-  - [ ] tag `v0.0.2-m1`.
+  - [x] **code review of M1**: four reviewer agents at medium effort, one
+    each for crypto, format, model, io-native + CLI, read-only. They
+    reported 1 critical, 7 high, 15 medium and about 25 low findings. Every
+    one was checked against the code. None was a false alarm, though three
+    describe intended or inherent behaviour (below). Fixed test-first on
+    branch `fix/m1.8-review`, one commit per finding or group; each new
+    test was seen failing first. The most important fixes:
+    - **crypto (critical):** removing or replacing the ACL chain made a
+      forged keyring acceptable, so recipient-key documents now need an
+      ACL chain started by an owner the reader trusts (**ADR-0018**, spec
+      §6.4.2). `RecipientKeys::new(keypair, owner)`, `imag --owner`.
+    - **format:** plaintext records were accepted in encrypted files;
+      recovery read around an index it couldn't decrypt (also when only
+      the newest trailer was damaged); `read_blob` could abort or exhaust
+      memory on hostile segment headers; the trailer could reach the disk
+      before its records; atomic replace followed planted symlinks and
+      lost permissions (`AtomicFile`).
+    - **model:** a rolled-back delete wiped undo history (destructive
+      edits are now deferred until the closure succeeds); a skipped stale
+      undo step lost its actor and landed on the other stack; undoing a
+      move of a node another actor's undo removed revived an empty "ghost"
+      node (found while testing); read-only mode wasn't re-checked after
+      remote changes.
+    - **io-native/CLI:** records weren't checked against the ACL chain on
+      open; `imag verify` without a key said "ok" (now exit 3,
+      "incomplete", and the chain is checked without a key).
+    - Not changed, with reasons in the PR: a bad KEYR in an *authenticated*
+      index fails the open (fail-closed is intended: only key holders can
+      write that list); fake trailers inside unencrypted blobs (inherent:
+      unencrypted files have no authenticity); key copies on the stack
+      (Rust moves can't be zeroized reliably). Deferred: see Known issues.
+  - [x] spec, schema and protobuf v1 **normative** (spec §14 records the
+    review's changes); website `imag` page updated;
+  - [ ] tag `v0.0.2-m1` (after the merges).
 
 ## Open questions (owner)
 
@@ -499,12 +539,26 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
 
 ## Known issues and notes
 
-- **Verifying every signature on open is too slow for big shared
-  documents**: about 70 µs per Ed25519 record on this VM, so ~0.7 s for 10k
-  updates. Decide in M1.6/M8: verify on receipt and remember it in the
-  local cache, use batch verification, or verify only what the newest
-  snapshot doesn't cover. The ACL replay (36 ms per 100 changes) can be
-  cached by head hash in the same way.
+- **Signatures are verified on open** (since M1.8: every record a document
+  with an ACL chain is read from), but that is slow for big shared
+  documents: about 70 µs per Ed25519 record on this VM, so ~0.7 s for 10k
+  updates. Decide in M8: verify on receipt and remember it in the local
+  cache, use batch verification, or verify only what the newest snapshot
+  doesn't cover. The ACL replay (36 ms per 100 changes) can be cached by
+  head hash in the same way.
+- **Deferred from the M1 review** (for M8, when shared documents are
+  written and synced):
+  - remember the newest ACL head per document and refuse older ones (a
+    rolled-back chain looks genuine, spec §12);
+  - writers must compare the newest epoch key they hold with
+    `AclState::epoch()` before encrypting (spec §8.3);
+  - the app needs the expected owner for each recipient-key document
+    (ADR-0018): the account identity, or a value stored with the
+    document's library entry.
+- `imag inspect`/`verify` read the whole file into memory (about 2× the
+  file size at peak). Stream the scan when large files with blobs exist.
+- `AtomicFile` keeps the replaced file's permissions, but not its owner,
+  extended attributes or ACLs.
 - **Loro depends on `im` 15.1.0, which RustSec lists as unmaintained**, and
   so are its `bitmaps` and `sized-chunks` (RUSTSEC-2026-0247/-0248/-0251).
   These are not vulnerabilities. They are ignored in `deny.toml` with

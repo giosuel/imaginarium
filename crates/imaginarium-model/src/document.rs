@@ -11,7 +11,7 @@ use loro::{
 use crate::changes::{ChangeOrigin, ChangeSet};
 use crate::error::{ModelError, ReadOnlyReason, Result};
 use crate::ids::{Actor, UndoScope};
-use crate::schema::{self, DocumentKind, root};
+use crate::schema::{self, DocumentKind, node, root};
 use crate::txn::Transaction;
 use crate::value::Value;
 use crate::view::{DocumentView, RawEvent, apply_events, build};
@@ -95,11 +95,19 @@ pub struct Document {
     _subscription: Subscription,
     undo_user: UndoManager,
     undo_ai: UndoManager,
+    /// The actor message of the undo or redo in progress (see
+    /// [`undo_manager`]).
+    undo_message: Arc<Mutex<String>>,
     mode: Mode,
+    /// The features this reader understands (from [`OpenOptions`]), to
+    /// check `meta.required_features` again after remote changes.
+    known_features: Vec<String>,
+    /// Whether an undo group is open, by [`UndoScope`] (user, assistant).
+    open_groups: [bool; 2],
 }
 
-fn lock(inbox: &Mutex<Vec<RawEvent>>) -> MutexGuard<'_, Vec<RawEvent>> {
-    inbox
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -117,13 +125,30 @@ fn new_loro() -> LoroDoc {
     doc
 }
 
-fn undo_manager(doc: &LoroDoc, scope: UndoScope, config: UndoConfig) -> UndoManager {
+/// An undo stack for `scope`.
+///
+/// Loro commits every step it pops separately. When a step turns out to be
+/// a no-op (its target is gone), its empty commit uses up the pending commit
+/// message and origin, so the step that follows would be committed as
+/// Loro's anonymous `undo`: unattributed, and recorded by the other stack.
+/// `on_pop` therefore sets them again after every popped step.
+fn undo_manager(
+    doc: &LoroDoc,
+    scope: UndoScope,
+    config: UndoConfig,
+    message: Arc<Mutex<String>>,
+) -> UndoManager {
     let mut manager = UndoManager::new(doc);
     for prefix in scope.excluded_origins() {
         manager.add_exclude_origin_prefix(prefix);
     }
     manager.set_merge_interval(config.merge_interval_ms);
     manager.set_max_undo_steps(config.max_steps);
+    let doc = doc.clone();
+    manager.set_on_pop(Some(Box::new(move |_, _, _| {
+        doc.set_next_commit_message(&lock(&message));
+        doc.set_next_commit_origin(scope.undo_origin());
+    })));
     manager
 }
 
@@ -167,6 +192,11 @@ impl Document {
         };
         result.map_err(|err| ModelError::Decode(err.to_string()))?;
         let mut document = Self::wrap(doc, options.undo);
+        document.known_features = options
+            .known_features
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect();
         document.check_schema(options)?;
         Ok(document)
     }
@@ -178,23 +208,33 @@ impl Document {
             lock(&sink).push(RawEvent::from_event(&event));
         }));
         let view = build(&doc);
+        let undo_message = Arc::new(Mutex::new(String::new()));
         Self {
-            undo_user: undo_manager(&doc, UndoScope::User, undo),
-            undo_ai: undo_manager(&doc, UndoScope::Assistant, undo),
+            undo_user: undo_manager(&doc, UndoScope::User, undo, undo_message.clone()),
+            undo_ai: undo_manager(&doc, UndoScope::Assistant, undo, undo_message.clone()),
+            undo_message,
             doc,
             view,
             inbox,
             _subscription: subscription,
             mode: Mode::Editable,
+            known_features: schema::KNOWN_FEATURES
+                .iter()
+                .map(|f| (*f).to_owned())
+                .collect(),
+            open_groups: [false; 2],
         }
     }
 
+    /// Checks the schema version and required features on open, and runs
+    /// migrations. A document this version may only read is not migrated
+    /// (that would write to it), and a failed migration opens it read-only.
     fn check_schema(&mut self, options: &OpenOptions<'_>) -> Result<()> {
         let mut version = self.view.meta.schema_version.ok_or_else(|| {
             ModelError::Decode("not an Imaginarium document: meta.schema_version is missing".into())
         })?;
-        if version > schema::SCHEMA_VERSION {
-            self.mode = Mode::ReadOnly(ReadOnlyReason::NewerSchema(version));
+        if let Some(reason) = self.read_only_reason() {
+            self.mode = Mode::ReadOnly(reason);
             return Ok(());
         }
         while version < schema::SCHEMA_VERSION {
@@ -203,24 +243,42 @@ impl Document {
                 return Ok(());
             };
             let next = version + 1;
-            self.transact(&Actor::Migration, |t| {
+            let migrated = self.transact(&Actor::Migration, |t| {
                 (migration.apply)(t)?;
                 t.set_schema_version(next)
-            })?;
+            });
+            if let Err(err) = migrated {
+                self.mode = Mode::ReadOnly(ReadOnlyReason::MigrationFailed {
+                    from: version,
+                    reason: err.to_string(),
+                });
+                return Ok(());
+            }
             version = next;
+        }
+        if let Some(reason) = self.read_only_reason() {
+            self.mode = Mode::ReadOnly(reason);
+        }
+        Ok(())
+    }
+
+    /// Why this version may only read the document as it is now: a newer
+    /// schema, or required features it doesn't know (schema-v1.md §10).
+    fn read_only_reason(&self) -> Option<ReadOnlyReason> {
+        if let Some(version) = self.view.meta.schema_version
+            && version > schema::SCHEMA_VERSION
+        {
+            return Some(ReadOnlyReason::NewerSchema(version));
         }
         let missing: Vec<String> = self
             .view
             .meta
             .required_features
             .iter()
-            .filter(|f| !options.known_features.contains(&f.as_str()))
+            .filter(|f| !self.known_features.contains(f))
             .cloned()
             .collect();
-        if !missing.is_empty() {
-            self.mode = Mode::ReadOnly(ReadOnlyReason::MissingFeatures(missing));
-        }
-        Ok(())
+        (!missing.is_empty()).then_some(ReadOnlyReason::MissingFeatures(missing))
     }
 
     /// The current view: cheap to clone, safe to send to other threads.
@@ -255,7 +313,8 @@ impl Document {
             return Err(ModelError::ReadOnly(reason.clone()));
         }
         let before = self.doc.state_frontiers();
-        let result = edit(&mut Transaction::new(&self.doc, &self.view));
+        let mut txn = Transaction::new(&self.doc, &self.view);
+        let result = edit(&mut txn).and_then(|value| txn.finish().map(|()| value));
         match result {
             Ok(value) => {
                 self.commit(actor);
@@ -279,6 +338,18 @@ impl Document {
         if self.doc.get_pending_txn_len() == 0 {
             return Ok(());
         }
+        // Loro wants open groups closed before pausing. A failed
+        // transaction in the middle of a drag therefore splits the drag
+        // into two undo steps.
+        let groups = self.open_groups;
+        for (scope, open) in [UndoScope::User, UndoScope::Assistant]
+            .into_iter()
+            .zip(groups)
+        {
+            if open {
+                self.manager(scope).group_end();
+            }
+        }
         self.undo_user.pause();
         self.undo_ai.pause();
         self.commit(actor);
@@ -287,6 +358,14 @@ impl Document {
         self.undo_user.resume();
         self.undo_ai.resume();
         self.drain(ChangeOrigin::Local(actor.clone()));
+        for (scope, open) in [UndoScope::User, UndoScope::Assistant]
+            .into_iter()
+            .zip(groups)
+        {
+            if open {
+                self.manager(scope).group_start()?;
+            }
+        }
         reverted.map_err(ModelError::from)
     }
 
@@ -314,8 +393,20 @@ impl Document {
                 .import_batch(&updates.iter().map(|u| u.to_vec()).collect::<Vec<_>>())
                 .map(|_| ()),
         };
+        // Drain first: a batch that fails partway may have applied (and
+        // reported) some changes, which must not end up under the next
+        // change's origin.
+        let changes = self.drain(ChangeOrigin::Remote);
         result.map_err(|err| ModelError::Decode(err.to_string()))?;
-        Ok(self.drain(ChangeOrigin::Remote))
+        // A newer peer may have bumped the schema or required a feature:
+        // from then on this version must not write.
+        if changes.meta
+            && self.mode == Mode::Editable
+            && let Some(reason) = self.read_only_reason()
+        {
+            self.mode = Mode::ReadOnly(reason);
+        }
+        Ok(changes)
     }
 
     fn manager(&mut self, scope: UndoScope) -> &mut UndoManager {
@@ -346,16 +437,63 @@ impl Document {
         if let Mode::ReadOnly(reason) = &self.mode {
             return Err(ModelError::ReadOnly(reason.clone()));
         }
-        self.doc.set_next_commit_message(&by.message());
-        self.doc.set_next_commit_origin(scope.undo_origin());
-        let manager = self.manager(scope);
-        let done = if undo {
-            manager.undo()?
-        } else {
-            manager.redo()?
-        };
-        let changes = self.drain(ChangeOrigin::Undo(scope));
-        Ok(done.then_some(changes))
+        let message = by.message();
+        *lock(&self.undo_message) = message.clone();
+        loop {
+            self.doc.set_next_commit_message(&message);
+            self.doc.set_next_commit_origin(scope.undo_origin());
+            let manager = self.manager(scope);
+            let done = if undo { manager.undo() } else { manager.redo() };
+            // `on_pop` set them again after the last step, too.
+            self.doc.clear_next_commit_options();
+            let mut changes = self.drain(ChangeOrigin::Undo(scope));
+            let done = done?;
+            let ghosts = self.remove_ghosts(&changes, &message, scope)?;
+            if !done {
+                return Ok(None);
+            }
+            if ghosts.is_empty() {
+                return Ok(Some(changes));
+            }
+            changes.forget(&ghosts);
+            if !changes.is_empty() {
+                return Ok(Some(changes));
+            }
+            // The step only brought back an empty node: it was stale, like
+            // the no-op steps Loro skips itself. Go on with the next one.
+        }
+    }
+
+    /// Deletes the nodes an undo or redo brought back without any content.
+    ///
+    /// Undoing a move of a node revives the node if it was deleted since.
+    /// If another actor's undo removed it, its properties went with it, and
+    /// what comes back is an empty node without kind or id. The deletion is
+    /// committed with the undo's origin, which neither stack records.
+    fn remove_ghosts(
+        &mut self,
+        changes: &ChangeSet,
+        message: &str,
+        scope: UndoScope,
+    ) -> Result<Vec<crate::NodeId>> {
+        let tree = self.doc.get_tree(root::NODES);
+        let mut ghosts = Vec::new();
+        for &id in &changes.created {
+            let Some(tid) = self.view.handles.get(&id).copied() else {
+                continue;
+            };
+            if tree.get_meta(tid)?.get(node::KIND).is_none() {
+                tree.delete(tid)?;
+                ghosts.push(id);
+            }
+        }
+        if !ghosts.is_empty() {
+            self.doc.set_next_commit_message(message);
+            self.doc.set_next_commit_origin(scope.undo_origin());
+            self.doc.commit();
+            self.drain(ChangeOrigin::Undo(scope));
+        }
+        Ok(ghosts)
     }
 
     /// Whether `scope` has a step to undo.
@@ -379,12 +517,14 @@ impl Document {
     /// [`Document::end_undo_group`].
     pub fn begin_undo_group(&mut self, scope: UndoScope) -> Result<()> {
         self.manager(scope).group_start()?;
+        self.open_groups[scope as usize] = true;
         Ok(())
     }
 
     /// Ends the group started with [`Document::begin_undo_group`].
     pub fn end_undo_group(&mut self, scope: UndoScope) {
         self.manager(scope).group_end();
+        self.open_groups[scope as usize] = false;
     }
 
     /// The current version.
@@ -427,6 +567,20 @@ impl Document {
     pub fn compact_memory(&self) {
         self.doc.compact_change_store();
         self.doc.free_history_cache();
+    }
+
+    /// The actor recorded for this session's newest change (schema-v1.md
+    /// §11), for tests of attribution only.
+    #[doc(hidden)]
+    pub fn last_local_actor_for_tests(&self) -> Option<Actor> {
+        let peer = self.doc.peer_id();
+        let id = self
+            .doc
+            .oplog_frontiers()
+            .iter()
+            .find(|id| id.peer == peer)?;
+        let message = self.doc.get_change(id)?.message?;
+        Actor::from_message(&message)
     }
 
     /// Writes `meta.schema_version`, for tests of migrations only. The model

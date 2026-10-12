@@ -23,7 +23,8 @@ use imaginarium_crypto::{
     AclState, Argon2Config, CryptoError, DeviceKey, EpochKey, EpochKeys, IdentityKey, KeyId,
     KnownKeys, PasswordKeys, RecipientKeys, Role, SeededRandomness, SharedKeys, Signer,
     Suite1Sealer, Verifier, XWingKeyPair, blob_records, genesis_record, identity_pb,
-    keyring_record, sign_record, verify_record, wrap_hpke, wrap_password, wrap_with_key,
+    keyring_record, keyrings, sign_record, unwrap_hpke, verify_record, wrap_hpke, wrap_password,
+    wrap_with_key,
 };
 use imaginarium_format::{
     DocId, FileHeader, KeyProvider, ObjectId, OpenOptions, Reader, Record, RecordBuilder,
@@ -115,8 +116,13 @@ impl User {
         self.identity.public().key_id()
     }
 
+    fn xwing(&self) -> XWingKeyPair {
+        XWingKeyPair::from_private_bytes(&self.xwing.private_bytes()).unwrap()
+    }
+
+    /// Keys for documents whose chain [`owner`] started.
     fn reader_keys(&self) -> RecipientKeys {
-        RecipientKeys::new(XWingKeyPair::from_private_bytes(&self.xwing.private_bytes()).unwrap())
+        RecipientKeys::new(self.xwing(), owner().id())
     }
 }
 
@@ -702,17 +708,32 @@ fn v7_opens_with_the_password_in_any_normalization() {
 }
 
 #[test]
-fn v8_opens_with_the_recipient_key_for_both_epochs() {
-    let mut keys = RecipientKeys::new(XWingKeyPair::from_seed(&RECIPIENT_SEED));
-    let mut reader = open("08-hpke.imag", &mut keys).unwrap();
-    assert_eq!(
-        content(&mut reader, 0x02),
-        b"opaque snapshot bytes",
-        "epoch 1"
-    );
-    assert_eq!(content(&mut reader, 0x03), update_content(3), "epoch 2");
-    let mut stranger = RecipientKeys::new(XWingKeyPair::from_seed(&[0xA2; 32]));
-    assert!(open("08-hpke.imag", &mut stranger).is_err());
+fn v8_wraps_unwrap_but_the_file_needs_an_acl_chain() {
+    let recipient = XWingKeyPair::from_seed(&RECIPIENT_SEED);
+    // The wraps themselves are valid HPKE (spec §6.4.2), one per epoch:
+    // the keys they hold open both epochs' records.
+    let mut reader = open("08-hpke.imag", &mut known(&[dek(1), dek(2)])).unwrap();
+    let key_records: Vec<Record> = records(&mut reader)
+        .into_iter()
+        .filter(|r| r.rtype() == RecordType::KEYR)
+        .collect();
+    let unwrapped: Vec<EpochKey> = keyrings(&DOC, &key_records).unwrap()[0]
+        .epochs
+        .iter()
+        .map(|epoch| unwrap_hpke(&DOC, epoch.epoch, &epoch.wraps[0], &recipient).unwrap())
+        .collect();
+    let mut reader = open("08-hpke.imag", &mut known(&unwrapped)).unwrap();
+    assert_eq!(content(&mut reader, 0x02), b"opaque snapshot bytes");
+    assert_eq!(content(&mut reader, 0x03), update_content(3));
+    // But without an ACL chain anyone could have made them, so the file
+    // doesn't open with a recipient key (ADR-0018).
+    for mut keys in [
+        RecipientKeys::trusting_any_owner(XWingKeyPair::from_seed(&RECIPIENT_SEED)),
+        RecipientKeys::new(XWingKeyPair::from_seed(&RECIPIENT_SEED), owner().id()),
+    ] {
+        let err = open("08-hpke.imag", &mut keys).err().unwrap();
+        assert!(err.to_string().contains("need an ACL chain"), "{err}");
+    }
 }
 
 #[test]
@@ -772,6 +793,16 @@ fn v10a_acl_chain_replays_and_authorizes_every_record() {
 }
 
 #[test]
+fn v10a_opens_only_for_the_expected_owner() {
+    let owner = owner();
+    let mut wrong = RecipientKeys::new(owner.xwing(), editor().id());
+    let err = open("10a-acl-chain.imag", &mut wrong).err().unwrap();
+    assert!(err.to_string().contains("expected owner"), "{err}");
+    let mut any = RecipientKeys::trusting_any_owner(owner.xwing());
+    assert!(open("10a-acl-chain.imag", &mut any).is_ok());
+}
+
+#[test]
 fn v10b_and_v10c_are_rejected_when_opening() {
     let fork = open("10b-acl-fork.imag", &mut owner().reader_keys())
         .err()
@@ -788,4 +819,38 @@ fn v10b_and_v10c_are_rejected_when_opening() {
         rogue.to_string().contains("not allowed to add a member"),
         "{rogue}"
     );
+}
+
+#[test]
+fn a_chain_replaced_by_someone_else_is_refused() {
+    // ADR-0018: whoever can write to the file replaces the ACL chain with
+    // one they started and wraps a key they know to the owner's public
+    // key. The chain is internally valid; only the expected owner tells it
+    // apart.
+    let (owner, attacker) = (owner(), User::new(0x40));
+    let mut rng = rng("replaced chain");
+    let genesis = genesis_record(
+        &DOC,
+        &attacker.identity,
+        attacker.xwing.public_bytes(),
+        &attacker.device,
+        attacker.device_xwing.public_bytes(),
+        &mut rng,
+    )
+    .unwrap();
+    let keyring = signed_keyring(&[1], &[&owner], &attacker, 0x51, &mut rng);
+    let key = dek(1);
+    let sealer = Suite1Sealer::new(&key, SeededRandomness::new("replaced chain epoch 1"));
+    let meta = RecordBuilder::new(RecordType::META, id(0x01))
+        .build(&DOC, meta_content(), Some(&sealer))
+        .unwrap();
+    let forged = file(true, &[genesis, keyring, meta], 0xF0, Some(&sealer));
+    let err = Reader::open_with(
+        Cursor::new(forged),
+        OpenOptions::default(),
+        Some(&mut owner.reader_keys()),
+    )
+    .err()
+    .expect("the forged chain was accepted");
+    assert!(err.to_string().contains("expected owner"), "{err}");
 }

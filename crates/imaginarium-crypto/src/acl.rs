@@ -114,6 +114,7 @@ pub struct AclState {
     doc_id: DocId,
     next_index: u64,
     head_hash: [u8; 32],
+    genesis_owner: KeyId,
     owner: KeyId,
     epoch: u32,
     rotation_required: bool,
@@ -148,6 +149,7 @@ impl AclState {
             doc_id: *doc_id,
             next_index: 0,
             head_hash: [0; 32],
+            genesis_owner: owner_id,
             owner: owner_id,
             epoch: 1,
             rotation_required: false,
@@ -387,9 +389,16 @@ impl AclState {
         self.head_hash
     }
 
-    /// The owner's key id.
+    /// The current owner's key id.
     pub fn owner(&self) -> KeyId {
         self.owner
+    }
+
+    /// The key id of the identity that signed the `Genesis`, which stays
+    /// the same when ownership is transferred. Readers that unlock with a
+    /// recipient key check it against the owner they expect (ADR-0018).
+    pub fn genesis_owner(&self) -> KeyId {
+        self.genesis_owner
     }
 
     /// The current key epoch.
@@ -1249,6 +1258,7 @@ mod tests {
         let provider = || {
             crate::RecipientKeys::new(
                 XWingKeyPair::from_private_bytes(&editor.xwing.private_bytes()).unwrap(),
+                owner.identity.public().key_id(),
             )
         };
 
@@ -1276,5 +1286,28 @@ mod tests {
         .unwrap();
         records.push(signed);
         assert!(provider().opener(&header, &records).is_ok());
+
+        // The same chain, but the reader expects another owner (ADR-0018).
+        let expecting_editor = crate::RecipientKeys::new(
+            XWingKeyPair::from_private_bytes(&editor.xwing.private_bytes()).unwrap(),
+            editor.identity.public().key_id(),
+        )
+        .opener(&header, &records);
+        assert!(expecting_editor.is_err());
+    }
+
+    #[test]
+    fn the_genesis_owner_survives_a_transfer() {
+        let (owner, admin) = (User::new(), User::new());
+        let (state, _) = chain(
+            &owner,
+            vec![
+                (admin.add(Role::Admin), &owner),
+                (admin.set_role(Role::Owner), &owner),
+            ],
+        )
+        .unwrap();
+        assert_eq!(state.owner(), admin.id());
+        assert_eq!(state.genesis_owner(), owner.id());
     }
 }

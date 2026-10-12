@@ -38,6 +38,7 @@
 //! [`docs/format/spec-v1.md`]: https://github.com/giosuel/imaginarium/blob/main/docs/format/spec-v1.md
 #![forbid(unsafe_code)]
 
+mod atomic;
 mod compact;
 mod error;
 mod header;
@@ -52,6 +53,7 @@ mod trailer;
 mod varint;
 mod writer;
 
+pub use atomic::AtomicFile;
 pub use compact::{CompactionPlan, CompactionReport, KeepFn, compact, compact_file};
 pub use error::{FormatError, Result};
 pub use header::{FLAG_ENCRYPTED, FileHeader, HEADER_LEN, MAGIC, MAJOR, MINOR};

@@ -139,6 +139,13 @@ impl KeyId {
     }
 }
 
+/// Hex, as `imag` prints and takes it (`--owner`).
+impl std::fmt::Display for KeyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
 impl std::fmt::Debug for KeyId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("KeyId(")?;

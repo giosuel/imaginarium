@@ -4,9 +4,9 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::header::FileHeader;
+use crate::atomic::AtomicFile;
 use crate::index::StreamKey;
 use crate::payload::RecordSealer;
 use crate::pb;
@@ -63,8 +63,7 @@ where
     F: Read + Seek,
     G: Write + Seek + Durable,
 {
-    let header = FileHeader { ..*reader.header() };
-    let mut writer = Writer::create(out, header)?;
+    let mut writer = Writer::create(out, *reader.header())?;
     let mut report = CompactionReport::default();
 
     let entries = reader.index().entries().to_vec();
@@ -94,7 +93,13 @@ where
         .collect();
 
     for entry in &entries {
-        let rtype = RecordType(entry.rtype);
+        let flags = RecordFlags(u8::try_from(entry.rflags).unwrap_or(0xFF));
+        // Reserved flag bits make a record one of unknown type (spec §4.3).
+        let rtype = if flags.has_reserved() {
+            RecordType(u32::MAX)
+        } else {
+            RecordType(entry.rtype)
+        };
         let keep_by_policy = match rtype {
             RecordType::META => Some(entry.offset) == latest_meta,
             RecordType::THMB => Some(entry.offset) == latest_thumbnail,
@@ -105,7 +110,6 @@ where
             | RecordType::VERS
             | RecordType::DERV => true,
             _ => {
-                let flags = RecordFlags(u8::try_from(entry.rflags).unwrap_or(0));
                 if !flags.contains(RecordFlags::SAFE_TO_COPY) {
                     report.dropped_unknown.push(entry.rtype);
                 }
@@ -115,6 +119,13 @@ where
         let vetoed = plan.keep.as_ref().is_some_and(|keep| !keep(entry));
         if keep_by_policy && !vetoed {
             let record = reader.read_record(entry)?;
+            // The decision used the index's copy of the flags.
+            if u32::from(record.flags().0) != entry.rflags {
+                return Err(FormatError::Invalid(format!(
+                    "index entry at {} has other flags than its record",
+                    entry.offset
+                )));
+            }
             writer.append(&record)?;
             report.kept += 1;
         } else {
@@ -141,48 +152,10 @@ pub fn compact_file(
 ) -> Result<CompactionReport> {
     let source = std::fs::File::open(path)?;
     let mut reader = Reader::open_with(source, OpenOptions::default(), keys)?;
-    let temp = temp_path(path)?;
-    let out = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let result = compact(&mut reader, out, plan, index_sealer);
-    let (writer, report) = match result {
-        Ok(done) => done,
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            return Err(err);
-        }
-    };
+    let mut out = AtomicFile::create(path)?;
+    let (writer, report) = compact(&mut reader, out.file(), plan, index_sealer)?;
     drop(writer); // already synced by commit
     drop(reader);
-    std::fs::rename(&temp, path)?;
-    sync_parent_dir(path)?;
+    out.commit()?;
     Ok(report)
-}
-
-fn temp_path(path: &Path) -> Result<PathBuf> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| FormatError::Invalid(format!("{} has no file name", path.display())))?;
-    let mut temp_name = name.to_os_string();
-    temp_name.push(".compact.tmp");
-    Ok(path.with_file_name(temp_name))
-}
-
-/// Makes the rename durable. On Unix this fsyncs the directory. Other
-/// platforms don't support or need it.
-fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }

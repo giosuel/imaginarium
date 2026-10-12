@@ -245,11 +245,13 @@ impl UndoScope {
         }
     }
 
-    /// Origin prefixes this stack must not record.
+    /// Origin prefixes this stack must not record. `undo` covers both
+    /// stacks' undo commits and Loro's default `undo` origin (a stack
+    /// ignores its own undo commits anyway).
     pub(crate) fn excluded_origins(self) -> &'static [&'static str] {
         match self {
-            UndoScope::User => &["ai:", "addon:", "migration", "undo:ai"],
-            UndoScope::Assistant => &["user", "addon:", "migration", "undo:user"],
+            UndoScope::User => &["ai:", "addon:", "migration", "undo"],
+            UndoScope::Assistant => &["user", "addon:", "migration", "undo"],
         }
     }
 }

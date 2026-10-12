@@ -221,10 +221,15 @@ fn v3_recovery_cases_behave_as_documented() {
         2
     );
 
+    // The trailer is broken, but the index before it is intact.
     let trailer = read("03b-corrupt-trailer.imag");
     assert!(matches!(
         trailer.recovery().unwrap().method,
-        RecoveryMethod::ForwardScan { records: 2, .. }
+        RecoveryMethod::PreviousCommit {
+            adopted_records: 0,
+            discarded_bytes: 24,
+            ..
+        }
     ));
 
     let no_index = read("03c-no-index.imag");

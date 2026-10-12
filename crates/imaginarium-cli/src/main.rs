@@ -8,7 +8,9 @@
 //!   works without keys. `--json` for scripts.
 //! - `imag verify FILE`: every check this version can run: checksums, the
 //!   index, decryption, blobs, keyrings, signatures, the ACL chain and the
-//!   document itself. Exit code 0 if nothing failed, 1 if something did.
+//!   document itself. Exit code 0 if every check ran and passed, 1 if
+//!   something failed, 3 if nothing failed but some checks couldn't run
+//!   (no key, say).
 //! - `imag export-json FILE`: the decrypted document as JSON.
 //!
 //! Keys come from `--password-stdin`, `--password-env VAR` or
@@ -75,6 +77,8 @@ enum Command {
 
 /// Exit code when the command couldn't run (bad arguments, unreadable file).
 const ERROR: u8 = 2;
+/// Exit code of `verify` when nothing failed but some checks couldn't run.
+const INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -82,19 +86,27 @@ fn main() -> ExitCode {
     let mut out = stdout.lock();
     let result = match &cli.command {
         Command::Inspect { file, json, keys } => {
-            inspect::run(file, keys, *json, &mut out).map(|()| true)
+            inspect::run(file, keys, *json, &mut out).map(|()| ExitCode::SUCCESS)
         }
-        Command::Verify { file, keys } => verify::run(file, keys, &mut out),
+        Command::Verify { file, keys } => {
+            verify::run(file, keys, &mut out).map(|verdict| match verdict {
+                verify::Verdict::Ok => ExitCode::SUCCESS,
+                verify::Verdict::Problems => ExitCode::from(1),
+                verify::Verdict::Incomplete => ExitCode::from(INCOMPLETE),
+            })
+        }
         Command::ExportJson {
             file,
             compact,
             keys,
-        } => export::run(file, keys, *compact, &mut out).map(|()| true),
+        } => export::run(file, keys, *compact, &mut out).map(|()| ExitCode::SUCCESS),
     };
+    let verifying = matches!(cli.command, Command::Verify { .. });
     match result {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(1),
-        // The reader went away (`imag … | head`): stop quietly, like other tools.
+        Ok(code) => code,
+        // The reader went away (`imag … | head`): stop quietly, like other
+        // tools. A verify that didn't finish has no result, though.
+        Err(err) if is_broken_pipe(&err) && verifying => ExitCode::from(ERROR),
         Err(err) if is_broken_pipe(&err) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("imag: {err:#}");

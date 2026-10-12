@@ -50,7 +50,10 @@ pub struct ChangeSet {
     pub created: Vec<NodeId>,
     /// Removed nodes, including the descendants of removed nodes.
     pub deleted: Vec<NodeId>,
-    /// Nodes with a new parent or position among their siblings.
+    /// Nodes with a new parent or position among their siblings. When the
+    /// view was rebuilt instead of updated (rare), this also lists nodes
+    /// whose index only shifted because siblings came or went: treat it as
+    /// "lay these out again", not as a list of explicit moves.
     pub moved: Vec<NodeId>,
     /// Nodes whose content changed.
     pub changed: Vec<(NodeId, NodeChanges)>,
@@ -78,6 +81,15 @@ impl ChangeSet {
             && self.assets.is_empty()
             && !self.pages
             && !self.ext
+    }
+
+    /// Drops every mention of `nodes`, for nodes that came and went within
+    /// one change.
+    pub(crate) fn forget(&mut self, nodes: &[NodeId]) {
+        self.created.retain(|id| !nodes.contains(id));
+        self.deleted.retain(|id| !nodes.contains(id));
+        self.moved.retain(|id| !nodes.contains(id));
+        self.changed.retain(|(id, _)| !nodes.contains(id));
     }
 
     /// What changed about one node (nothing for created or deleted nodes).

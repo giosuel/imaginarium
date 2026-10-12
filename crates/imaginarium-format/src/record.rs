@@ -113,7 +113,8 @@ impl std::ops::BitOrAssign for RecordFlags {
 pub struct Limits {
     /// Maximum `hlen`.
     pub max_header: u64,
-    /// Maximum `plen` and `plain_len`.
+    /// Maximum `plen` and `plain_len`, and the largest segmented blob that
+    /// [`crate::Reader::read_blob`] loads into memory.
     pub max_payload: u64,
     /// Maximum `slen`.
     pub max_signature: u64,

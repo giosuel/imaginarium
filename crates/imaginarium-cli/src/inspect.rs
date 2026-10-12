@@ -169,7 +169,12 @@ fn details(record: &imaginarium_format::Record) -> String {
         parts.push(h.codec.clone());
     }
     if let Some(segment) = &h.segment {
-        parts.push(format!("segment {}/{}", segment.index + 1, segment.count));
+        // Untrusted: u32::MAX + 1 must not overflow.
+        parts.push(format!(
+            "segment {}/{}",
+            u64::from(segment.index) + 1,
+            segment.count
+        ));
     }
     if !h.extension_id.is_empty() {
         parts.push(h.extension_id.clone());

@@ -277,8 +277,10 @@ fn apply_text(
     if node.text_container.as_ref() != Some(target) || node.text.is_none() {
         return false;
     }
-    if let Some(text) = Arc::make_mut(node).text.as_mut() {
-        text.apply_delta(delta);
+    if let Some(text) = Arc::make_mut(node).text.as_mut()
+        && !text.apply_delta(delta)
+    {
+        return false;
     }
     dirty.text_touched.insert(id);
     true
@@ -380,7 +382,7 @@ fn apply_tree_item(
                         dirty.moved.insert(id);
                     }
                 }
-                None => remove_subtree(view, dirty, id),
+                None => remove_subtree(view, dirty, id)?,
             }
         }
         TreeExternalDiff::Delete {
@@ -390,15 +392,10 @@ fn apply_tree_item(
             let Some(&id) = view.owners.get(&tid) else {
                 return Ok(());
             };
-            if let NodeId::Stored(stored) = id
-                && view.shadowed.values().any(|s| *s == stored)
-            {
-                return Err(Rebuild); // a shadowed duplicate takes over the id
-            }
             if let Some(old) = view_parent(view, *old_parent)? {
                 remove_child(view, dirty, old, *old_index, id);
             }
-            remove_subtree(view, dirty, id);
+            remove_subtree(view, dirty, id)?;
         }
     }
     Ok(())
@@ -442,10 +439,18 @@ fn remove_child(
     }
 }
 
-/// Removes a node and its descendants from the view.
-fn remove_subtree(view: &mut DocumentView, dirty: &mut Dirty, id: NodeId) {
+/// Removes a node and its descendants from the view. If one of them holds
+/// a stored id that a shadowed duplicate is waiting for, the duplicate takes
+/// over the id: that needs a rebuild.
+fn remove_subtree(view: &mut DocumentView, dirty: &mut Dirty, id: NodeId) -> Result<(), Rebuild> {
     let mut stack = vec![id];
     while let Some(next) = stack.pop() {
+        if let NodeId::Stored(stored) = next
+            && !view.shadowed.is_empty()
+            && view.shadowed.values().any(|s| *s == stored)
+        {
+            return Err(Rebuild);
+        }
         if let Some(children) = view.children.remove(&Parent::Node(next)) {
             stack.extend(children.iter().copied());
         }
@@ -463,6 +468,7 @@ fn remove_subtree(view: &mut DocumentView, dirty: &mut Dirty, id: NodeId) {
             dirty.text_touched.remove(&next);
         }
     }
+    Ok(())
 }
 
 /// Re-reads a (re-)created node and adopts descendants that Loro didn't

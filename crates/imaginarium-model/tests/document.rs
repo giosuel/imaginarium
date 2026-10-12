@@ -564,3 +564,360 @@ fn views_can_go_to_other_threads_and_documents_can_move() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn a_rolled_back_delete_keeps_the_undo_history() {
+    // Reverting a delete used to re-create the node's containers under new
+    // ids, which turned every undo step that touched them into a no-op.
+    let mut doc = board();
+    let x = shape(&mut doc, Parent::Root, 1.0);
+    doc.transact(&Actor::User, |t| {
+        t.set_geometry(x, Geometry::new(2.0, 0.0, 10.0, 10.0))
+    })
+    .unwrap();
+    let missing = shape(&mut board(), Parent::Root, 0.0); // from another document
+    let failed = doc.transact(&Actor::User, |t| {
+        t.set_generation(x, &[("model", "m".into())])?;
+        t.delete_node(x)?;
+        t.delete_node(missing)
+    });
+    assert!(failed.is_err());
+    assert!(doc.view().node(x).is_some());
+    assert_consistent(&doc);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(doc.view().node(x).unwrap().geometry().unwrap().x, 1.0);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(doc.view().node(x).is_none());
+}
+
+#[test]
+fn deleted_nodes_are_gone_for_the_rest_of_the_transaction() {
+    let mut doc = board();
+    let [a, b, c] = [1.0, 2.0, 3.0].map(|x| shape(&mut doc, Parent::Root, x));
+    let child = shape(&mut doc, Parent::Node(b), 4.0);
+    let (created, _) = doc
+        .transact(&Actor::User, |t| {
+            t.delete_node(b)?;
+            assert!(!t.contains(b));
+            assert!(!t.contains(child), "descendants go with it");
+            assert_eq!(t.children(Parent::Root), vec![a, c]);
+            assert!(t.set_prop(b, "name", "x".into()).is_err());
+            assert!(t.move_node(child, Parent::Root, None).is_err());
+            assert!(
+                t.create_node(Parent::Node(b), None, &NodeKind::Shape)
+                    .is_err()
+            );
+            // Indices count the remaining siblings only.
+            let created = t.create_node(Parent::Root, Some(2), &NodeKind::Shape)?;
+            t.move_node(a, Parent::Root, Some(1))?;
+            assert_eq!(t.children(Parent::Root), vec![c, a, created]);
+            Ok(created)
+        })
+        .unwrap();
+    let root: Vec<NodeId> = doc.view().children(Parent::Root).collect();
+    assert_eq!(root, vec![c, a, created]);
+    assert!(doc.view().node(child).is_none());
+    assert_consistent(&doc);
+}
+
+#[test]
+fn an_undo_that_skips_a_stale_step_stays_on_its_own_stack() {
+    // The user edited a node the assistant created, then the assistant's
+    // step was undone. The user's next undo skips the stale edit (a no-op
+    // now). That skip used to drop the undo's actor and origin, so the
+    // assistant's stack recorded the user's undo as its own step.
+    let mut doc = board();
+    let mine = shape(&mut doc, Parent::Root, 1.0);
+    let ai = Actor::Ai("s1".into());
+    let theirs = doc
+        .transact(&ai, |t| t.create_node(Parent::Root, None, &NodeKind::Shape))
+        .unwrap()
+        .0;
+    doc.transact(&Actor::User, |t| {
+        t.set_geometry(theirs, Geometry::new(5.0, 5.0, 1.0, 1.0))
+    })
+    .unwrap();
+    doc.undo(UndoScope::Assistant, &Actor::User)
+        .unwrap()
+        .unwrap();
+    assert!(doc.can_redo(UndoScope::Assistant));
+    let changes = doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(changes.origin, ChangeOrigin::Undo(UndoScope::User));
+    assert_eq!(changes.deleted, vec![mine]);
+    assert_eq!(doc.last_local_actor_for_tests(), Some(Actor::User));
+    assert!(
+        doc.can_redo(UndoScope::Assistant),
+        "the assistant's redo stack was cleared"
+    );
+    assert!(
+        !doc.can_undo(UndoScope::Assistant),
+        "the user's undo landed on the assistant's stack"
+    );
+    // Both stacks still work.
+    doc.redo(UndoScope::Assistant, &Actor::User)
+        .unwrap()
+        .unwrap();
+    assert!(doc.view().node(theirs).is_some());
+    doc.redo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(doc.view().node(mine).is_some());
+    assert_consistent(&doc);
+}
+
+#[test]
+fn undoing_a_move_of_a_node_that_is_gone_leaves_no_empty_node() {
+    // Loro revives a deleted node when a move of it is undone. If another
+    // actor's undo removed the node (and its properties), what comes back
+    // is an empty node without kind or id. Nothing should come back.
+    for into_other in [false, true] {
+        let mut doc = board();
+        let mine = shape(&mut doc, Parent::Root, 1.0);
+        let ai = Actor::Ai("s1".into());
+        let theirs = doc
+            .transact(&ai, |t| t.create_node(Parent::Root, None, &NodeKind::Shape))
+            .unwrap()
+            .0;
+        let target = if into_other {
+            Parent::Node(mine)
+        } else {
+            Parent::Root
+        };
+        doc.transact(&Actor::User, |t| t.move_node(theirs, target, Some(0)))
+            .unwrap();
+        doc.undo(UndoScope::Assistant, &Actor::User)
+            .unwrap()
+            .unwrap();
+        let count = doc.view().node_count();
+        let changes = doc.undo(UndoScope::User, &Actor::User).unwrap();
+        assert!(
+            changes.as_ref().is_none_or(|c| c.created.is_empty()),
+            "{changes:?}"
+        );
+        assert!(doc.view().node_count() <= count);
+        let mut stack: Vec<NodeId> = doc.view().children(Parent::Root).collect();
+        while let Some(id) = stack.pop() {
+            let node = doc.view().node(id).unwrap();
+            assert!(
+                !matches!(node.kind(), NodeKind::Unknown(k) if k.is_empty()),
+                "an empty node came back: {id}"
+            );
+            stack.extend(doc.view().children(Parent::Node(id)));
+        }
+        assert_consistent(&doc);
+    }
+}
+
+#[test]
+fn removing_a_duplicated_node_inside_a_subtree_keeps_the_view_consistent() {
+    // Two peers delete the same node and both undo: two live copies with
+    // one stored id, one of them shadowed. When the winner goes away as
+    // part of a deleted subtree, the other copy takes over the id.
+    let mut a = board();
+    let frame = shape(&mut a, Parent::Root, 0.0);
+    let dup = shape(&mut a, Parent::Root, 1.0);
+    let mut b = open(&a.export_snapshot().unwrap());
+    let (va, vb) = (a.version(), b.version());
+    for doc in [&mut a, &mut b] {
+        doc.transact(&Actor::User, |t| t.delete_node(dup)).unwrap();
+        doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    }
+    let from_b = b.export_updates_since(&vb).unwrap();
+    a.apply_remote(&[&from_b]).unwrap();
+    let from_a = a.export_updates_since(&va).unwrap();
+    b.apply_remote(&[&from_a]).unwrap();
+    assert_consistent(&a);
+    a.transact(&Actor::User, |t| {
+        t.move_node(dup, Parent::Node(frame), None)
+    })
+    .unwrap();
+    assert_consistent(&a);
+    a.transact(&Actor::User, |t| t.delete_node(frame)).unwrap();
+    assert_consistent(&a);
+    assert!(
+        a.view().node(dup).is_some(),
+        "the other copy has the id now"
+    );
+}
+
+#[test]
+fn remote_changes_that_need_a_newer_reader_make_the_document_read_only() {
+    // A newer peer bumps the schema, or starts using a feature this version
+    // doesn't know: this reader must stop writing (schema-v1.md §10).
+    let mut newer = board();
+    let mut reader = open(&newer.export_snapshot().unwrap());
+    let before = newer.version();
+    newer
+        .set_schema_version_for_tests(imaginarium_model::SCHEMA_VERSION + 1)
+        .unwrap();
+    reader
+        .apply_remote(&[&newer.export_updates_since(&before).unwrap()])
+        .unwrap();
+    assert_eq!(
+        reader.mode(),
+        &Mode::ReadOnly(ReadOnlyReason::NewerSchema(
+            imaginarium_model::SCHEMA_VERSION + 1
+        ))
+    );
+    assert!(reader.transact(&Actor::User, |t| t.set_title("x")).is_err());
+
+    let mut newer = board();
+    let mut reader = open(&newer.export_snapshot().unwrap());
+    let before = newer.version();
+    newer
+        .transact(&Actor::User, |t| t.require_feature("linked-frames"))
+        .unwrap();
+    reader
+        .apply_remote(&[&newer.export_updates_since(&before).unwrap()])
+        .unwrap();
+    assert_eq!(
+        reader.mode(),
+        &Mode::ReadOnly(ReadOnlyReason::MissingFeatures(vec![
+            "linked-frames".into()
+        ]))
+    );
+}
+
+#[test]
+fn documents_that_open_read_only_are_not_migrated() {
+    // An old schema plus a feature this version doesn't know: read-only,
+    // so the migration must not write to it either.
+    let mut old = board();
+    old.transact(&Actor::User, |t| t.require_feature("linked-frames"))
+        .unwrap();
+    let bytes = downgrade_to_version_0(&mut old);
+    let migrations = [Migration {
+        from: 0,
+        apply: rename_preset,
+    }];
+    let doc = Document::open_with(
+        &[&bytes],
+        &OpenOptions {
+            migrations: &migrations,
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        doc.mode(),
+        Mode::ReadOnly(ReadOnlyReason::MissingFeatures(_))
+    ));
+    assert_eq!(doc.view().meta().schema_version(), Some(0), "not migrated");
+}
+
+/// A migration that gives up.
+fn failing_migration(_: &mut imaginarium_model::Transaction<'_>) -> imaginarium_model::Result<()> {
+    Err(ModelError::Invalid("can't migrate this".into()))
+}
+
+#[test]
+fn a_failing_migration_opens_the_document_read_only() {
+    let mut old = board();
+    let bytes = downgrade_to_version_0(&mut old);
+    let migrations = [Migration {
+        from: 0,
+        apply: failing_migration,
+    }];
+    let doc = Document::open_with(
+        &[&bytes],
+        &OpenOptions {
+            migrations: &migrations,
+            ..OpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            doc.mode(),
+            Mode::ReadOnly(ReadOnlyReason::MigrationFailed { from: 0, .. })
+        ),
+        "{:?}",
+        doc.mode()
+    );
+    assert_eq!(doc.view().meta().schema_version(), Some(0));
+}
+
+fn plain(doc: &Document, id: NodeId) -> String {
+    doc.view()
+        .node(id)
+        .unwrap()
+        .text()
+        .map_or_else(String::new, |t| t.to_plain_string())
+}
+
+#[test]
+fn local_edits_keep_the_final_newline() {
+    // schema-v1.md §6: a non-empty text ends with `\n`.
+    let mut doc = board();
+    let id = doc
+        .transact(&Actor::User, |t| {
+            let id = t.create_node(Parent::Root, None, &NodeKind::Text)?;
+            t.insert_text(id, 0, "hello")?;
+            Ok(id)
+        })
+        .unwrap()
+        .0;
+    assert_eq!(plain(&doc, id), "hello\n");
+    // After the final newline: a new paragraph, terminated too.
+    doc.transact(&Actor::User, |t| t.insert_text(id, 6, "x"))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hello\nx\n");
+    // A range up to the end keeps the final newline...
+    doc.transact(&Actor::User, |t| t.delete_text(id, 3, 5))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hel\n");
+    doc.transact(&Actor::User, |t| t.delete_text(id, 3, 1))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hel\n");
+    // ...unless the whole text goes.
+    doc.transact(&Actor::User, |t| t.delete_text(id, 0, 4))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "");
+    assert_consistent(&doc);
+}
+
+#[test]
+fn a_failed_text_edit_writes_nothing() {
+    // insert_text used to create the `t` container before checking `pos`,
+    // so a command that ignored the error still committed it.
+    let mut doc = board();
+    let id = shape(&mut doc, Parent::Root, 0.0);
+    let (_, changes) = doc
+        .transact(&Actor::User, |t| {
+            assert!(t.insert_text(id, 5, "x").is_err());
+            Ok(())
+        })
+        .unwrap();
+    assert!(changes.is_empty(), "{changes:?}");
+    assert!(doc.view().node(id).unwrap().text().is_none());
+}
+
+#[test]
+fn a_failed_transaction_inside_an_undo_group_splits_it_cleanly() {
+    let mut doc = board();
+    let id = shape(&mut doc, Parent::Root, 0.0);
+    let x = |doc: &Document| doc.view().node(id).unwrap().geometry().unwrap().x;
+    let drag = |doc: &mut Document, x: f64| {
+        doc.transact(&Actor::User, |t| {
+            t.set_geometry(id, Geometry::new(x, 0.0, 10.0, 10.0))
+        })
+        .unwrap();
+    };
+    doc.begin_undo_group(UndoScope::User).unwrap();
+    drag(&mut doc, 1.0);
+    drag(&mut doc, 2.0);
+    let failed = doc.transact(&Actor::User, |t| {
+        t.set_geometry(id, Geometry::new(99.0, 0.0, 10.0, 10.0))?;
+        Err::<(), _>(ModelError::Invalid("gave up".into()))
+    });
+    assert!(failed.is_err());
+    drag(&mut doc, 3.0);
+    doc.end_undo_group(UndoScope::User);
+    assert_eq!(x(&doc), 3.0);
+    assert_consistent(&doc);
+    // Loro needs the group closed while the failed edit is reverted: the
+    // drag becomes two steps, before and after the failure.
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(x(&doc), 2.0);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(x(&doc), 0.0);
+    assert_consistent(&doc);
+}

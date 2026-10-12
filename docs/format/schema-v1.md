@@ -1,8 +1,9 @@
 # Imaginarium document schema, version 1
 
-- Status: **Draft 1** (2026-10-12). It becomes normative together with
-  [`spec-v1.md`](spec-v1.md) at tag `v0.0.2-m1`. Until then, implementation
-  findings may change it.
+- Status: **normative** (version 1, tag `v0.0.2-m1`, 2026-10-12), together
+  with [`spec-v1.md`](spec-v1.md). Changes from here on are additive (§10):
+  new keys, kinds and marks, and `schema_version` with a migration for
+  anything else.
 - Scope: the **logical** document inside the `loro-1` codec (spec §3.1).
   These are the CRDT containers, keys, node kinds, text marks and ids. The
   container (records, encryption, index) is `spec-v1.md`.

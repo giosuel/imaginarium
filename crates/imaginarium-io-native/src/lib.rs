@@ -13,12 +13,14 @@
 //!   password protection a keyring and encryption ([`save_new`],
 //!   [`save_new_path`], which replaces the file atomically).
 //!
+//! In documents with an ACL chain, every record the document is read from
+//! must be signed by a device the chain allows to write it (spec §7.3,
+//! §8.4). That costs about 70 µs per record (STATUS, known issues).
+//!
 //! # Non-goals (yet)
 //! - Incremental saving (appending `UPDT`s), blobs, thumbnails, the
-//!   `discussion` stream and Hub documents (account keys, ACL chains) come
-//!   with the app (M2) and collaboration (M8).
-//! - Verifying every signature on open is the `imag verify` command's job:
-//!   it costs time per record (STATUS, known issues).
+//!   `discussion` stream and saving Hub documents (account keys, ACL
+//!   chains) come with the app (M2) and collaboration (M8).
 #![forbid(unsafe_code)]
 
 mod error;
@@ -30,12 +32,12 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use imaginarium_crypto::{
-    AclState, Argon2Config, EpochKey, OsRandomness, PasswordKeys, Randomness, RecipientKeys,
+    AclState, Argon2Config, EpochKey, KeyId, OsRandomness, PasswordKeys, Randomness, RecipientKeys,
     Suite1Sealer, XWingKeyPair, keyring_record, wrap_password,
 };
 use imaginarium_format::{
-    DocId, Durable, FileHeader, ObjectId, OpenOptions, Reader, Record, RecordBuilder, RecordType,
-    Recovery, StreamKey, Writer, pb,
+    AtomicFile, DocId, Durable, FileHeader, ObjectId, OpenOptions, Reader, Record, RecordBuilder,
+    RecordType, Recovery, StreamKey, Writer, pb,
 };
 use imaginarium_model::{CODEC, Document};
 use prost::Message;
@@ -47,8 +49,18 @@ pub enum Credentials {
     None,
     /// A password (password keyring wraps).
     Password(Zeroizing<String>),
-    /// A device's or user's X-Wing key pair (HPKE wraps).
-    Recipient(XWingKeyPair),
+    /// A device's or user's X-Wing key pair (HPKE wraps), for documents
+    /// whose ACL chain `owner` started (ADR-0018).
+    Recipient {
+        /// The key pair.
+        keypair: XWingKeyPair,
+        /// The identity expected to have signed the chain's `Genesis`: the
+        /// user's own for account-key files, the inviting owner for shared
+        /// documents. `None` accepts any owner, which proves nothing about
+        /// who made the document; only inspection tools that show the owner
+        /// instead ([`AclState::genesis_owner`]) use it.
+        owner: Option<KeyId>,
+    },
 }
 
 /// An opened document file.
@@ -74,9 +86,9 @@ pub fn open_path(path: &Path, credentials: Credentials) -> Result<Opened> {
 pub fn open<F: Read + Seek>(file: F, credentials: Credentials) -> Result<Opened> {
     let mut reader = open_reader(file, credentials)?;
     let records = IndexedRecords::new(&reader);
-    let document = read_document(&mut reader, &records)?;
-    let meta = read_meta(&mut reader)?;
     let acl = read_acl(&mut reader)?;
+    let document = read_document(&mut reader, &records, acl.as_ref())?;
+    let meta = read_meta(&mut reader)?;
     Ok(Opened {
         document,
         header: *reader.header(),
@@ -95,8 +107,12 @@ pub fn open_reader<F: Read + Seek>(file: F, credentials: Credentials) -> Result<
         Credentials::Password(password) => {
             Reader::open_with(file, options, Some(&mut PasswordKeys::new(&password)))?
         }
-        Credentials::Recipient(pair) => {
-            Reader::open_with(file, options, Some(&mut RecipientKeys::new(pair)))?
+        Credentials::Recipient { keypair, owner } => {
+            let mut keys = match owner {
+                Some(owner) => RecipientKeys::new(keypair, owner),
+                None => RecipientKeys::trusting_any_owner(keypair),
+            };
+            Reader::open_with(file, options, Some(&mut keys))?
         }
     })
 }
@@ -125,11 +141,13 @@ impl IndexedRecords {
 }
 
 /// The payloads of a stream's head (snapshot, then updates), decrypted and
-/// decompressed. `None` if the file has no such stream.
+/// decompressed. `None` if the file has no such stream. With `acl`, every
+/// record must be signed by a device the chain allows to write it.
 pub fn stream_parts<F: Read + Seek>(
     reader: &mut Reader<F>,
     records: &IndexedRecords,
     stream: &StreamKey,
+    acl: Option<&AclState>,
 ) -> Result<Option<Vec<Vec<u8>>>> {
     let Some(head) = reader.index().head(stream).cloned() else {
         return Ok(None);
@@ -149,18 +167,23 @@ pub fn stream_parts<F: Read + Seek>(
         if record.header().codec != CODEC {
             return Err(NativeError::UnsupportedCodec(record.header().codec.clone()));
         }
+        if let Some(acl) = acl {
+            acl.verify_content(&record)?;
+        }
         parts.push(reader.read_content(&entry)?);
     }
     Ok(Some(parts))
 }
 
-/// Reads the `main` stream into a document.
+/// Reads the `main` stream into a document, checking its records against
+/// `acl` (from [`read_acl`]) if the file has an ACL chain.
 pub fn read_document<F: Read + Seek>(
     reader: &mut Reader<F>,
     records: &IndexedRecords,
+    acl: Option<&AclState>,
 ) -> Result<Document> {
     let parts =
-        stream_parts(reader, records, &StreamKey::main())?.ok_or(NativeError::NoDocument)?;
+        stream_parts(reader, records, &StreamKey::main(), acl)?.ok_or(NativeError::NoDocument)?;
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     Ok(Document::open(&parts)?)
 }
@@ -277,26 +300,17 @@ pub fn save_new<F: Read + Write + Seek + Durable>(
     Ok(writer.into_inner())
 }
 
-/// Saves a new file at `path`, replacing an existing one atomically: the
-/// file is written and synced under a temporary name, then renamed.
+/// Saves `document` as a new file at `path`, replacing an existing one
+/// atomically ([`AtomicFile`]: a temporary file, synced, renamed over it,
+/// keeping its permissions).
+///
+/// The file gets a new document id (spec §4.1), so this is for new files
+/// and "Save as", not for saving an opened file again: that appends to it
+/// (incremental saving, M2).
 pub fn save_new_path(path: &Path, document: &Document, options: &SaveOptions) -> Result<()> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let temporary = path.with_file_name(format!(".{name}.saving"));
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temporary)?;
-    let result = save_new(file, document, options).and_then(|file| Ok(file.sync_all()?));
-    if let Err(err) = result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(err);
-    }
-    std::fs::rename(&temporary, path)?;
+    let mut out = AtomicFile::create(path)?;
+    save_new(out.file(), document, options)?;
+    out.commit()?;
     Ok(())
 }
 

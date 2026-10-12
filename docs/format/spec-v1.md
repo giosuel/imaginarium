@@ -1,7 +1,8 @@
 # The `.imag` file format, version 1
 
-- **Status: Draft 1.** It becomes normative with tag `v0.0.2-m1`. Until then,
-  changes are allowed and are recorded in §14.
+- **Status: normative** (version 1, tag `v0.0.2-m1`, 2026-10-12). Changes
+  from here on follow §10: additive only, and a new minor version for
+  anything readers must know about. §14 records how this text came about.
 - Media type: `application/vnd.imaginarium.imag`. Extension: `.imag`.
 - Schema: [`proto/imag_v1.proto`](proto/imag_v1.proto) (normative).
 - Background and rationale: [`../design/file-format.md`](../design/file-format.md).
@@ -330,6 +331,16 @@ All wraps of an epoch MUST unwrap to the same `DEK_e`.
 - `info = LABEL("imaginarium.imag v1 keyring") ‖ doc_id ‖ u32(epoch)`,
   `aad = recipient_id`.
 - `hpke_enc` = encapsulated key, `ciphertext` = sealed `DEK_e`.
+- Anyone can wrap a key to a public key, so a wrap alone doesn't show that
+  the document is genuine. Readers MUST use HPKE wraps only from keyrings
+  authorized by an ACL chain (§8.4) whose `Genesis` was signed by the
+  identity the reader expects: its own identity for documents protected
+  with account keys, or the owner named by the invitation, share link or
+  Hub directory for shared documents. A document without an ACL chain, or
+  with one started by anyone else, MUST NOT be opened with recipient keys.
+  Otherwise whoever can write to the file could remove or replace the
+  chain and wrap a key they know (ADR-0018). Documents protected with
+  account keys therefore always carry an ACL chain, at least a `Genesis`.
 
 #### 6.4.3 Folder and link keys (`WRAP_KIND_FOLDER_KEY`, `WRAP_KIND_LINK_KEY`)
 
@@ -503,15 +514,27 @@ If the trailer is invalid:
 
 1. Search backwards from the end for the trailer magic `IMGEND\0\0`. For
    each candidate whose CRC and index record verify, use that index (the
-   last good save). Readers SHOULD then also adopt every complete,
-   CRC-valid record after that commit. For example, an autosave that
-   appended records but crashed before committing holds the user's newest
-   edits, and CRDT records are safe to apply even if they turn out to be
-   duplicates.
-2. If none is found, scan forward from offset 36. Parse records and verify
-   each CRC, stopping at the first invalid record. Then rebuild the heads
-   from the records found. For CRDT streams, applying all found `SNAP` and
+   last good save).
+2. Scan forward from the end of that commit, or from offset 36 if there is
+   none. Parse records and verify each CRC, stopping at the first invalid
+   record. An `INDX` record found this way is a commit whose trailer was
+   lost: if it loads (§9.2, step 2), use it instead, the newest one first.
+3. Readers SHOULD then adopt every complete, CRC-valid record after the
+   commit in use that authenticates under its keys (in encrypted
+   documents, it decrypts), up to the first one that doesn't. For example,
+   an autosave that appended records but crashed before committing holds
+   the user's newest edits, and CRDT records are safe to apply even if
+   they turn out to be duplicates. Uncommitted `KEYR` and `ACLC` records
+   MUST NOT be adopted: keys and access changes take effect only through a
+   commit.
+4. If no index loads at all, rebuild the heads from the records found
+   after offset 36, up to the first one that doesn't authenticate under
+   the keys among them. For CRDT streams, applying all found `SNAP` and
    `UPDT` records is safe, because CRDT merges are idempotent.
+
+Records that break §5.1 (plaintext in an encrypted document) count as
+invalid. Readers MAY limit how many candidate trailers and indexes they
+try, so a crafted file can't make recovery arbitrarily slow.
 
 Recovered files SHOULD be compacted before further appends.
 
@@ -520,7 +543,9 @@ index record has a valid CRC but fails to decrypt, the key is missing or
 wrong, or the ciphertext was tampered with. Readers MUST report that and
 MUST NOT fall back to recovery, which would present a wrong password as a
 damaged file, or let a removed member read around the index of an epoch
-they no longer have.
+they no longer have. This applies to every index recovery tries, including
+the ones found by scanning: a candidate that fails to decrypt ends
+recovery with that error.
 
 ## 10. Extensibility and compatibility
 
@@ -578,6 +603,13 @@ features.
 - **Removed members** keep any content they already decrypted. New content
   after `RotateEpoch` is out of their reach. Re-encrypting history is
   optional (compaction under the new epoch).
+- **Rolled-back chains.** Every prefix of a valid ACL chain is valid. A
+  file that lists only the changes up to before a `RemoveMember` and its
+  `RotateEpoch` (served by a removed member who knows the old epoch key,
+  for instance) looks like an older, genuine version. Readers can't detect
+  that from the file alone. Clients SHOULD remember the newest ACL head
+  they have seen per document and refuse older ones, and Hubs enforce the
+  current head for synced documents (§8.2).
 - **Randomness:** keys, nonces, `doc_id`, `object_id`s and salts MUST come
   from the OS CSPRNG.
 
@@ -650,3 +682,16 @@ These refine `../design/file-format.md` while writing the normative text:
     keys. Signers SHOULD use hedged ML-DSA (§7.2).
 15. *(Found while implementing M1.4)* Test vector 6 has **five segments**,
     not three: §5.3 only segments blobs above 1 MiB, in 256 KiB pieces.
+16. *(Found in the M1 review)* **Recipient wraps need a trusted ACL owner**
+    (§6.4.2, ADR-0018). Whether a document "has an ACL chain" came from the
+    file itself, so removing or replacing the chain made forged keyrings
+    acceptable. Account-key documents therefore carry a `Genesis`.
+17. *(Found in the M1 review)* **Recovery builds on the newest index that
+    loads** (§9.5), also one whose trailer was lost, and every candidate
+    that fails to decrypt is reported. Damaging the newest trailer used to
+    let a reader without the newest epoch's key fall back to an older
+    commit. Adopted records must authenticate, uncommitted `KEYR`/`ACLC`
+    records are not adopted, and plaintext records in encrypted documents
+    count as invalid (§5.1). Vector 03b now recovers from its index.
+18. *(Found in the M1 review)* **Rolled-back ACL chains** are documented as
+    a limit that needs remembered state (§12).
