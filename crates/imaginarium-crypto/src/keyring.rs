@@ -405,6 +405,77 @@ impl KeyProvider for PasswordKeys {
     }
 }
 
+/// Unlocks documents with a folder or share-link key ([`KeyProvider`],
+/// spec §6.4.3).
+pub struct SharedKeys {
+    kind: pb::WrapKind,
+    recipient_id: Vec<u8>,
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl SharedKeys {
+    /// Uses the key of folder `folder_id` for wraps addressed to it.
+    pub fn folder(folder_id: Vec<u8>, key: [u8; 32]) -> Self {
+        Self {
+            kind: pb::WrapKind::FolderKey,
+            recipient_id: folder_id,
+            key: Zeroizing::new(key),
+        }
+    }
+
+    /// Uses the key of share link `link_id` for wraps addressed to it.
+    pub fn link(link_id: Vec<u8>, key: [u8; 32]) -> Self {
+        Self {
+            kind: pb::WrapKind::LinkKey,
+            recipient_id: link_id,
+            key: Zeroizing::new(key),
+        }
+    }
+}
+
+impl KeyProvider for SharedKeys {
+    fn opener(
+        &mut self,
+        header: &FileHeader,
+        key_records: &[Record],
+    ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
+        unlock(header, key_records, |epoch, wrap| {
+            (wrap.kind() == self.kind && wrap.recipient_id == self.recipient_id)
+                .then(|| unwrap_with_key(&header.doc_id, epoch, wrap, &self.key))
+        })
+    }
+}
+
+/// Opens documents with epoch keys that are already known, for example
+/// cached in the OS keychain after the first unlock, so the password's
+/// Argon2 cost isn't paid on every open ([`KeyProvider`]).
+pub struct KnownKeys {
+    keys: EpochKeys,
+}
+
+impl KnownKeys {
+    /// Uses `keys` as they are.
+    pub fn new(keys: EpochKeys) -> Self {
+        Self { keys }
+    }
+}
+
+impl KeyProvider for KnownKeys {
+    fn opener(
+        &mut self,
+        header: &FileHeader,
+        key_records: &[Record],
+    ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
+        // Check the keyrings anyway: in documents with an ACL chain this
+        // verifies that the key records are authentic.
+        keyrings(&header.doc_id, key_records)?;
+        if self.keys.is_empty() {
+            return Err(CryptoError::NoMatchingWrap.into());
+        }
+        Ok(Box::new(Suite1Opener::new(self.keys.clone())))
+    }
+}
+
 /// Unlocks documents with a device's or user's X-Wing key ([`KeyProvider`]).
 pub struct RecipientKeys {
     keypair: XWingKeyPair,
