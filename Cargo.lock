@@ -5,3 +5,19 @@ version = 4
 [[package]]
 name = "imaginarium-app"
 version = "0.0.1"
+
+[[package]]
+name = "imaginarium-commands"
+version = "0.0.1"
+
+[[package]]
+name = "imaginarium-profiling"
+version = "0.0.1"
+
+[[package]]
+name = "imaginarium-settings"
+version = "0.0.1"
+
+[[package]]
+name = "imaginarium-test-utils"
+version = "0.0.1"

@@ -18,6 +18,10 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Members depend on each other via `name.workspace = true`.
+imaginarium-commands = { path = "crates/imaginarium-commands" }
+imaginarium-profiling = { path = "crates/imaginarium-profiling" }
+imaginarium-settings = { path = "crates/imaginarium-settings" }
+imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
 
 # External crates are added here (with exact minor versions) when a
 # milestone first needs them, never speculatively.
