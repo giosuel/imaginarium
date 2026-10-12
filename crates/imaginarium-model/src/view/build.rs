@@ -11,10 +11,10 @@ use loro::{
     ValueOrContainer,
 };
 
-use super::{DocumentView, MetaView, NodeView, StyleView, TextView};
+use super::{DocumentView, MetaView, NodeView, StyleView, TextView, asset_refs};
 use crate::ids::{BlobId, NodeId, Parent, StyleId};
 use crate::schema::{DocumentKind, NodeKind, meta, node, root};
-use crate::value::{Geometry, Props, Value};
+use crate::value::{Geometry, Props, Value, props};
 
 /// Builds the complete view of `doc`.
 pub(crate) fn build(doc: &LoroDoc) -> DocumentView {
@@ -92,7 +92,7 @@ pub(crate) fn tree_key(tid: TreeID) -> (u64, i32) {
 pub(crate) fn stored_id(tree: &LoroTree, tid: TreeID) -> Option<u64> {
     let meta = tree.get_meta(tid).ok()?;
     match meta.get(node::ID)? {
-        ValueOrContainer::Value(LoroValue::String(s)) => match NodeId::parse_stored(&s)? {
+        ValueOrContainer::Value(LoroValue::I64(value)) => match NodeId::from_stored(value)? {
             NodeId::Stored(id) => Some(id),
             NodeId::Tree(_) => None,
         },
@@ -137,7 +137,7 @@ pub(crate) fn read_meta(doc: &LoroDoc) -> MetaView {
             }
         }
     }
-    view.other = Arc::new(other);
+    view.other = props(other);
     view
 }
 
@@ -237,7 +237,7 @@ pub(crate) fn read_node_parts(meta: &LoroMap, view: &mut NodeView, parts: &Parts
                 }
             }
         }
-        view.style_overrides = Arc::new(overrides);
+        view.style_overrides = props(overrides);
     }
     if parts.text {
         match meta.get(node::TEXT) {
@@ -263,7 +263,7 @@ pub(crate) fn read_node_parts(meta: &LoroMap, view: &mut NodeView, parts: &Parts
                 }
             }
         }
-        view.assets = Arc::new(assets);
+        view.assets = asset_refs(assets);
     }
     if parts.ext {
         view.ext = map_at(meta, node::EXT)
@@ -276,7 +276,7 @@ pub(crate) fn read_node_parts(meta: &LoroMap, view: &mut NodeView, parts: &Parts
             .unwrap_or_default();
     }
     if parts.props {
-        let mut props = BTreeMap::new();
+        let mut fields = BTreeMap::new();
         for key in meta.keys() {
             if key.as_str() == node::KIND
                 || key.as_str() == node::ID
@@ -285,10 +285,10 @@ pub(crate) fn read_node_parts(meta: &LoroMap, view: &mut NodeView, parts: &Parts
                 continue;
             }
             if let Some(item) = meta.get(&key) {
-                props.insert(key.to_string(), deep(&item));
+                fields.insert(key.to_string(), deep(&item));
             }
         }
-        view.props = Arc::new(props);
+        view.props = props(fields);
     }
 }
 
@@ -296,7 +296,7 @@ pub(crate) fn read_node_parts(meta: &LoroMap, view: &mut NodeView, parts: &Parts
 pub(crate) fn read_style(styles: &LoroMap, key: &str) -> Option<StyleView> {
     let map = map_at(styles, key)?;
     let mut view = StyleView::default();
-    let mut props = BTreeMap::new();
+    let mut fields = BTreeMap::new();
     for key in map.keys() {
         let Some(item) = map.get(&key) else { continue };
         let value = deep(&item);
@@ -304,18 +304,18 @@ pub(crate) fn read_style(styles: &LoroMap, key: &str) -> Option<StyleView> {
             "name" => view.name = value.as_str().map(Arc::from),
             "parent" => view.parent = value.as_str().and_then(|s| StyleId::new(s).ok()),
             _ => {
-                props.insert(key.to_string(), value);
+                fields.insert(key.to_string(), value);
             }
         }
     }
-    view.props = Arc::new(props);
+    view.props = props(fields);
     Some(view)
 }
 
 /// A map's entries as values (nested containers as their deep values).
 pub(crate) fn read_props(map: &LoroMap) -> Props {
     match Value::from_loro(&map.get_deep_value()) {
-        Value::Map(map) => map,
+        Value::Map(map) => props(Arc::unwrap_or_clone(map)),
         _ => Props::default(),
     }
 }

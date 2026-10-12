@@ -133,8 +133,82 @@ impl From<String> for Value {
     }
 }
 
-/// A sorted, shared map of properties.
-pub type Props = Arc<BTreeMap<String, Value>>;
+/// A small, sorted, shared map of properties.
+///
+/// Stored as one exact-size slice, so a node with a single style override
+/// costs tens of bytes instead of a B-tree leaf (about 550 bytes); on a
+/// 10,000-node board that is the difference of ~10 MiB. Empty maps share
+/// one allocation.
+#[derive(Clone, PartialEq)]
+pub struct Props(Arc<[(Arc<str>, Value)]>);
+
+static EMPTY_PROPS: std::sync::OnceLock<Props> = std::sync::OnceLock::new();
+
+impl Props {
+    /// The value of `key`.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.0
+            .binary_search_by(|(k, _)| (**k).cmp(key))
+            .ok()
+            .map(|index| &self.0[index].1)
+    }
+
+    /// Whether `key` is present.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// All entries, sorted by key.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.0.iter().map(|(k, v)| (&**k, v))
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are no entries.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn from_map(map: BTreeMap<String, Value>) -> Self {
+        if map.is_empty() {
+            return Self::default();
+        }
+        Self(map.into_iter().map(|(k, v)| (Arc::from(k), v)).collect())
+    }
+}
+
+impl Default for Props {
+    fn default() -> Self {
+        EMPTY_PROPS.get_or_init(|| Props(Arc::from([]))).clone()
+    }
+}
+
+impl std::fmt::Debug for Props {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+/// A [`Props`] value from a map.
+pub(crate) fn props(map: BTreeMap<String, Value>) -> Props {
+    Props::from_map(map)
+}
+
+/// A shared map, sharing the allocation when it's empty.
+pub(crate) fn shared<V: Send + Sync + 'static>(
+    map: BTreeMap<String, V>,
+    empty: &'static std::sync::OnceLock<Arc<BTreeMap<String, V>>>,
+) -> Arc<BTreeMap<String, V>> {
+    if map.is_empty() {
+        empty.get_or_init(|| Arc::new(BTreeMap::new())).clone()
+    } else {
+        Arc::new(map)
+    }
+}
 
 /// A node's box (schema-v1.md §5.2), in points.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]

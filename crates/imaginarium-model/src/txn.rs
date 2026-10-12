@@ -198,7 +198,12 @@ impl<'d> Transaction<'d> {
             None => self.tree.create(tree_parent)?,
         };
         let meta = self.tree.get_meta(tid)?;
-        meta.insert(node::ID, id.to_string())?;
+        if let NodeId::Stored(stored) = id {
+            meta.insert(
+                node::ID,
+                i64::try_from(stored).map_err(|_| ModelError::Invalid("node id".into()))?,
+            )?;
+        }
         meta.insert(node::KIND, kind.as_str())?;
         if matches!(kind, NodeKind::Text) {
             meta.ensure_mergeable_text(node::TEXT)?;

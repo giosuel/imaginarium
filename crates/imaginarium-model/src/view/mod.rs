@@ -23,7 +23,15 @@ pub use text::{Marks, Paragraph, Run, TextView};
 
 use crate::ids::{BlobId, NodeId, Parent, StyleId};
 use crate::schema::{DocumentKind, NodeKind};
-use crate::value::{Geometry, Props, Value};
+use crate::value::{Geometry, Props, Value, props, shared};
+
+static EMPTY_ASSETS: std::sync::OnceLock<Arc<BTreeMap<String, BlobId>>> =
+    std::sync::OnceLock::new();
+
+/// Asset references, sharing the allocation when empty.
+pub(crate) fn asset_refs(map: BTreeMap<String, BlobId>) -> Arc<BTreeMap<String, BlobId>> {
+    shared(map, &EMPTY_ASSETS)
+}
 
 /// The document's `meta` (schema-v1.md §4).
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -100,13 +108,13 @@ impl NodeView {
             kind: NodeKind::Unknown("".into()),
             geometry: None,
             style: None,
-            style_overrides: Props::default(),
+            style_overrides: props(BTreeMap::new()),
             text: None,
             text_container: None,
-            assets: Arc::default(),
-            ext: Props::default(),
-            generation: Props::default(),
-            props: Props::default(),
+            assets: asset_refs(BTreeMap::new()),
+            ext: props(BTreeMap::new()),
+            generation: props(BTreeMap::new()),
+            props: props(BTreeMap::new()),
         }
     }
 

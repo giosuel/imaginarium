@@ -9,10 +9,15 @@ use loro::TreeID;
 
 use crate::error::{ModelError, Result};
 
-/// A node's identity (schema-v1.md §5).
+/// The largest stored id: 2^53 − 1, the largest integer JavaScript represents
+/// exactly.
+pub(crate) const MAX_STORED_ID: u64 = (1 << 53) - 1;
+
+/// A node's identity (schema-v1.md §5.5).
 ///
-/// Normally the 64-bit random id stored in the node's `id` key, written as
-/// 16 lowercase hex characters. It survives undo and redo, which re-create
+/// Normally the random id stored in the node's `id` key: an integer below
+/// 2^53, so it is exact in JavaScript too, written as 16 lowercase hex
+/// characters. It survives undo and redo, which re-create
 /// deleted nodes under new CRDT tree ids. Nodes without a stored id, and
 /// the losers of a duplicate id, are identified by their tree id instead,
 /// written `counter@peer`.
@@ -27,10 +32,23 @@ pub enum NodeId {
 impl NodeId {
     /// A new random id.
     pub fn generate() -> Result<Self> {
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes)
-            .map_err(|err| ModelError::Crdt(format!("no randomness: {err}")))?;
-        Ok(NodeId::Stored(u64::from_le_bytes(bytes)))
+        loop {
+            let mut bytes = [0u8; 8];
+            getrandom::fill(&mut bytes)
+                .map_err(|err| ModelError::Crdt(format!("no randomness: {err}")))?;
+            let id = u64::from_le_bytes(bytes) & MAX_STORED_ID;
+            if id != 0 {
+                return Ok(NodeId::Stored(id));
+            }
+        }
+    }
+
+    /// The value stored in a node's `id` key, if it is a valid stored id.
+    pub(crate) fn from_stored(value: i64) -> Option<Self> {
+        u64::try_from(value)
+            .ok()
+            .filter(|id| *id != 0 && *id <= MAX_STORED_ID)
+            .map(NodeId::Stored)
     }
 
     /// Parses the text form: 16 hex characters, or `counter@peer`.
@@ -44,8 +62,8 @@ impl NodeId {
         Self::parse_stored(text)
     }
 
-    /// Parses a stored `id` value (16 lowercase hex characters).
-    pub(crate) fn parse_stored(text: &str) -> Option<Self> {
+    /// Parses the text form of a stored id (16 lowercase hex characters).
+    fn parse_stored(text: &str) -> Option<Self> {
         if text.len() != 16
             || !text
                 .bytes()
@@ -245,9 +263,17 @@ mod tests {
         let node = NodeId::Tree(TreeID::new(1234567890, 12));
         assert_eq!(node.to_string(), "12@1234567890");
         assert_eq!(NodeId::parse("12@1234567890"), Some(node));
-        let stored = NodeId::Stored(0x00ab_cdef_0123_4567);
-        assert_eq!(stored.to_string(), "00abcdef01234567");
-        assert_eq!(NodeId::parse("00abcdef01234567"), Some(stored));
+        let stored = NodeId::Stored(0x000f_3a2c_9b1d_47e5);
+        assert_eq!(NodeId::from_stored(0x000f_3a2c_9b1d_47e5), Some(stored));
+        assert_eq!(NodeId::from_stored(0), None);
+        assert_eq!(
+            NodeId::from_stored(1 << 53),
+            None,
+            "beyond what JavaScript holds exactly"
+        );
+        assert_eq!(NodeId::from_stored(-1), None);
+        assert_eq!(stored.to_string(), "000f3a2c9b1d47e5");
+        assert_eq!(NodeId::parse("000f3a2c9b1d47e5"), Some(stored));
         assert_eq!(NodeId::parse("12"), None);
         assert_eq!(NodeId::parse("00ABCDEF01234567"), None, "lowercase only");
         assert!(matches!(NodeId::generate().unwrap(), NodeId::Stored(_)));
