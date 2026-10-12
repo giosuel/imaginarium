@@ -132,11 +132,12 @@ pub fn init(config: &TracingConfig) -> Result<(), InitError> {
 /// Picks the filter directives: explicit config, then [`FILTER_ENV`], then
 /// `RUST_LOG`, then [`DEFAULT_FILTER`]. Empty values count as unset.
 fn resolve_filter(explicit: Option<&str>, env: impl Fn(&str) -> Option<String>) -> String {
+    let set = |directives: &String| !directives.trim().is_empty();
     explicit
         .map(str::to_owned)
-        .or_else(|| env(FILTER_ENV))
-        .or_else(|| env("RUST_LOG"))
-        .filter(|directives| !directives.trim().is_empty())
+        .filter(set)
+        .or_else(|| env(FILTER_ENV).filter(set))
+        .or_else(|| env("RUST_LOG").filter(set))
         .unwrap_or_else(|| DEFAULT_FILTER.to_owned())
 }
 
@@ -166,6 +167,14 @@ mod tests {
             resolve_filter(None, env_with(&[("RUST_LOG", "trace")])),
             "trace"
         );
+    }
+
+    #[test]
+    fn empty_values_fall_through_to_the_next_source() {
+        let env = env_with(&[(FILTER_ENV, ""), ("RUST_LOG", "debug")]);
+        assert_eq!(resolve_filter(None, env), "debug");
+        let env = env_with(&[(FILTER_ENV, "trace")]);
+        assert_eq!(resolve_filter(Some(" "), env), "trace");
     }
 
     #[test]

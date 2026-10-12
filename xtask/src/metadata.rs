@@ -46,8 +46,8 @@ impl Dependency {
     }
 }
 
-/// The full dependency graph: `cargo metadata --format-version 1` (with
-/// dependencies, all platforms).
+/// The full dependency graph: `cargo metadata --format-version 1
+/// --all-features` (with dependencies, all platforms).
 #[derive(Debug, Deserialize)]
 pub(crate) struct FullMetadata {
     /// Every package in the graph, including workspace members.
@@ -122,9 +122,11 @@ pub(crate) fn load() -> Result<Metadata, String> {
     run_cargo_metadata(&["--no-deps"])
 }
 
-/// Runs `cargo metadata` with the full dependency graph (all platforms).
+/// Runs `cargo metadata` with the full dependency graph: all platforms and
+/// **all features**, so crates reachable only through optional features
+/// (e.g. `tracy`) are classified too.
 pub(crate) fn load_full() -> Result<FullMetadata, String> {
-    run_cargo_metadata(&[])
+    run_cargo_metadata(&["--all-features"])
 }
 
 /// Runs `cargo metadata --format-version 1 <extra>` and deserializes it.
