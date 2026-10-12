@@ -379,8 +379,13 @@ Decided (2026-10-12):
   keys. History keeps 90 days plus named versions. Thumbnails are on.
   Hybrid post-quantum crypto from the first release (ADR-0016).
 - Phase C order is confirmed: Documents → Collaboration → Presentations.
+- Contributions use the **DCO** (`Signed-off-by`), not a CLA (ADR-0008). If
+  dual licensing or App Store distribution is wanted later, a CLA can be
+  introduced before external contributions grow. Earlier contributions
+  would then need their authors' consent.
 
 Open:
-1. **CLA vs DCO.** Recommendation: CLA, to keep dual licensing and App
-   Store options open.
-2. **Hub name.** Is "Imaginarium Hub" fine?
+1. **Hub name.** "Imaginarium Hub" is the working name.
+
+The current progress and the next concrete steps are tracked in
+[`docs/STATUS.md`](STATUS.md).

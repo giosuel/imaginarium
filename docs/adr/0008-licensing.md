@@ -11,9 +11,9 @@
   carry their own content licenses (e.g. CC-BY), declared in `package.toml`.
 - Every dependency must be AGPL-compatible. This is enforced with a
   `cargo deny` license allowlist in CI.
-- External contributions are accepted under the **DCO** (Signed-off-by). A
-  CLA is not required unless the owner decides otherwise (see open question
-  in PLAN).
+- External contributions are accepted under the **DCO** (`Signed-off-by`),
+  with no CLA. The owner confirmed this on 2026-10-12. Trade-off: relicensing
+  or dual licensing later would need every contributor's consent.
 - The name "Imaginarium" and its logo are to be protected as trademarks, so
   forks may reuse the code but not the brand.
 
