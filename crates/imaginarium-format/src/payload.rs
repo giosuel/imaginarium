@@ -153,6 +153,15 @@ impl RecordBuilder {
         self
     }
 
+    /// Sets `SIGNED` *before* encryption. Required for records that are
+    /// both encrypted and signed: the AAD covers the flags (spec §6.3.1), so
+    /// they must already be final when sealing. Attach the signature
+    /// afterwards with [`Record::with_signature`].
+    pub fn will_be_signed(mut self) -> Self {
+        self.flags |= RecordFlags::SIGNED;
+        self
+    }
+
     /// Compresses the content with zstd at the default level.
     pub fn compress(mut self, enabled: bool) -> Self {
         self.compress = enabled.then_some(DEFAULT_ZSTD_LEVEL);
