@@ -1,6 +1,6 @@
 # 0003. Own render/text stack on wgpu + Vello + Parley
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-12
 
 ## Context
