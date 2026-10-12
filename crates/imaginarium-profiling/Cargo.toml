@@ -9,7 +9,42 @@ authors.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+# Criterion benches only. Keeps `cargo bench -p … -- <criterion flags>` working.
+bench = false
+
+[features]
+# Stream spans to the Tracy profiler (https://github.com/wolfpld/tracy).
+# Builds the Tracy C++ client, so it's off by default.
+tracy = ["dep:tracing-tracy"]
+
 [dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "fmt", "json", "registry", "std"] }
+# Tracy client features, chosen for safety on any machine:
+# - manual-lifetime: start only when tracing is set up with `tracy: true`,
+#   never at program load (the default aborts at load on VMs without an
+#   invariant TSC).
+# - timer-fallback: works on CPUs/VMs without an invariant TSC.
+# - ondemand: collect only while the Tracy GUI is connected.
+# - only-localhost: don't expose profiling data on the network. Use an SSH
+#   tunnel for remote profiling.
+tracing-tracy = { workspace = true, optional = true, features = [
+  "enable",
+  "manual-lifetime",
+  "ondemand",
+  "only-localhost",
+  "timer-fallback",
+] }
+
+[dev-dependencies]
+criterion.workspace = true
+imaginarium-test-utils.workspace = true
+
+[[bench]]
+name = "frame_stats"
+harness = false
 
 [lints]
 workspace = true

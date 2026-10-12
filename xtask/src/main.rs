@@ -14,12 +14,15 @@
 //! - `check-headers`: SPDX license header on every `.rs` file (see [`headers`]).
 //! - `check-tracked`: no agent/tool files or generated artifacts tracked by
 //!   git (see [`tracked`]).
+//! - `dev-profile [--write]`: check (or regenerate) the dev-profile overrides
+//!   for build-time-only crates in the root `Cargo.toml` (see [`mod@dev_profile`]).
 //!
 //! # Adding a task
 //! Write a `fn(&[String]) -> ExitCode` and add it to [`TASKS`]. Tasks print
 //! human-readable output and signal failure through a non-zero exit code, so
 //! CI can run them directly.
 
+mod dev_profile;
 mod headers;
 mod layers;
 mod metadata;
@@ -41,7 +44,7 @@ struct Task {
 const TASKS: &[Task] = &[
     Task {
         name: "check",
-        about: "Run all repository checks (layers, headers, tracked files)",
+        about: "Run all repository checks (layers, headers, tracked files, dev profile)",
         run: check_all,
     },
     Task {
@@ -58,6 +61,11 @@ const TASKS: &[Task] = &[
         name: "check-tracked",
         about: "Check that no agent files or generated artifacts are tracked",
         run: check_tracked,
+    },
+    Task {
+        name: "dev-profile",
+        about: "Check build-time crate overrides in Cargo.toml (--write to update)",
+        run: dev_profile,
     },
     Task {
         name: "help",
@@ -95,7 +103,12 @@ fn help(_args: &[String]) -> ExitCode {
 /// Runs every check and fails if any of them fails. Each check still runs and
 /// reports, even after an earlier one failed.
 fn check_all(args: &[String]) -> ExitCode {
-    let results = [check_layers(args), check_headers(args), check_tracked(args)];
+    let results = [
+        check_layers(args),
+        check_headers(args),
+        check_tracked(args),
+        dev_profile(&[]),
+    ];
     if results.iter().all(|code| *code == ExitCode::SUCCESS) {
         ExitCode::SUCCESS
     } else {
@@ -184,6 +197,47 @@ fn check_tracked(_args: &[String]) -> ExitCode {
                 eprintln!("  - {path} ({reason})");
             }
             eprintln!("Remove them with `git rm --cached <path>`. They stay on disk.");
+            ExitCode::from(FAILED)
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(FAILED)
+        }
+    }
+}
+
+/// `cargo xtask dev-profile [--write]`
+fn dev_profile(args: &[String]) -> ExitCode {
+    let write = match args {
+        [] => false,
+        [flag] if flag == "--write" => true,
+        _ => {
+            eprintln!("usage: cargo xtask dev-profile [--write]");
+            return ExitCode::from(2);
+        }
+    };
+    let result = metadata::load_full().and_then(|full| {
+        let root = metadata::load()?.workspace_root;
+        dev_profile::run(&root, &full, write)
+    });
+    match result {
+        Ok(dev_profile::Outcome::UpToDate { crates }) => {
+            println!("dev-profile: ok ({crates} build-time-only crates, overrides up to date)");
+            ExitCode::SUCCESS
+        }
+        Ok(dev_profile::Outcome::Written { crates }) => {
+            println!("dev-profile: updated Cargo.toml ({crates} build-time-only crates)");
+            ExitCode::SUCCESS
+        }
+        Ok(dev_profile::Outcome::Stale { missing, extra }) => {
+            eprintln!("dev-profile: the generated overrides in Cargo.toml are stale.");
+            if !missing.is_empty() {
+                eprintln!("  missing: {}", missing.join(", "));
+            }
+            if !extra.is_empty() {
+                eprintln!("  no longer build-time-only or gone: {}", extra.join(", "));
+            }
+            eprintln!("Run `cargo xtask dev-profile --write` and commit Cargo.toml.");
             ExitCode::from(FAILED)
         }
         Err(err) => {
