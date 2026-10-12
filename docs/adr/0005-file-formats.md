@@ -1,6 +1,6 @@
 # 0005. File formats: native container, OOXML, ODF
 
-- Status: Accepted
+- Status: Partially superseded by 0010 (native format)
 - Date: 2026-10-12
 
 ## Context
