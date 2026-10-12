@@ -213,6 +213,12 @@ xtask check` and CI fail while they are stale.
 - Benchmarks: `cargo bench -p <crate>`, following the conventions in those
   docs.
 
+**Declaring a setting:** add a `static Setting<T>` next to the code that
+uses it. Title and description are required, and the key is dotted
+`snake_case` and stable forever. Add it to the crate's settings list, which
+the app registers at startup. Secrets are always `SecretRef` (OS
+keychain). See the `imaginarium-settings` crate docs.
+
 **Adding a crate:** create `crates/imaginarium-<name>/` with the workspace
 package fields and `[lints] workspace = true`. Then check that it is in
 the layer table (`LAYERS` in `xtask/src/layers.rs`) and in the PLAN §4.1

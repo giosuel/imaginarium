@@ -9,11 +9,12 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.5 `imaginarium-settings`** (see the checklist below)
+- **Next step:** **M0.6 `imaginarium-commands`** (see the checklist below)
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
-  Tracy, frame stats) and `imaginarium-test-utils` (fixtures).
-  `settings` and `commands` are still skeletons. The app only prints its
+  Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
+  `imaginarium-settings` (typed registry, TOML). `commands` is still a
+  skeleton. The app only prints its
   version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
@@ -150,19 +151,28 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     (`cargo xtask dev-profile --write`, checked by `cargo xtask check`).
     Clean builds: this workspace −47 % CPU, heavy stack −33 %.
   - AC: ✅ percentile unit tests, and the criterion bench runs.
-- [ ] **M0.5 `imaginarium-settings`** ← **next**
-  - Typed registry: key, type (bool/int/float/string/enum/color/path/
-    secret-ref/list), default, validation, **scope** (app, user, workspace,
-    document, hub), UI metadata (title, description, synonyms, group,
-    advanced).
-  - Change notifications (a simple observer for now; it becomes signals
-    later).
-  - App-scope TOML persistence.
-  - Secrets are never stored in TOML, only as a keychain reference.
-  - AC: tests for registration, validation, persistence round-trip, and a
-    "read of an unregistered key is a compile or runtime error" test
-    (ADR-0014).
-- [ ] **M0.6 `imaginarium-commands`**
+- [x] **M0.5 `imaginarium-settings`** (done 2026-10-12, PR #6, stacked on #5)
+  - `Setting<T>` declarations are `static`s whose constructor requires a
+    title and description (metadata is guaranteed at compile time). They
+    have constraints (`range`, `max_len`), custom validators, group,
+    synonyms and an advanced flag.
+  - Types: bool, i64, f64, String, enums (`setting_enum!`), `Rgba`, paths,
+    `SecretRef` (keychain id only), lists. Scopes: app/user/workspace/
+    document/hub.
+  - `Registry`:
+    - key rules (dotted snake_case, no duplicates or prefix clashes);
+    - **plain-text settings with secret-looking keys are rejected**;
+    - defaults must validate;
+    - typed `get`/`set`, dynamic `set_value` for the UI, observers;
+    - **reading an unregistered setting returns `NotRegistered`**.
+  - TOML for app scope: only changed values, nested tables, unknown entries
+    preserved, invalid entries reported and skipped, atomic save.
+  - Not yet: settings of add-ons (dynamic declarations, `&'static` today),
+    user-scope sync, document-scope CRDT storage, keychain resolution.
+    These come with their milestones.
+  - AC: ✅ 25 unit tests and 3 doctests (registration, validation,
+    round-trip of all kinds, unregistered read).
+- [ ] **M0.6 `imaginarium-commands`** ← **next**
   - `Command` trait (id, meta, `ArgsSchema` exportable as JSON Schema,
     availability, run). The `Context` stays abstract or generic so no model
     dependency exists yet.
