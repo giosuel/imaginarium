@@ -6,7 +6,7 @@
 use std::io::BufRead;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use imaginarium_crypto::{KeyId, XWingKeyPair};
 use imaginarium_io_native::Credentials;
@@ -54,17 +54,27 @@ impl KeyArgs {
     /// The credentials. Reads stdin or the key file once.
     pub(crate) fn credentials(&self) -> Result<Credentials> {
         if self.password_stdin {
-            let mut line = Zeroizing::new(String::new());
-            std::io::stdin()
+            // Room for any sane password up front: growing the buffer would
+            // leave copies of it behind that nobody zeroes. (std's own stdin
+            // buffer keeps one anyway; that can't be helped.)
+            let mut line = Zeroizing::new(String::with_capacity(1024));
+            let read = std::io::stdin()
                 .lock()
                 .read_line(&mut line)
                 .context("reading the password from stdin")?;
+            if read == 0 {
+                bail!("no password on standard input");
+            }
             let password = line.trim_end_matches(['\r', '\n']);
             return Ok(Credentials::Password(Zeroizing::new(password.to_owned())));
         }
         if let Some(var) = &self.password_env {
-            let password = std::env::var(var)
-                .with_context(|| format!("environment variable {var} isn't set"))?;
+            let password = std::env::var(var).map_err(|err| match err {
+                std::env::VarError::NotPresent => anyhow!("environment variable {var} isn't set"),
+                std::env::VarError::NotUnicode(_) => {
+                    anyhow!("environment variable {var} isn't valid UTF-8")
+                }
+            })?;
             return Ok(Credentials::Password(Zeroizing::new(password)));
         }
         if let Some(path) = &self.key_file {
@@ -72,10 +82,10 @@ impl KeyArgs {
                 std::fs::read_to_string(path)
                     .with_context(|| format!("reading {}", path.display()))?,
             );
-            let bytes = Zeroizing::new(
-                decode_hex(text.trim())
-                    .with_context(|| format!("{} isn't a hex key", path.display()))?,
-            );
+            // Editors on Windows may start the file with a byte-order mark.
+            let hex = text.trim_start_matches('\u{feff}').trim();
+            let bytes =
+                decode_hex(hex).with_context(|| format!("{} isn't a hex key", path.display()))?;
             let keypair =
                 XWingKeyPair::from_private_bytes(&bytes).context("not an X-Wing private key")?;
             let owner = self.expected_owner()?;
@@ -85,12 +95,15 @@ impl KeyArgs {
     }
 }
 
-fn decode_hex(text: &str) -> Result<Vec<u8>> {
+/// Decodes hex into a buffer of the final size (so no unzeroed copies of a
+/// key are left behind by growing it).
+fn decode_hex(text: &str) -> Result<Zeroizing<Vec<u8>>> {
     if !text.len().is_multiple_of(2) || !text.is_ascii() {
         bail!("odd length or non-ASCII characters");
     }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).context("not a hex digit"))
-        .collect()
+    let mut out = Zeroizing::new(Vec::with_capacity(text.len() / 2));
+    for i in (0..text.len()).step_by(2) {
+        out.push(u8::from_str_radix(&text[i..i + 2], 16).context("not a hex digit")?);
+    }
+    Ok(out)
 }

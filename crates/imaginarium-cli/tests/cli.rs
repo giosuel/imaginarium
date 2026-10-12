@@ -471,3 +471,62 @@ fn a_closed_pipe_is_not_an_error() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn export_says_when_it_exports_a_recovered_file() {
+    let dir = scratch("export-recovered");
+    let plain = dir.join("plain.imag");
+    sample(&plain, Protection::None);
+    let mut torn = std::fs::read(&plain).unwrap();
+    torn.extend_from_slice(b"torn");
+    let path = dir.join("torn.imag");
+    std::fs::write(&path, &torn).unwrap();
+    let out = imag(&["export-json", s(&path)], None, &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("warning: the file's last commit is unusable"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stdout.contains("\"recovered\": \""), "{}", out.stdout);
+    let out = imag(&["export-json", s(&plain)], None, &[]);
+    assert!(out.stderr.is_empty(), "{}", out.stderr);
+    assert!(out.stdout.contains("\"recovered\": null"), "{}", out.stdout);
+}
+
+#[test]
+fn key_input_edge_cases() {
+    let dir = scratch("key-input");
+    let secret = dir.join("secret.imag");
+    sample(&secret, password_protection());
+    // Nothing on stdin is an error, not the empty password.
+    let out = imag(&["verify", "--password-stdin", s(&secret)], Some(""), &[]);
+    assert_eq!(out.code, 2, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains("no password on standard input"),
+        "{}",
+        out.stderr
+    );
+
+    // A key file saved with a byte-order mark (Windows editors) still reads.
+    let owner = XWingKeyPair::from_seed(&[0x12; 32]);
+    let hex: String = owner
+        .private_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let key_file = dir.join("bom.key");
+    std::fs::write(&key_file, format!("\u{feff}{hex}\r\n")).unwrap();
+    let out = imag(
+        &[
+            "inspect",
+            "--key-file",
+            s(&key_file),
+            s(&vector("10a-acl-chain.imag")),
+        ],
+        None,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+}

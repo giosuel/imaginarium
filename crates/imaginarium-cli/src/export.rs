@@ -28,9 +28,17 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, compact: bool, out: &mut dyn Writ
              {owner} (pass --owner {owner} if you trust it)"
         );
     }
+    // A recovered file may be missing its newest edits: say so.
+    if let Some(recovery) = &opened.recovery {
+        eprintln!(
+            "warning: the file's last commit is unusable ({}); exporting what recovery found: {:?}",
+            recovery.cause, recovery.method
+        );
+    }
     let value = json!({
         "doc_id": opened.header.doc_id.to_string(),
         "encrypted": opened.header.is_encrypted(),
+        "recovered": opened.recovery.as_ref().map(|r| r.cause.clone()),
         "created_with": opened.meta.as_ref().map(|m| m.created_with.clone()),
         "document": to_json(&opened.document.to_value()),
     });
@@ -43,8 +51,9 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, compact: bool, out: &mut dyn Writ
     Ok(())
 }
 
-/// A model value as JSON. Bytes become `{"$binary": "<hex>"}`; numbers that
-/// JSON can't hold (NaN, infinities) become `null`.
+/// A model value as JSON. Bytes become `{"$binary": "<hex>"}` (a map with
+/// that one key looks the same: this is a debugging view, not a format);
+/// numbers that JSON can't hold (NaN, infinities) become `null`.
 pub(crate) fn to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
