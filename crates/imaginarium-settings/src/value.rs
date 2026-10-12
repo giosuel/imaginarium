@@ -127,7 +127,8 @@ impl FromStr for Rgba {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         const ERROR: &str = "expected a color like #1e90ff or #1e90ff80";
         let hex = s.strip_prefix('#').ok_or(ERROR)?;
-        if !(hex.len() == 6 || hex.len() == 8) || !hex.is_ascii() {
+        // `from_str_radix` alone would accept a leading `+` ("#+f+f+f").
+        if !(hex.len() == 6 || hex.len() == 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ERROR);
         }
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| ERROR);
@@ -407,7 +408,15 @@ mod tests {
         let translucent: Rgba = "#1e90ff80".parse().unwrap();
         assert_eq!(translucent.a, 0x80);
         assert_eq!(translucent.to_string(), "#1e90ff80");
-        for bad in ["1e90ff", "#1e90f", "#gggggg", "#1e90ff8", "#ééé"] {
+        for bad in [
+            "1e90ff",
+            "#1e90f",
+            "#gggggg",
+            "#1e90ff8",
+            "#ééé",
+            "#+f+f+f",
+            "#+f+f+f+f",
+        ] {
             assert!(bad.parse::<Rgba>().is_err(), "{bad} should fail");
         }
     }

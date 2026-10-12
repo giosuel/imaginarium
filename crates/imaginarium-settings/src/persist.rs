@@ -9,7 +9,9 @@
 //! - Dotted keys become nested tables: `ui.theme` → `[ui] theme = "dark"`.
 //! - Unknown entries (e.g. from a newer app version) are kept and written
 //!   back unchanged, like unknown data in `.imag` files.
-//! - Invalid entries are skipped and reported. They never prevent startup.
+//! - Invalid entries (e.g. a value only a newer version understands) are
+//!   reported, the default is used, and the entry is **kept** in the file
+//!   until the user changes that setting. They never prevent startup.
 //! - Secrets appear only as keychain references, written as a small table:
 //!
 //! ```toml
@@ -36,7 +38,8 @@ use crate::value::{ListKind, Rgba, SecretRef, Value, ValueKind};
 pub struct LoadReport {
     /// Keys whose values were applied.
     pub applied: Vec<&'static str>,
-    /// Entries that were skipped because they didn't validate: `(key, reason)`.
+    /// Entries that didn't validate: `(key, reason)`. The defaults are used,
+    /// and the entries stay in the file until the setting is changed.
     pub invalid: Vec<(String, String)>,
     /// Entries for unregistered keys or other scopes. They are preserved.
     pub unknown: Vec<String>,
@@ -51,13 +54,15 @@ impl Registry {
     /// entries, as TOML.
     pub fn to_toml(&self, scope: Scope) -> String {
         let mut root = Table::new();
-        for (key, value) in self.modified_in(scope) {
-            insert_path(&mut root, key, value_to_toml(value));
-        }
+        // Preserved entries first, so registered settings win wherever a
+        // stray entry clashes with them (e.g. `ui = 5` versus `[ui]`).
         if let Some(unknown) = self.unknown.get(&scope) {
             for (key, value) in unknown {
                 insert_path(&mut root, key, value.clone());
             }
+        }
+        for (key, value) in self.modified_in(scope) {
+            insert_path(&mut root, key, value_to_toml(value));
         }
         format!("{HEADER}{root}")
     }
@@ -95,7 +100,12 @@ impl Registry {
                     report.applied.push(declaration.key());
                     seen.push(declaration.key());
                 }
-                Err(reason) => report.invalid.push((key, reason)),
+                Err(reason) => {
+                    // Keep what this version can't read (e.g. a value from a
+                    // newer version), so saving doesn't erase it.
+                    unknown.insert(key.clone(), raw);
+                    report.invalid.push((key, reason));
+                }
             }
         }
 
@@ -171,8 +181,8 @@ fn insert_path(root: &mut Table, key: &str, value: Toml) {
             .entry(segment.to_owned())
             .or_insert_with(|| Toml::Table(Table::new()));
         if !entry.is_table() {
-            // Can't happen for registered keys (prefix clashes are rejected),
-            // but a malformed unknown entry must not panic.
+            // A preserved stray entry (e.g. `ui = 5`) sits where a
+            // registered setting needs a table: the registered one wins.
             *entry = Toml::Table(Table::new());
         }
         let Toml::Table(next) = entry else {
@@ -420,6 +430,47 @@ mod tests {
         let out = r.to_toml(Scope::App);
         assert!(out.contains("future_option = 42"), "{out}");
         assert!(out.contains("[newer_feature]\nenabled = true"), "{out}");
+    }
+
+    #[test]
+    fn values_this_version_cannot_read_are_preserved() {
+        // E.g. a theme added by a newer app version sharing the file.
+        let mut r = registry();
+        let report = r
+            .load_toml(Scope::App, "[ui]\ntheme = \"high_contrast\"\n")
+            .unwrap();
+        assert_eq!(report.invalid.len(), 1);
+        assert_eq!(r.get(&THEME).unwrap(), Theme::System, "default is used");
+        let out = r.to_toml(Scope::App);
+        assert!(
+            out.contains("theme = \"high_contrast\""),
+            "kept on save: {out}"
+        );
+
+        // Choosing a value in this version replaces the preserved one.
+        r.set(&THEME, Theme::Dark).unwrap();
+        let out = r.to_toml(Scope::App);
+        assert!(
+            out.contains("theme = \"dark\"") && !out.contains("high_contrast"),
+            "{out}"
+        );
+
+        // An explicit reset drops it too.
+        r.load_toml(Scope::App, "[ui]\ntheme = \"high_contrast\"\n")
+            .unwrap();
+        r.reset("ui.theme").unwrap();
+        assert!(!r.to_toml(Scope::App).contains("high_contrast"));
+    }
+
+    #[test]
+    fn unknown_entries_never_overwrite_known_settings() {
+        let mut r = registry();
+        r.load_toml(Scope::App, "ui = 5\n").unwrap(); // clashes with the [ui] table
+        r.set(&THEME, Theme::Dark).unwrap();
+        let out = r.to_toml(Scope::App);
+        let mut fresh = registry();
+        fresh.load_toml(Scope::App, &out).unwrap();
+        assert_eq!(fresh.get(&THEME).unwrap(), Theme::Dark, "{out}");
     }
 
     #[test]

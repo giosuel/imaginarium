@@ -212,6 +212,10 @@ pub trait AnySetting: Send + Sync {
     fn default_dyn(&self) -> Value;
     /// Checks kind, constraint and custom validator.
     fn validate(&self, value: &Value) -> Result<(), SettingsError>;
+    /// Converts a valid value to the setting's canonical form (e.g. `Int(2)`
+    /// → `Float(2.0)` for a float setting), so comparisons and storage are
+    /// exact. Invalid values are returned unchanged.
+    fn normalize(&self, value: Value) -> Value;
 }
 
 impl<T: SettingType> AnySetting for Setting<T> {
@@ -241,6 +245,10 @@ impl<T: SettingType> AnySetting for Setting<T> {
 
     fn default_dyn(&self) -> Value {
         self.default_value().to_value()
+    }
+
+    fn normalize(&self, value: Value) -> Value {
+        T::from_value(&value).map_or(value, |typed| typed.to_value())
     }
 
     fn validate(&self, value: &Value) -> Result<(), SettingsError> {
