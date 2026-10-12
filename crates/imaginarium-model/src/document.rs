@@ -255,7 +255,8 @@ impl Document {
             return Err(ModelError::ReadOnly(reason.clone()));
         }
         let before = self.doc.state_frontiers();
-        let result = edit(&mut Transaction::new(&self.doc, &self.view));
+        let mut txn = Transaction::new(&self.doc, &self.view);
+        let result = edit(&mut txn).and_then(|value| txn.finish().map(|()| value));
         match result {
             Ok(value) => {
                 self.commit(actor);

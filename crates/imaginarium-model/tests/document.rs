@@ -564,3 +564,58 @@ fn views_can_go_to_other_threads_and_documents_can_move() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn a_rolled_back_delete_keeps_the_undo_history() {
+    // Reverting a delete used to re-create the node's containers under new
+    // ids, which turned every undo step that touched them into a no-op.
+    let mut doc = board();
+    let x = shape(&mut doc, Parent::Root, 1.0);
+    doc.transact(&Actor::User, |t| {
+        t.set_geometry(x, Geometry::new(2.0, 0.0, 10.0, 10.0))
+    })
+    .unwrap();
+    let missing = shape(&mut board(), Parent::Root, 0.0); // from another document
+    let failed = doc.transact(&Actor::User, |t| {
+        t.set_generation(x, &[("model", "m".into())])?;
+        t.delete_node(x)?;
+        t.delete_node(missing)
+    });
+    assert!(failed.is_err());
+    assert!(doc.view().node(x).is_some());
+    assert_consistent(&doc);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(doc.view().node(x).unwrap().geometry().unwrap().x, 1.0);
+    doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(doc.view().node(x).is_none());
+}
+
+#[test]
+fn deleted_nodes_are_gone_for_the_rest_of_the_transaction() {
+    let mut doc = board();
+    let [a, b, c] = [1.0, 2.0, 3.0].map(|x| shape(&mut doc, Parent::Root, x));
+    let child = shape(&mut doc, Parent::Node(b), 4.0);
+    let (created, _) = doc
+        .transact(&Actor::User, |t| {
+            t.delete_node(b)?;
+            assert!(!t.contains(b));
+            assert!(!t.contains(child), "descendants go with it");
+            assert_eq!(t.children(Parent::Root), vec![a, c]);
+            assert!(t.set_prop(b, "name", "x".into()).is_err());
+            assert!(t.move_node(child, Parent::Root, None).is_err());
+            assert!(
+                t.create_node(Parent::Node(b), None, &NodeKind::Shape)
+                    .is_err()
+            );
+            // Indices count the remaining siblings only.
+            let created = t.create_node(Parent::Root, Some(2), &NodeKind::Shape)?;
+            t.move_node(a, Parent::Root, Some(1))?;
+            assert_eq!(t.children(Parent::Root), vec![c, a, created]);
+            Ok(created)
+        })
+        .unwrap();
+    let root: Vec<NodeId> = doc.view().children(Parent::Root).collect();
+    assert_eq!(root, vec![c, a, created]);
+    assert!(doc.view().node(child).is_none());
+    assert_consistent(&doc);
+}

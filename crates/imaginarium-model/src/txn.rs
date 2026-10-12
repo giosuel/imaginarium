@@ -12,8 +12,14 @@
 //! Commands therefore fail cleanly. If a closure still returns an error
 //! after some edits, [`Document::transact`](crate::Document::transact)
 //! reverts them.
+//!
+//! Edits that destroy containers (deleting a node, a style or an asset
+//! entry, replacing `gen`) wait until the closure has succeeded. Reverting
+//! a destroyed container re-creates it under a new id, and every undo step
+//! that touched the old one would then do nothing. Until then, the deleted
+//! things are gone for this transaction's reads and checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use loro::{
@@ -38,6 +44,20 @@ pub struct Transaction<'d> {
     /// Nodes created in this transaction.
     created: HashMap<NodeId, TreeID>,
     created_owners: HashMap<TreeID, NodeId>,
+    /// Destructive edits, applied in order by [`Transaction::finish`].
+    deferred: Vec<Deferred>,
+    /// Nodes whose deletion is deferred (their subtrees go with them).
+    deleting: HashSet<TreeID>,
+    /// Styles whose deletion is deferred.
+    deleting_styles: HashSet<StyleId>,
+}
+
+/// An edit that destroys a container (see the module docs).
+enum Deferred {
+    DeleteNode(TreeID),
+    SetGeneration(TreeID, Vec<(String, Value)>),
+    DeleteStyle(StyleId),
+    RemoveAsset(BlobId),
 }
 
 impl<'d> Transaction<'d> {
@@ -49,7 +69,79 @@ impl<'d> Transaction<'d> {
             owners: view.owners.clone(),
             created: HashMap::new(),
             created_owners: HashMap::new(),
+            deferred: Vec::new(),
+            deleting: HashSet::new(),
+            deleting_styles: HashSet::new(),
         }
+    }
+
+    /// Applies the deferred destructive edits. Called once the closure has
+    /// succeeded.
+    pub(crate) fn finish(self) -> Result<()> {
+        for edit in self.deferred {
+            match edit {
+                Deferred::DeleteNode(tid) => {
+                    // A node inside a subtree deleted before it is gone already.
+                    if !self.tree.is_node_deleted(&tid).unwrap_or(true) {
+                        self.tree.delete(tid)?;
+                    }
+                }
+                Deferred::SetGeneration(tid, generation) => {
+                    let meta = self.tree.get_meta(tid)?;
+                    if generation.is_empty() {
+                        meta.delete(node::GEN)?;
+                    } else {
+                        let map = meta.insert_container(node::GEN, LoroMap::new())?;
+                        for (key, value) in &generation {
+                            set_or_delete(&map, key, value)?;
+                        }
+                    }
+                }
+                Deferred::DeleteStyle(style) => {
+                    self.doc.get_map(root::STYLES).delete(style.as_str())?;
+                }
+                Deferred::RemoveAsset(blob) => {
+                    self.doc.get_map(root::ASSETS).delete(&blob.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `tid` or one of its ancestors is being deleted.
+    fn is_deleting(&self, tid: TreeID) -> bool {
+        if self.deleting.is_empty() {
+            return false;
+        }
+        let mut current = TreeParentId::Node(tid);
+        while let TreeParentId::Node(node) = current {
+            if self.deleting.contains(&node) {
+                return true;
+            }
+            current = self.tree.parent(node).unwrap_or(TreeParentId::Root);
+        }
+        false
+    }
+
+    /// The position in the tree's own child list of `parent` that index
+    /// `index` among the remaining children (without `moving`, and without
+    /// nodes being deleted) stands for.
+    fn tree_index(&self, parent: TreeParentId, index: usize, moving: Option<TreeID>) -> usize {
+        if self.deleting.is_empty() {
+            return index; // the same list (callers checked the range)
+        }
+        let all: Vec<TreeID> = self
+            .tree
+            .children(parent)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&tid| Some(tid) != moving)
+            .collect();
+        all.iter()
+            .enumerate()
+            .filter(|&(_, &tid)| !self.deleting.contains(&tid))
+            .nth(index)
+            .map_or(all.len(), |(position, _)| position)
     }
 
     /// The tree id of a node, if the node is known.
@@ -80,7 +172,9 @@ impl<'d> Transaction<'d> {
     fn live(&self, id: NodeId) -> Result<TreeID> {
         match self.handle(id) {
             Some(tid)
-                if self.tree.contains(tid) && !self.tree.is_node_deleted(&tid).unwrap_or(true) =>
+                if self.tree.contains(tid)
+                    && !self.tree.is_node_deleted(&tid).unwrap_or(true)
+                    && !self.is_deleting(tid) =>
             {
                 Ok(tid)
             }
@@ -104,6 +198,7 @@ impl<'d> Transaction<'d> {
             .children(tree_parent)
             .unwrap_or_default()
             .into_iter()
+            .filter(|tid| !self.deleting.contains(tid))
             .map(|tid| self.identity(tid))
             .collect()
     }
@@ -193,7 +288,8 @@ impl<'d> Transaction<'d> {
                         len,
                     });
                 }
-                self.tree.create_at(tree_parent, index)?
+                self.tree
+                    .create_at(tree_parent, self.tree_index(tree_parent, index, None))?
             }
             None => self.tree.create(tree_parent)?,
         };
@@ -216,7 +312,8 @@ impl<'d> Transaction<'d> {
     /// Deletes a node and its subtree.
     pub fn delete_node(&mut self, id: NodeId) -> Result<()> {
         let tid = self.live(id)?;
-        self.tree.delete(tid)?;
+        self.deleting.insert(tid);
+        self.deferred.push(Deferred::DeleteNode(tid));
         Ok(())
     }
 
@@ -243,7 +340,11 @@ impl<'d> Transaction<'d> {
                         len,
                     });
                 }
-                self.tree.mov_to(tid, tree_parent, index)?;
+                self.tree.mov_to(
+                    tid,
+                    tree_parent,
+                    self.tree_index(tree_parent, index, Some(tid)),
+                )?;
             }
             None => self.tree.mov(tid, tree_parent)?,
         }
@@ -348,15 +449,12 @@ impl<'d> Transaction<'d> {
 
     /// Replaces a node's AI provenance (schema-v1.md §5.4).
     pub fn set_generation(&mut self, id: NodeId, generation: &[(&str, Value)]) -> Result<()> {
-        let meta = self.node_meta(id)?;
-        if generation.is_empty() {
-            meta.delete(node::GEN)?;
-            return Ok(());
-        }
-        let map = meta.insert_container(node::GEN, LoroMap::new())?;
-        for (key, value) in generation {
-            set_or_delete(&map, key, value)?;
-        }
+        let tid = self.live(id)?;
+        let generation = generation
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect();
+        self.deferred.push(Deferred::SetGeneration(tid, generation));
         Ok(())
     }
 
@@ -494,19 +592,32 @@ impl<'d> Transaction<'d> {
             return Err(ModelError::Invalid("empty style property".into()));
         }
         let map = map_at(&self.doc.get_map(root::STYLES), style.as_str())
+            .filter(|_| !self.deleting_styles.contains(style))
             .ok_or_else(|| ModelError::Invalid(format!("no style {style}")))?;
         set_or_delete(&map, prop, &value)
     }
 
     /// Deletes a style. Nodes that use it fall back to the defaults.
     pub fn delete_style(&mut self, style: &StyleId) -> Result<()> {
-        self.doc.get_map(root::STYLES).delete(style.as_str())?;
+        if self.deleting_styles.insert(style.clone()) {
+            self.deferred.push(Deferred::DeleteStyle(style.clone()));
+        }
         Ok(())
     }
 
     /// Adds an asset entry, or sets properties of an existing one
     /// (schema-v1.md §9).
     pub fn put_asset(&mut self, blob: BlobId, props: &[(&str, Value)]) -> Result<()> {
+        // Removed earlier in this transaction: the entry starts over, as it
+        // would have if the removal had happened right away.
+        if let Some(at) = self
+            .deferred
+            .iter()
+            .position(|edit| matches!(edit, Deferred::RemoveAsset(b) if *b == blob))
+        {
+            self.deferred.remove(at);
+            self.doc.get_map(root::ASSETS).delete(&blob.to_string())?;
+        }
         let map = self
             .doc
             .get_map(root::ASSETS)
@@ -519,7 +630,7 @@ impl<'d> Transaction<'d> {
 
     /// Removes an asset entry.
     pub fn remove_asset(&mut self, blob: BlobId) -> Result<()> {
-        self.doc.get_map(root::ASSETS).delete(&blob.to_string())?;
+        self.deferred.push(Deferred::RemoveAsset(blob));
         Ok(())
     }
 
