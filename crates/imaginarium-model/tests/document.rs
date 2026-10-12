@@ -559,6 +559,8 @@ fn views_can_go_to_other_threads_and_documents_can_move() {
     send::<Document>();
     let doc = board();
     let view = doc.view().clone();
-    let count = std::thread::spawn(move || view.node_count()).join().unwrap();
+    let count = std::thread::spawn(move || view.node_count())
+        .join()
+        .unwrap();
     assert_eq!(count, 0);
 }
