@@ -7,7 +7,7 @@
 
 use std::io::Cursor;
 
-use imaginarium_format::Reader;
+use imaginarium_format::{ObjectId, Reader, RecordType};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -15,6 +15,15 @@ fuzz_target!(|data: &[u8]| {
         let entries = reader.index().entries().to_vec();
         for entry in entries.iter().take(32) {
             let _ = reader.read_content(entry);
+        }
+        // Blobs join segments whose headers are untrusted.
+        let blobs = entries
+            .iter()
+            .filter(|e| e.rtype == RecordType::BLOB.0)
+            .filter_map(|e| <[u8; 32]>::try_from(e.object_id.as_slice()).ok())
+            .take(4);
+        for id in blobs {
+            let _ = reader.read_blob(&ObjectId(id));
         }
     }
 });

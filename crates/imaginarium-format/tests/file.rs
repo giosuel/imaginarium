@@ -289,6 +289,66 @@ fn segmented_blobs_are_reassembled_and_validated() {
     assert!(reader.read_blob(&id(42)).is_err());
 }
 
+/// One `BLOB` segment with the given claims.
+fn blob_segment(index: u32, count: u32, total_len: u64, content: Vec<u8>) -> Record {
+    RecordBuilder::new(RecordType::BLOB, id(42))
+        .segment(index, count, total_len, Vec::new())
+        .compress(true)
+        .build(&DOC, content, None)
+        .unwrap()
+}
+
+fn file_with(records: &[Record]) -> Vec<u8> {
+    let mut writer = Writer::create(Cursor::new(Vec::new()), FileHeader::new(DOC, false)).unwrap();
+    for record in records {
+        writer.append(record).unwrap();
+    }
+    writer.commit(None).unwrap();
+    writer.into_inner().into_inner()
+}
+
+#[test]
+fn blob_lengths_are_checked_before_anything_is_allocated() {
+    // A segment header is untrusted input: a claimed length of 2^62 must
+    // be an error, not a capacity-overflow panic or an abort.
+    let mut reader = open(file_with(&[blob_segment(0, 1, 1 << 62, vec![1; 10])]));
+    assert!(reader.read_blob(&id(42)).is_err());
+
+    // Every segment but the last holds exactly SEGMENT_LEN bytes (spec
+    // §4.6), so the size of the whole blob is known before decompressing.
+    let short_first = [
+        blob_segment(0, 2, 1000 + SEGMENT_LEN as u64, vec![0; 1000]),
+        blob_segment(1, 2, 1000 + SEGMENT_LEN as u64, vec![0; SEGMENT_LEN]),
+    ];
+    assert!(open(file_with(&short_first)).read_blob(&id(42)).is_err());
+
+    // Highly compressible segments add up fast; the reader's limit caps
+    // the blob as a whole, not just each record.
+    let segments: Vec<Record> = (0..5)
+        .map(|i| blob_segment(i, 5, 5 * SEGMENT_LEN as u64, vec![0; SEGMENT_LEN]))
+        .collect();
+    let options = OpenOptions {
+        limits: Limits {
+            max_payload: 4 * SEGMENT_LEN as u64,
+            ..Limits::default()
+        },
+        ..OpenOptions::default()
+    };
+    let mut reader = Reader::open_with(Cursor::new(file_with(&segments)), options, None).unwrap();
+    assert!(reader.read_blob(&id(42)).is_err());
+}
+
+#[test]
+fn duplicate_blob_segments_are_harmless() {
+    // An autosave that crashed after writing segments, then a save that
+    // wrote the blob again: the index lists some segments twice.
+    let data: Vec<u8> = (0..SEGMENT_LEN * 2 + 77).map(|i| (i % 13) as u8).collect();
+    let chunks: Vec<&[u8]> = data.chunks(SEGMENT_LEN).collect();
+    let segment = |i: usize| blob_segment(i as u32, 3, data.len() as u64, chunks[i].to_vec());
+    let bytes = file_with(&[segment(0), segment(1), segment(1), segment(2), segment(0)]);
+    assert_eq!(open(bytes).read_blob(&id(42)).unwrap(), data);
+}
+
 #[test]
 fn compaction_keeps_live_records_byte_for_byte() {
     // Two generations of META and snapshots, an unknown SAFE_TO_COPY

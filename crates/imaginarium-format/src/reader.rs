@@ -161,6 +161,12 @@ impl<F: Read + Seek> Reader<F> {
     }
 
     /// Reads a whole blob by id, joining its segments (spec §5.3).
+    ///
+    /// Segment headers are checked before anything is decompressed: the
+    /// indices, `count` and `total_len` must agree, every segment but the
+    /// last holds exactly [`crate::SEGMENT_LEN`] bytes, and the blob fits in
+    /// [`Limits::max_payload`]. A segment listed twice (an interrupted save
+    /// that was repeated) is read once.
     pub fn read_blob(&mut self, object_id: &ObjectId) -> Result<Vec<u8>> {
         let entries: Vec<pb::IndexEntry> = self
             .state
@@ -175,17 +181,58 @@ impl<F: Read + Seek> Reader<F> {
         if first.rflags & u32::from(RecordFlags::SEGMENTED.0) == 0 {
             return self.read_content(first);
         }
-        let mut segments: Vec<(pb::Segment, Vec<u8>)> = Vec::with_capacity(entries.len());
+        // Pass 1: headers only (each record is dropped right away), so a
+        // blob is validated without holding all of its segments.
+        let mut segments: Vec<Option<(pb::IndexEntry, u64)>> = Vec::new();
+        let mut shape = None;
         for entry in &entries {
             let record = self.read_record(entry)?;
-            let segment = record.header().segment.clone().ok_or_else(|| {
-                FormatError::Invalid("SEGMENTED blob without segment info".into())
-            })?;
+            let segment = segment_of(&record)?;
+            let (count, total) = *shape.get_or_insert((segment.count, segment.total_len));
+            if (segment.count, segment.total_len) != (count, total) {
+                return Err(FormatError::Invalid(format!(
+                    "blob {object_id}: segments disagree on count or total length"
+                )));
+            }
+            let expected = segment_len(segment.index, count, total, self.limits.max_payload)?;
+            if record.header().plain_len != expected {
+                return Err(FormatError::Invalid(format!(
+                    "blob {object_id}: segment {} holds {} bytes, expected {expected}",
+                    segment.index,
+                    record.header().plain_len
+                )));
+            }
+            if segments.is_empty() {
+                segments.resize(count as usize, None);
+            }
+            let slot = &mut segments[segment.index as usize];
+            if slot.is_none() {
+                *slot = Some((entry.clone(), expected));
+            }
+        }
+        let (_, total) = shape.unwrap_or_default();
+        let present = segments.iter().filter(|s| s.is_some()).count();
+        if present != segments.len() {
+            return Err(FormatError::Invalid(format!(
+                "blob {object_id}: only {present} of {} segments",
+                segments.len()
+            )));
+        }
+        // Pass 2: decrypt and decompress in order into one buffer.
+        let mut out = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+        for (index, (entry, expected)) in segments.into_iter().flatten().enumerate() {
+            let record = self.read_record(&entry)?;
+            let segment = segment_of(&record)?;
+            if segment.index as usize != index || record.header().plain_len != expected {
+                return Err(FormatError::Invalid(format!(
+                    "blob {object_id}: segment {index} changed while reading"
+                )));
+            }
             let content =
                 record.open_content(&self.header.doc_id, self.opener.as_deref(), &self.limits)?;
-            segments.push((segment, content));
+            out.extend_from_slice(&content);
         }
-        assemble_segments(segments)
+        Ok(out)
     }
 
     /// Takes the reader apart (for [`crate::Writer::resume`]).
@@ -200,32 +247,47 @@ impl<F: Read + Seek> Reader<F> {
     }
 }
 
-/// Validates and joins blob segments.
-fn assemble_segments(mut segments: Vec<(pb::Segment, Vec<u8>)>) -> Result<Vec<u8>> {
-    segments.sort_by_key(|(segment, _)| segment.index);
-    let count = segments.first().map_or(0, |(s, _)| s.count);
-    let total = segments.first().map_or(0, |(s, _)| s.total_len);
-    let consistent = segments
-        .iter()
-        .enumerate()
-        .all(|(i, (s, _))| s.index as usize == i && s.count == count && s.total_len == total);
-    if !consistent || segments.len() != count as usize {
-        return Err(FormatError::Invalid(format!(
-            "blob segments incomplete or inconsistent: {} of {count}",
-            segments.len()
-        )));
+/// The segment info of a `SEGMENTED` blob record.
+fn segment_of(record: &Record) -> Result<&pb::Segment> {
+    if !record.flags().contains(RecordFlags::SEGMENTED) {
+        return Err(FormatError::Invalid(
+            "blob mixes segmented and unsegmented records".into(),
+        ));
     }
-    let mut out = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
-    for (_, content) in segments {
-        out.extend_from_slice(&content);
-    }
-    if out.len() as u64 != total {
-        return Err(FormatError::PlainLen {
-            expected: total,
-            actual: out.len() as u64,
+    record
+        .header()
+        .segment
+        .as_ref()
+        .ok_or_else(|| FormatError::Invalid("SEGMENTED blob without segment info".into()))
+}
+
+/// The plaintext size of segment `index` of a blob of `count` segments and
+/// `total` bytes (spec §4.6, §5.3), if the blob fits in `max_total`.
+fn segment_len(index: u32, count: u32, total: u64, max_total: u64) -> Result<u64> {
+    if total > max_total {
+        return Err(FormatError::Limit {
+            what: "blob",
+            value: total,
+            limit: max_total,
         });
     }
-    Ok(out)
+    let full = crate::SEGMENT_LEN as u64;
+    let last = u64::from(count)
+        .checked_sub(1)
+        .and_then(|before| total.checked_sub(before * full))
+        .filter(|last| (1..=full).contains(last))
+        .ok_or_else(|| {
+            FormatError::Invalid(format!(
+                "a blob of {total} bytes can't have {count} segments"
+            ))
+        })?;
+    match index.cmp(&(count - 1)) {
+        std::cmp::Ordering::Less => Ok(full),
+        std::cmp::Ordering::Equal => Ok(last),
+        std::cmp::Ordering::Greater => Err(FormatError::Invalid(format!(
+            "segment {index} of a blob with {count} segments"
+        ))),
+    }
 }
 
 /// The opened index, its opener (encrypted documents) and its offset.
