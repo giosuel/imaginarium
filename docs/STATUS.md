@@ -10,7 +10,7 @@ Last updated: 2026-10-12
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.2 `imaginarium-render`** (see the M2 checklist below), starting with the CPU backend, the display list and the tile cache.
+- **Next step:** **M2.2 Window and frame pipeline** (see the M2 checklist below; the order changed on 2026-10-12).
 - **Code status:** Cargo workspace with 12 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -604,35 +604,44 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
     0.53 ms. Later optimization if needed: fewer `RefCell` round trips per
     node, and an iterative `update` for memo chains deeper than a few
     thousand.
-- [ ] **M2.2 `imaginarium-render`** ← **next**:
-  - a display list per node and Vello scene building;
-  - a 256² tile cache per zoom bucket, dirty-tile tracking and a
-    compositor that pans without re-rasterizing;
-  - a backend trait: the `CpuBackend` first (golden-image tests), then the
-    `GpuBackend` on wgpu;
-  - benchmarks on `BoardFixture::LARGE` (10k shapes).
-- [ ] **M2.3 `imaginarium-text`** (minimal): Parley and fontique behind our
-  traits, a paragraph layout cache, and a bundled font for deterministic
-  tests. Enough for labels, the palette and one text field.
-- [ ] **M2.4 `imaginarium-ui`** (minimal):
-  - the winit event loop, and a retained widget tree bound to signals;
-  - Taffy layout, input routing, hit testing and focus;
-  - a text field with IME, and the AccessKit tree;
-  - HiDPI and per-monitor scale changes;
-  - one frame scheduler that sleeps when nothing changes.
-- [ ] **M2.5 Gate app** (a binary or an `imaginarium-app` mode, decided in
-  M2.0):
-  - the 10k-shape board from the fixtures, with pan, zoom and drag;
-  - the command palette over 2,000 commands, and a text field;
-  - the frame-time HUD (`F12`), and tracy zones that show dirty tiles.
-- [ ] **M2.6 Gate run**: the owner runs the prebuilt binary on Linux and
-  sends the report and the checklist. Results in `docs/design/m2-gate.md`.
-  Failed criteria get one focused fix round. Pass: ADR-0007 notes the
-  passed gate (Windows and macOS still open). Fail: a new ADR, fallback to
-  GPUI.
-- [ ] **M2.7 Wrap-up**: code review (separate reviewer agents, medium
-  effort), developer docs on the website (`reactive`, `ui`, `render`),
-  STATUS, tag `v0.0.3-m2`.
+**Reordered 2026-10-12 (owner):** the UI risks first (they decide own
+toolkit vs GPUI), then the canvas; the decision point stays after the gate
+app runs. Two owner exceptions for M2:
+- **Two-week rule:** Vello 0.3 (`vello_gpu`, `vello_cpu`, `vello_common`),
+  Parley 0.12 and Taffy 0.15 may be used although younger than 14 days,
+  plus the transitive versions they require (pinned older wherever one
+  still fits). Listed in `xtask/dep-age-exceptions.txt`.
+- **Module reviews deferred to M2.8:** no per-module review agent during
+  M2; one review of all M2 code before the tag. Tests first, property
+  tests and all checks before every PR still apply.
+
+- [ ] **M2.2 Window and frame pipeline** ← **next**: a winit window, the
+  `imaginarium-render` minimal "one scene per frame" on `vello_gpu`/wgpu
+  (and the `vello_cpu` backend for golden images), a frame scheduler that
+  sleeps when nothing changes, scale-factor and DPI handling. Gate
+  criteria 5 and 6. In parallel: compare `imaginarium-reactive` with
+  `sycamore-reactive` and `reactive_graph` on our property tests and
+  benchmarks; switch before M2.4 if one is clearly better.
+- [ ] **M2.3 Text and the text field**: `imaginarium-text` on Parley 0.12
+  (fonts, layout cache, glyphs through Vello), a text field on
+  `PlainEditor` with IME, the AccessKit tree. Criterion 4.
+- [ ] **M2.4 Widgets and layout**: the minimal widget tree driven by
+  signals, Taffy layout, input routing and focus, the command palette over
+  2,000 commands (timed per keystroke through layout). Criterion 3. Then
+  an **early test binary** for the owner's laptop (criteria 3–6).
+- [ ] **M2.5 Canvas**: display lists, the 256-px tile cache, invalidation
+  and the compositor (`docs/design/rendering.md`) on the 10k-shape board,
+  with pan, zoom, drag and a dirty-tile overlay. Criteria 1 and 2.
+- [ ] **M2.6 Gate binary** `imaginarium-gate`: scripted scenarios,
+  `gate-report.json` (renderer and toolkit numbers apart, `--backend
+  gpu|cpu`, integrated and discrete GPU), a manual checklist.
+- [ ] **M2.7 Gate run** on the owner's laptop: results in
+  `docs/design/m2-gate.md`, one focused fix round for failed criteria,
+  then the decision. ADR-0007 notes that the gate evaluates the renderer
+  of ADR-0003 too (a renderer failure has other fallbacks than GPUI).
+- [ ] **M2.8 Wrap-up**: the code review of all M2 code (separate reviewer
+  agents, medium effort), developer docs on the website, STATUS, tag
+  `v0.0.3-m2`.
 
 **Wasm (browser) build: not a goal now** (owner, 2026-10-12: focus on the
 native build, keep the browser build in mind). Core and toolkit crates stay
