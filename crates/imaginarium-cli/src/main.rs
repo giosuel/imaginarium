@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! `imag`: inspect, verify and export Imaginarium documents (`.imag`).
+//!
+//! # Responsibility
+//! - `imag inspect FILE`: the records of a file (types, sizes, streams,
+//!   epochs, signatures), read straight from the plaintext framing, so it
+//!   works without keys. `--json` for scripts.
+//! - `imag verify FILE`: every check this version can run: checksums, the
+//!   index, decryption, blobs, keyrings, signatures, the ACL chain and the
+//!   document itself. Exit code 0 if nothing failed, 1 if something did.
+//! - `imag export-json FILE`: the decrypted document as JSON.
+//!
+//! Keys come from `--password-stdin`, `--password-env VAR` or
+//! `--key-file FILE`, never from an argument, which other users of the
+//! machine could read from the process list.
+//!
+//! # Non-goals (yet)
+//! `compact`, `rekey` and editing come later (file-format design §9).
+#![forbid(unsafe_code)]
+
+mod export;
+mod inspect;
+mod keys;
+mod scan;
+mod verify;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use crate::keys::KeyArgs;
+
+/// Inspect, verify and export Imaginarium documents (.imag).
+#[derive(Parser)]
+#[command(name = "imag", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List a file's records: types, sizes, streams, epochs, signatures.
+    /// Works without keys.
+    Inspect {
+        /// The .imag file.
+        file: PathBuf,
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        keys: KeyArgs,
+    },
+    /// Check a file: checksums, index, decryption, blobs, keyrings,
+    /// signatures, ACL chain and the document. Exits with 1 on problems.
+    Verify {
+        /// The .imag file.
+        file: PathBuf,
+        #[command(flatten)]
+        keys: KeyArgs,
+    },
+    /// Print the decrypted document as JSON.
+    ExportJson {
+        /// The .imag file.
+        file: PathBuf,
+        /// One line instead of indented JSON.
+        #[arg(long)]
+        compact: bool,
+        #[command(flatten)]
+        keys: KeyArgs,
+    },
+}
+
+/// Exit code when the command couldn't run (bad arguments, unreadable file).
+const ERROR: u8 = 2;
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let result = match &cli.command {
+        Command::Inspect { file, json, keys } => {
+            inspect::run(file, keys, *json, &mut out).map(|()| true)
+        }
+        Command::Verify { file, keys } => verify::run(file, keys, &mut out),
+        Command::ExportJson {
+            file,
+            compact,
+            keys,
+        } => export::run(file, keys, *compact, &mut out).map(|()| true),
+    };
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(err) => {
+            eprintln!("imag: {err:#}");
+            ExitCode::from(ERROR)
+        }
+    }
+}
