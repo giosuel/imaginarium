@@ -55,8 +55,76 @@ session must be able to continue from `STATUS.md` alone.
 - **Never commit agent or tool files.** This includes `CLAUDE.md`,
   `CLAUDE.local.md`, `AGENTS.md`, `.claude/`, `.cursor/` and the other tool
   directories listed in `.gitignore`. Check `git status` before every commit.
-- Branch: `main` (no remote yet; the owner adds it later). Never force-push
-  or rewrite published history.
+- **Never force-push or rewrite published history.**
+
+## Pull request workflow (mandatory)
+
+Remote: `origin` = <https://github.com/giosuel/imaginarium> (public).
+
+The branch rules for `main` are versioned in
+[`.github/rulesets/main.json`](.github/rulesets/main.json). To change a rule,
+edit the file in a PR. The owner then imports it under Settings → Rules →
+Rulesets. Agents push with the owner's token, so the ruleset requires 0
+approvals (GitHub forbids self-approval) and has no bypass actors. Any
+bypass would apply to agents too.
+
+1. **Never commit directly to `main`.** Start each unit of work on a branch
+   cut from an up-to-date `main` (`git switch main && git pull && git switch
+   -c <branch>`).
+   - Branch names: `<type>/<short-topic>`, e.g. `feat/m0.2-xtask-layers`,
+     `docs/sync-protocol`, `fix/format-trailer-crc`.
+   - One branch and PR per STATUS step (e.g. M0.2), or smaller.
+2. Inside the branch, still **commit after every module, refactor and
+   decision**. Don't squash locally: the commit history is part of the
+   record.
+3. Before opening the PR, run every check from "Build and check commands",
+   and update `docs/STATUS.md` in the same PR (tick the step, set the next
+   one).
+4. Push (`git push -u origin <branch>`) and open the PR with `gh pr create`
+   against `main`. Fill in the template (`.github/pull_request_template.md`).
+   AI agents end the PR description with the attribution lines provided by
+   the harness.
+   - Gotcha: `gh pr edit` fails with gh 2.46 ("Projects (classic) is being
+     deprecated"). Use the REST API instead:
+     `gh api -X PATCH repos/giosuel/imaginarium/pulls/<n> -f title=… -F body=@file.md`.
+5. **The owner reviews and merges.** Agents don't merge their own PRs unless
+   the owner explicitly says so for that PR.
+   - Merge strategy: **merge commit** (no squash, no rebase-merge). This keeps
+     the per-module commits and their SHAs, which `STATUS.md` references.
+6. After the merge: `git switch main && git pull`, delete the local branch,
+   and continue with the next step on a new branch. The next step may be
+   started on a branch based on the unmerged PR branch if it depends on it.
+   Say so in the PR description.
+
+## Reporting to the owner (mandatory)
+
+1. **Every change goes into `main` through a PR** (see above). There are no
+   exceptions, not even for docs.
+2. **Screenshots:** whenever there is a runnable version with something
+   visible (from the M2 prototype onwards), take screenshots and **send them
+   to the owner directly**. Never commit them. For UI changes, send a
+   before/after pair, and mention the screenshots in the PR description.
+3. **Profile heavy tasks.** Measure every heavy task (clean and incremental
+   builds, release builds, the test suite, clippy, benchmarks, website
+   builds) and report:
+   - wall time,
+   - CPU utilization (are all cores saturated?),
+   - peak memory and swap,
+   - the machine specs.
+
+   Report this in the PR description and to the owner, so they can judge
+   whether the development machine is a bottleneck. Flag a bottleneck
+   explicitly, for example "clean release build takes more than 10 minutes
+   with all cores at 100 %: more cores would help", or "the linker hits the
+   RAM limit and swaps: more RAM is needed". Use `cargo build --timings` for
+   per-crate build cost.
+4. **Never commit generated artifacts:** screenshots, profiling outputs
+   (timings HTML, tracy captures, flamegraphs, perf data, reports), or any
+   agent or tool files. Keep them in the agent's scratch directory or in the
+   git-ignored `artifacts/` and `profiling/` directories. The only shared
+   rules file is this one, `MAINTAINERS.md`. Test fixtures that the test
+   suite needs (e.g. golden images under a crate's `tests/`) are source code,
+   not artifacts, and are committed.
 
 ## Architecture invariants (do not break)
 

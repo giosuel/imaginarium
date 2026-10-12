@@ -28,3 +28,14 @@ CLAUDE.md
 **/CLAUDE.md
 AGENTS.md
 **/AGENTS.md
+
+# Generated artifacts: screenshots, reports, profiling output (never commit)
+/artifacts/
+*.tracy
+perf.data*
+flamegraph*.svg
+*.profraw
+*.profdata
+dhat-heap.json
+heaptrack.*
+cargo-timing*.html

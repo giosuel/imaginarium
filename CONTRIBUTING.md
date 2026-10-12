@@ -41,6 +41,9 @@ packages may use content licenses such as CC-BY, declared in their
    ```
 4. Update docs with your change (user guide and/or developer docs). Docs
    are part of done.
+5. Open a pull request against `main` and fill in the template. PRs are
+   merged with a merge commit, so keep your commits meaningful. Don't squash
+   them into one.
 
 ## Code guidelines
 
