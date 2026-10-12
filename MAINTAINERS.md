@@ -224,6 +224,15 @@ xtask check` and CI fail while they are stale.
 - Benchmarks: `cargo bench -p <crate>`, following the conventions in those
   docs.
 
+**Test vectors** (`docs/format/test-vectors/`, spec §13): the `vectors`
+tests of `imaginarium-format` (1–4) and `imaginarium-crypto` (5–10) check
+that we write the published files byte for byte. The crypto ones use
+seeded randomness from the `test-vectors` feature, which only the test
+build enables (the crate dev-depends on itself). Never enable it anywhere
+else. Regenerate only together with a deliberate spec change:
+`IMAGINARIUM_UPDATE_VECTORS=1 cargo test -p <crate> --test vectors`, then
+run the tests again without the variable.
+
 **Fuzzing** (parsers of untrusted input: the format and later the sync
 protocol): the targets live in `crates/<crate>/fuzz/`, a separate workspace
 that needs a nightly toolchain.
