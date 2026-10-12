@@ -149,6 +149,7 @@ impl<F: Read + Seek> Reader<F> {
                 entry.offset
             )));
         }
+        check_encryption(&self.header, &record)?;
         Ok(record)
     }
 
@@ -282,6 +283,7 @@ pub(crate) fn load_index<F: Read + Seek>(
             "trailer points to a non-index record".into(),
         ));
     }
+    check_encryption(header, &index_record)?;
     let opener = if header.is_encrypted() {
         let keys = keys.ok_or(FormatError::NeedsKey)?;
         let mut key_records = Vec::with_capacity(index_record.header().key_records.len());
@@ -292,6 +294,7 @@ pub(crate) fn load_index<F: Read + Seek>(
                     "key_records lists a non-key record".into(),
                 ));
             }
+            check_encryption(header, &record)?;
             key_records.push(record);
         }
         Some(keys.opener(header, &key_records)?)
@@ -309,13 +312,29 @@ pub(crate) fn load_index<F: Read + Seek>(
         source,
     })?;
     let state = IndexState::from_pb(index);
-    validate_index(&state, offset, &index_record)?;
+    validate_index(header, &state, offset, &index_record)?;
     Ok((state, opener))
 }
 
-/// Entries must lie inside the records area before the index, and the
-/// INDX header's `key_records` must match the KEYR/ACLC entries (spec §9.1).
-fn validate_index(state: &IndexState, index_offset: u64, index_record: &Record) -> Result<()> {
+/// Spec §5.1 for a record read from the file. A violation means someone
+/// changed the file without the key, so it's reported like a failed
+/// decryption (a key problem), which recovery doesn't paper over.
+pub(crate) fn check_encryption(header: &FileHeader, record: &Record) -> Result<()> {
+    match header.encryption_violation(record) {
+        Some(problem) => Err(FormatError::Crypto(problem)),
+        None => Ok(()),
+    }
+}
+
+/// Entries must lie inside the records area before the index, and in
+/// encrypted documents the INDX header's `key_records` must match the
+/// KEYR/ACLC entries (spec §9.1).
+fn validate_index(
+    header: &FileHeader,
+    state: &IndexState,
+    index_offset: u64,
+    index_record: &Record,
+) -> Result<()> {
     for entry in state.entries() {
         let end = entry.offset.checked_add(entry.length);
         if entry.offset < HEADER_LEN as u64
@@ -328,9 +347,7 @@ fn validate_index(state: &IndexState, index_offset: u64, index_record: &Record) 
             )));
         }
     }
-    if !index_record.header().key_records.is_empty()
-        && index_record.header().key_records != state.key_records()
-    {
+    if header.is_encrypted() && index_record.header().key_records != state.key_records() {
         return Err(FormatError::Invalid(
             "key_records don't match the index".into(),
         ));

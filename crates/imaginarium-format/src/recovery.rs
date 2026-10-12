@@ -84,7 +84,7 @@ pub(crate) fn recover<F: Read + Seek>(
             limits,
             keys.as_deref_mut(),
         ) {
-            let scan = scan_forward(file, trailer_end, file_len, limits, &mut state)?;
+            let scan = scan_forward(file, header, trailer_end, file_len, limits, &mut state)?;
             return Ok(Recovered {
                 state,
                 index_offset,
@@ -104,7 +104,14 @@ pub(crate) fn recover<F: Read + Seek>(
 
     // 2. Forwards from the header: rebuild the index from the records.
     let mut state = IndexState::default();
-    let scan = scan_forward(file, HEADER_LEN as u64, file_len, limits, &mut state)?;
+    let scan = scan_forward(
+        file,
+        header,
+        HEADER_LEN as u64,
+        file_len,
+        limits,
+        &mut state,
+    )?;
     if scan.records == 0 {
         return Err(FormatError::NoValidIndex(format!(
             "{cause}; no readable records"
@@ -140,9 +147,11 @@ struct Scan {
 }
 
 /// Adds every complete record from `start` up to the first unreadable one
-/// to `state`, skipping index records and their trailers.
+/// to `state`, skipping index records and their trailers. A record that
+/// breaks the encryption policy (spec §5.1) counts as unreadable.
 fn scan_forward<F: Read + Seek>(
     file: &mut F,
+    header: &FileHeader,
     start: u64,
     file_len: u64,
     limits: &Limits,
@@ -175,6 +184,9 @@ fn scan_forward<F: Read + Seek>(
                 pos += TRAILER_LEN as u64;
             }
             continue;
+        }
+        if let Some(problem) = header.encryption_violation(&record) {
+            break problem;
         }
         if matches!(record.rtype(), RecordType::KEYR | RecordType::ACLC) {
             scan.key_records.push(record.clone());

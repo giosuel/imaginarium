@@ -10,11 +10,12 @@
 use std::io::Cursor;
 
 use imaginarium_format::{
-    CompactionPlan, DocId, FileHeader, FormatError, KeyProvider, ObjectId, OpenOptions, Reader,
-    Record, RecordBuilder, RecordFlags, RecordOpener, RecordSealer, RecordType, RecoveryMethod,
-    Result, SEGMENT_LEN, StreamKey, Writer, compact, compact_file, pb,
+    CompactionPlan, DocId, FileHeader, FormatError, HEADER_LEN, KeyProvider, Limits, ObjectId,
+    OpenOptions, Reader, Record, RecordBuilder, RecordFlags, RecordOpener, RecordSealer,
+    RecordType, RecoveryMethod, Result, SEGMENT_LEN, StreamKey, Writer, compact, compact_file, pb,
 };
 use proptest::prelude::*;
+use prost::Message;
 
 const DOC: DocId = DocId([0x11; 16]);
 
@@ -498,6 +499,168 @@ fn tampering_with_an_encrypted_index_is_detected() {
         .err()
         .unwrap();
     assert!(err.is_key_problem(), "{err}");
+}
+
+/// Opens with the toy key no matter which key records the index lists.
+struct FixedKeys;
+
+impl KeyProvider for FixedKeys {
+    fn opener(&mut self, _: &FileHeader, _: &[Record]) -> Result<Box<dyn RecordOpener>> {
+        Ok(Box::new(ToyCipher(0x42)))
+    }
+}
+
+/// The location of the `KEYR` that [`encrypted_file`] writes first.
+fn keyring_ref(bytes: &[u8]) -> pb::RecordRef {
+    let (_, len) = Record::decode(&bytes[HEADER_LEN..], &Limits::default()).unwrap();
+    pb::RecordRef {
+        offset: HEADER_LEN as u64,
+        length: len as u64,
+    }
+}
+
+/// Appends `record`, then an index with `entries` (plus one for `record`)
+/// that makes it the main snapshot, then a trailer. Without `sealer` this
+/// needs no key: anyone holding the file can do it.
+fn append_forged_commit(
+    bytes: &mut Vec<u8>,
+    record: &Record,
+    mut entries: Vec<pb::IndexEntry>,
+    key_records: Vec<pb::RecordRef>,
+    sealer: Option<&ToyCipher>,
+) {
+    let at = bytes.len() as u64;
+    bytes.extend(record.encode());
+    entries.push(pb::IndexEntry {
+        rtype: record.rtype().0,
+        object_id: record.header().object_id.clone(),
+        stream: pb::Stream::Main as i32,
+        offset: at,
+        length: record.encoded_len() as u64,
+        rflags: u32::from(record.flags().0),
+        ..Default::default()
+    });
+    let index = pb::Index {
+        entries,
+        heads: vec![pb::StreamHead {
+            stream: pb::Stream::Main as i32,
+            snapshot_id: record.header().object_id.clone(),
+            ..Default::default()
+        }],
+        previous_index_offset: 0,
+    };
+    let index = RecordBuilder::new(RecordType::INDX, id(99))
+        .key_records(key_records)
+        .build(
+            &DOC,
+            index.encode_to_vec(),
+            sealer.map(|s| s as &dyn RecordSealer),
+        )
+        .unwrap();
+    let index_offset = bytes.len() as u64;
+    let encoded = index.encode();
+    bytes.extend(&encoded);
+    bytes.extend(
+        imaginarium_format::Trailer {
+            index_offset,
+            index_len: encoded.len() as u32,
+        }
+        .encode(),
+    );
+}
+
+fn keyring_entry(location: &pb::RecordRef) -> pb::IndexEntry {
+    pb::IndexEntry {
+        rtype: RecordType::KEYR.0,
+        object_id: id(1).0.to_vec(),
+        offset: location.offset,
+        length: location.length,
+        rflags: u32::from(RecordType::KEYR.required_flags().0),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn plaintext_records_appended_to_an_encrypted_document_are_not_adopted() {
+    // Spec §5.1: in an encrypted document every record except KEYR/ACLC is
+    // encrypted. Recovery must not adopt a plaintext SNAP that someone
+    // without the key appended, or it replaces the document's content.
+    let mut bytes = encrypted_file();
+    let committed = bytes.len();
+    bytes.extend(snap(9, b"forged").encode());
+    let mut reader = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .unwrap();
+    match &reader.recovery().expect("the trailer is gone").method {
+        RecoveryMethod::PreviousCommit {
+            commit_end,
+            adopted_records,
+            ..
+        } => {
+            assert_eq!(*commit_end, committed as u64);
+            assert_eq!(*adopted_records, 0, "the plaintext SNAP was adopted");
+        }
+        other => panic!("{other:?}"),
+    }
+    let head = reader.index().head(&StreamKey::main()).unwrap().clone();
+    assert_eq!(head.snapshot_id, id(2).0.to_vec());
+    let entry = reader.index().entries()[1].clone();
+    assert_eq!(reader.read_content(&entry).unwrap(), b"top secret");
+}
+
+#[test]
+fn a_plaintext_index_in_an_encrypted_document_is_reported() {
+    // A key-less attacker appends a plaintext index that keeps the real
+    // KEYR (so the key provider still unlocks) but points the main stream
+    // at a plaintext SNAP of their own. That's tampering, not a torn
+    // write: report it, don't open the forgery or "recover" around it.
+    let mut bytes = encrypted_file();
+    let keyring = keyring_ref(&bytes);
+    append_forged_commit(
+        &mut bytes,
+        &snap(9, b"forged"),
+        vec![keyring_entry(&keyring)],
+        vec![keyring],
+        None,
+    );
+    let err = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .err()
+    .expect("the forged index was accepted");
+    assert!(err.is_key_problem(), "{err}");
+}
+
+#[test]
+fn an_encrypted_index_must_list_every_key_record() {
+    // Spec §9.1: the INDX header's key_records must match the KEYR/ACLC
+    // entries, also when it lists none (a key provider that doesn't need
+    // the list would otherwise never see the keyrings at all).
+    let cipher = ToyCipher(0x42);
+    let secret = RecordBuilder::new(RecordType::SNAP, id(9))
+        .stream(pb::Stream::Main)
+        .codec("loro-1")
+        .build(&DOC, b"newer".to_vec(), Some(&cipher))
+        .unwrap();
+    let mut bytes = encrypted_file();
+    let keyring = keyring_ref(&bytes);
+    append_forged_commit(
+        &mut bytes,
+        &secret,
+        vec![keyring_entry(&keyring)],
+        Vec::new(),
+        Some(&cipher),
+    );
+    let strict = OpenOptions {
+        recover: false,
+        ..OpenOptions::default()
+    };
+    assert!(Reader::open_with(Cursor::new(bytes), strict, Some(&mut FixedKeys)).is_err());
 }
 
 // --- Crash safety, property-based ------------------------------------------

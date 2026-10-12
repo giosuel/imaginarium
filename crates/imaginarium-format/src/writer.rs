@@ -230,26 +230,9 @@ impl<F: Write + Seek + Durable> Writer<F> {
     /// Spec §5.1: in encrypted documents everything except KEYR/ACLC is
     /// encrypted. In unencrypted documents nothing is.
     fn check_encryption(&self, record: &Record) -> Result<()> {
-        use crate::record::RecordFlags;
-        let is_encrypted = record.flags().contains(RecordFlags::ENCRYPTED);
-        let key_record = matches!(record.rtype(), RecordType::KEYR | RecordType::ACLC);
-        let ok = match (self.header.is_encrypted(), key_record) {
-            (true, false) => is_encrypted,
-            (true, true) | (false, _) => !is_encrypted,
-        };
-        if ok {
-            Ok(())
-        } else {
-            Err(FormatError::Invalid(format!(
-                "record type {:#x} must {}be encrypted in {} documents",
-                record.rtype().0,
-                if is_encrypted { "not " } else { "" },
-                if self.header.is_encrypted() {
-                    "encrypted"
-                } else {
-                    "unencrypted"
-                },
-            )))
+        match self.header.encryption_violation(record) {
+            Some(problem) => Err(FormatError::Invalid(problem)),
+            None => Ok(()),
         }
     }
 }

@@ -2,6 +2,7 @@
 
 //! The 36-byte file header (spec §4.1).
 
+use crate::record::{Record, RecordFlags, RecordType};
 use crate::{DocId, FormatError, Result};
 
 /// The file magic: `\x89IMG\r\n\x1a\n`.
@@ -47,6 +48,29 @@ impl FileHeader {
     /// Whether the document is encrypted (flag bit 0).
     pub fn is_encrypted(&self) -> bool {
         self.flags & FLAG_ENCRYPTED != 0
+    }
+
+    /// Spec §5.1: in encrypted documents every record except `KEYR` and
+    /// `ACLC` is `ENCRYPTED`, and those two never are. In unencrypted
+    /// documents no record is. Returns what's wrong with `record`, if
+    /// anything. Readers check this too: otherwise anyone holding an
+    /// encrypted file could add plaintext records without the key.
+    pub(crate) fn encryption_violation(&self, record: &Record) -> Option<String> {
+        let encrypted = record.flags().contains(RecordFlags::ENCRYPTED);
+        let key_record = matches!(record.rtype(), RecordType::KEYR | RecordType::ACLC);
+        let must_be_encrypted = self.is_encrypted() && !key_record;
+        (encrypted != must_be_encrypted).then(|| {
+            format!(
+                "record type {:#x} must {}be encrypted in {} documents",
+                record.rtype().0,
+                if must_be_encrypted { "" } else { "not " },
+                if self.is_encrypted() {
+                    "encrypted"
+                } else {
+                    "unencrypted"
+                },
+            )
+        })
     }
 
     /// The 36 header bytes.
