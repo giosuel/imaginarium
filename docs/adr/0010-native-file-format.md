@@ -1,6 +1,6 @@
 # 0010. Native `.imag` format: encrypted object pack
 
-- Status: Proposed (design under review)
+- Status: Accepted
 - Date: 2026-10-12
 - Supersedes: native-format part of 0005
 

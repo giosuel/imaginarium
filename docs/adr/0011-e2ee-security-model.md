@@ -7,8 +7,15 @@
 - **The server cannot read anything.** Content, titles, file names, comments,
   thumbnails and presence (cursors) are encrypted on the client. Details are
   in `docs/design/file-format.md` §6.
-- Suite 1: XChaCha20-Poly1305, BLAKE3, Ed25519 and HPKE (X25519), with Argon2id
-  for password files. A post-quantum hybrid suite is reserved.
+- Suite 1 is **hybrid post-quantum from the first release**:
+  - XChaCha20-Poly1305 and BLAKE3,
+  - X-Wing (X25519 + ML-KEM-768) for key wrapping,
+  - Ed25519 for live edits,
+  - Ed25519 + ML-DSA-65 for long-lived authority records,
+  - Argon2id for password files.
+
+  This was amended per the owner's decision on 2026-10-12; see format
+  design §6.1.
 - **Accounts:** login uses **OPAQUE** (RFC 9807, `opaque-ke`), so the server
   never sees the password. The OPAQUE export key encrypts the user's private
   key bundle stored on the server. A **recovery key** (shown once, printable)

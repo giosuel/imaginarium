@@ -17,9 +17,10 @@ Template: `0000-template.md`. Statuses: Proposed, Accepted, Superseded by NNNN.
 | 0007 | Own UI toolkit on the Linebender stack               | Accepted (prototype gate) |
 | 0008 | AGPL-3.0-or-later, no proprietary add-ons            | Accepted |
 | 0009 | CRDT (Loro) document model + view model              | Accepted |
-| 0010 | Native `.imag` encrypted object-pack format          | Proposed |
+| 0010 | Native `.imag` encrypted object-pack format          | Accepted |
 | 0011 | End-to-end encryption security model                 | Accepted |
 | 0012 | Self-hostable zero-knowledge collaboration hub       | Accepted |
 | 0013 | Provider-agnostic generative AI                      | Accepted |
 | 0014 | All configuration via typed settings registry + UI   | Accepted |
 | 0015 | Distribution, website and documentation              | Accepted |
+| 0016 | Format defaults: local encryption, history, thumbnails, PQC | Accepted |

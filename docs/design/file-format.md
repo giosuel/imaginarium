@@ -1,6 +1,6 @@
 # The `.imag` file format: design
 
-- Status: **Draft for review** (2026-10-12)
+- Status: **Accepted design, defaults decided** (2026-10-12). The normative spec follows in M1.
 - Scope: the on-disk *and* on-server representation of an Imaginarium document
 - Normative spec: will be extracted into `docs/format/spec-v1.md` (RFC-style
   MUST/SHOULD, with test vectors) once this design is accepted.
@@ -161,7 +161,7 @@ small and fast.
 | `0x03` | `SNAP`  | CRDT snapshot (`main` or `discussion` doc) | codec `loro-1` | Possibly shallow (history-trimmed) |
 | `0x04` | `UPDT`  | CRDT update batch (one transaction group, ~50 ms window in real time) | codec `loro-1` | Signed by the author's device key (§6.3) |
 | `0x05` | `BLOB`  | Media: image, font, raster tile, attachment | raw / segmented | Content-addressed (§4.3), deduplicated |
-| `0x06` | `THMB`  | Preview thumbnail (WebP) | raw | *Ancillary.* Optional, and plaintext only if the user allows it (OS previews) |
+| `0x06` | `THMB`  | Preview thumbnail (WebP) | raw | *Ancillary.* Written by default in **unencrypted** files (OS previews, can be disabled in settings). In encrypted files it is always encrypted, so OS previews show a lock icon. |
 | `0x07` | `VERS`  | Named version: label + CRDT frontier | Protobuf | For version history |
 | `0x08` | `ACLC`  | Access-control change (signed membership/role chain) | Protobuf | §6.4 |
 | `0x09` | `DERV`  | Derived data: image mip pyramids, layout caches, search index | raw | *Ancillary + droppable*: can always be regenerated |
@@ -274,7 +274,8 @@ detect transfer corruption (text-mode FTP, line-ending conversion) and stop
 | Overhead per record (encrypted) | ≈ 24 B nonce + 16 B tag + ~10 B header + 4 B CRC |
 
 **History policy** is a document setting: *keep all*, *keep N days*, or
-*none*. It uses Loro shallow snapshots. "Export clean copy" writes an
+*none*. The default is **keep 90 days, and named versions forever**. It uses
+Loro shallow snapshots. "Export clean copy" writes an
 unencrypted, history-free, comment-free file for sending to others.
 
 ---
@@ -286,23 +287,23 @@ unencrypted, history-free, comment-free file for sending to others.
 Every encrypted record carries a `suite` id, so algorithms can be changed
 later without a new format (crypto agility).
 
-**Suite 1** (default):
+**Suite 1** (default from the first release: **hybrid post-quantum**):
 
 | Purpose | Algorithm |
 |---------|-----------|
-| AEAD | **XChaCha20-Poly1305**. Its 192-bit random nonces are safe across many independent devices without any nonce coordination. It is fast in software and on ARM. |
+| AEAD | **XChaCha20-Poly1305**. Its 192-bit random nonces are safe across many independent devices without any nonce coordination. It is fast in software and on ARM. 256-bit keys remain secure against quantum attacks. |
 | Hash / KDF / MAC | **BLAKE3** (keyed and derive-key modes), HKDF-SHA256 where a standard requires it |
-| Signatures | **Ed25519** (batch verification) |
-| Key wrapping to users/devices | **HPKE** (RFC 9180): X25519, HKDF-SHA256, ChaCha20-Poly1305 |
+| Key wrapping to users/devices | **Hybrid KEM X-Wing** (X25519 + **ML-KEM-768**, FIPS 203) in HPKE-style sealing. An attacker must break *both* algorithms. This protects stored and recorded documents against "harvest now, decrypt later" attacks. |
+| Signatures on frequent records (`UPDT`, presence) | **Ed25519** (batch verification). Forging a signature requires a quantum computer *at the time of the attack*, not later, so classical signatures are acceptable here and keep live frames small. |
+| Signatures on long-lived authority records (identity keys, device certificates, `ACLC`, `KEYR`, `VERS`) | **Hybrid Ed25519 + ML-DSA-65** (FIPS 204). Both signatures must verify. These records are rare, so the ~3.3 KB ML-DSA signature size doesn't matter. |
 | Password-based keys (local password files) | **Argon2id** (memory-hard; parameters stored in `KEYR`) |
 
-Suite 2 is reserved for a **post-quantum hybrid** (X25519 + ML-KEM-768 for
-HPKE, with ML-DSA added later). This protects against "record now, decrypt
-later" attacks on stored documents. The format already supports it, so it
-can be switched on without a migration.
+Size cost of post-quantum: about 1.1 KB per recipient in the keyring and
+about 5 KB per authority record, with no impact on live editing. Suite 2 is
+reserved for ML-DSA on *all* records, should that become necessary.
 
 All primitives come from audited, widely used crates (RustCrypto,
-`ed25519-dalek`, `blake3`, `hpke`). We never implement primitives ourselves.
+`ed25519-dalek`, `blake3`, `hpke`, `ml-kem`, `ml-dsa`). We never implement primitives ourselves.
 
 ### 6.2 Key hierarchy
 
@@ -315,7 +316,8 @@ Document epoch key  DEK_e (256-bit random, one per membership epoch)
 
 KEYR (keyring) holds DEK_e wrapped for each recipient:
   local password file : Argon2id(password, salt) → KEK → AEAD-wrap(DEK_e)
-  cloud document      : HPKE-seal(recipient device/user key, DEK_e)
+  local account file  : X-Wing-seal(each of the user's device keys, DEK_e)
+  cloud document      : X-Wing-seal(recipient device/user key, DEK_e)
   folder share        : AEAD-wrap(folder key, DEK_e)  (folder key itself shared via HPKE)
   share link          : AEAD-wrap(link key, DEK_e); link key lives only in the
                         URL fragment (#…), which is never sent to the server
@@ -451,15 +453,17 @@ regression gates in CI.
 
 ---
 
-## 11. Open questions
+## 11. Decisions on defaults (2026-10-12, owner)
 
-1. **Plain local files by default?** My proposal: local files are
-   *unencrypted by default* (the user can't lose access through key loss),
-   with *password protection* available on demand. Cloud documents are always
-   encrypted, and their local cache is encrypted with a device key stored in
-   the OS keychain.
-2. **Plaintext thumbnails** for OS previews in unencrypted files: opt-in or
-   opt-out?
-3. **Default history policy:** *keep 90 days* plus named versions forever?
-4. **Post-quantum hybrid:** switch it on from the first release (slightly
-   larger keyrings) or later?
+1. **Local files are unencrypted by default.** On demand they can be
+   protected with a **password** (Argon2id) or with **account keys** (HPKE to
+   the user's devices, no password prompt on the user's own devices). Cloud
+   documents are always encrypted, and their local cache is encrypted with a
+   device key from the OS keychain.
+2. **Thumbnails:** a plaintext `THMB` record is written by default for
+   unencrypted files and can be disabled in settings. Encrypted files never
+   contain a plaintext thumbnail.
+3. **History:** the default is keep 90 days plus named versions forever. It
+   is configurable per document and per workspace.
+4. **Post-quantum:** suite 1 is hybrid post-quantum from the first release
+   (§6.1).
