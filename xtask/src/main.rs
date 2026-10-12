@@ -12,6 +12,8 @@
 //! - `check-layers`: crate layering, dependency rules and license metadata
 //!   (see [`layers`]).
 //! - `check-headers`: SPDX license header on every `.rs` file (see [`headers`]).
+//! - `check-tracked`: no agent/tool files or generated artifacts tracked by
+//!   git (see [`tracked`]).
 //!
 //! # Adding a task
 //! Write a `fn(&[String]) -> ExitCode` and add it to [`TASKS`]. Tasks print
@@ -21,6 +23,7 @@
 mod headers;
 mod layers;
 mod metadata;
+mod tracked;
 
 use std::process::ExitCode;
 
@@ -38,7 +41,7 @@ struct Task {
 const TASKS: &[Task] = &[
     Task {
         name: "check",
-        about: "Run all repository checks (layers, headers)",
+        about: "Run all repository checks (layers, headers, tracked files)",
         run: check_all,
     },
     Task {
@@ -50,6 +53,11 @@ const TASKS: &[Task] = &[
         name: "check-headers",
         about: "Check the SPDX license header of every .rs file",
         run: check_headers,
+    },
+    Task {
+        name: "check-tracked",
+        about: "Check that no agent files or generated artifacts are tracked",
+        run: check_tracked,
     },
     Task {
         name: "help",
@@ -87,7 +95,7 @@ fn help(_args: &[String]) -> ExitCode {
 /// Runs every check and fails if any of them fails. Each check still runs and
 /// reports, even after an earlier one failed.
 fn check_all(args: &[String]) -> ExitCode {
-    let results = [check_layers(args), check_headers(args)];
+    let results = [check_layers(args), check_headers(args), check_tracked(args)];
     if results.iter().all(|code| *code == ExitCode::SUCCESS) {
         ExitCode::SUCCESS
     } else {
@@ -144,6 +152,38 @@ fn check_headers(_args: &[String]) -> ExitCode {
                 let shown = file.strip_prefix(&root).unwrap_or(file);
                 eprintln!("  - {}", shown.display());
             }
+            ExitCode::from(FAILED)
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(FAILED)
+        }
+    }
+}
+
+/// `cargo xtask check-tracked`
+fn check_tracked(_args: &[String]) -> ExitCode {
+    let root = match metadata::load() {
+        Ok(metadata) => metadata.workspace_root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(FAILED);
+        }
+    };
+    match tracked::check(&root) {
+        Ok(found) if found.is_empty() => {
+            println!("check-tracked: ok (no agent files or generated artifacts tracked)");
+            ExitCode::SUCCESS
+        }
+        Ok(found) => {
+            eprintln!(
+                "check-tracked: {} file(s) must not be committed:",
+                found.len()
+            );
+            for (path, reason) in &found {
+                eprintln!("  - {path} ({reason})");
+            }
+            eprintln!("Remove them with `git rm --cached <path>`. They stay on disk.");
             ExitCode::from(FAILED)
         }
         Err(err) => {
