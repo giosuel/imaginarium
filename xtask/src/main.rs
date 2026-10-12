@@ -7,13 +7,17 @@
 //! and macOS without shell scripts. The `cargo xtask` alias is defined in
 //! `.cargo/config.toml`.
 //!
+//! # Tasks
+//! - `check-layers`: crate layering, dependency rules and license metadata
+//!   (see [`layers`]).
+//!
 //! # Adding a task
 //! Write a `fn(&[String]) -> ExitCode` and add it to [`TASKS`]. Tasks print
 //! human-readable output and signal failure through a non-zero exit code, so
 //! CI can run them directly.
-//!
-//! Status: skeleton (M0.1). `check-layers` (crate layering and SPDX headers)
-//! arrives in M0.2.
+
+mod layers;
+mod metadata;
 
 use std::process::ExitCode;
 
@@ -28,11 +32,21 @@ struct Task {
 }
 
 /// All available tasks, in the order `help` lists them.
-const TASKS: &[Task] = &[Task {
-    name: "help",
-    about: "List available tasks",
-    run: help,
-}];
+const TASKS: &[Task] = &[
+    Task {
+        name: "check-layers",
+        about: "Check crate layering, dependency rules and license metadata",
+        run: check_layers,
+    },
+    Task {
+        name: "help",
+        about: "List available tasks",
+        run: help,
+    },
+];
+
+/// Exit code for "the check found problems" (as opposed to 2 = usage error).
+const FAILED: u8 = 1;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -55,4 +69,29 @@ fn help(_args: &[String]) -> ExitCode {
         println!("  {:<16} {}", task.name, task.about);
     }
     ExitCode::SUCCESS
+}
+
+/// `cargo xtask check-layers`
+fn check_layers(_args: &[String]) -> ExitCode {
+    let metadata = match metadata::load() {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(FAILED);
+        }
+    };
+    let violations = layers::check(&metadata, layers::LAYERS);
+    if violations.is_empty() {
+        println!(
+            "check-layers: ok ({} crates, all dependencies follow the layer rules)",
+            metadata.packages.len()
+        );
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("check-layers: {} violation(s):", violations.len());
+    for violation in &violations {
+        eprintln!("  - {violation}");
+    }
+    eprintln!("See docs/PLAN.md §4.1 for the layer map.");
+    ExitCode::from(FAILED)
 }
