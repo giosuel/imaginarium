@@ -15,7 +15,7 @@
 //! - `check-tracked`: no agent/tool files or generated artifacts tracked by
 //!   git (see [`tracked`]).
 //! - `dev-profile [--write]`: check (or regenerate) the dev-profile overrides
-//!   for build-time-only crates in the root `Cargo.toml` (see [`dev_profile`]).
+//!   for build-time-only crates in the root `Cargo.toml` (see [`mod@dev_profile`]).
 //!
 //! # Adding a task
 //! Write a `fn(&[String]) -> ExitCode` and add it to [`TASKS`]. Tasks print
