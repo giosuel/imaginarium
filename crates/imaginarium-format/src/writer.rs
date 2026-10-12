@@ -144,6 +144,12 @@ impl<F: Write + Seek + Durable> Writer<F> {
                 "INDX records are written by commit".into(),
             ));
         }
+        if record.flags().contains(crate::RecordFlags::SIGNED) && record.signature_bytes().is_none()
+        {
+            return Err(FormatError::Invalid(
+                "record has the SIGNED flag but no signature".into(),
+            ));
+        }
         self.check_encryption(record)?;
         let bytes = record.encode();
         self.file.seek(SeekFrom::Start(self.end))?;

@@ -9,12 +9,14 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.4 `imaginarium-crypto`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
-- **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
+- **Next step:** **M1.5 CRDT benchmark** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Code status:** Cargo workspace with 8 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
-  Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
-  `imaginarium-settings` (typed registry, TOML) and `imaginarium-commands`
-  (registry, args/JSON Schema, keymaps, palette search). The app only prints its
+  Tracy, frame stats), `imaginarium-test-utils` (fixtures),
+  `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
+  (registry, args/JSON Schema, keymaps, palette search),
+  `imaginarium-format` (the `.imag` container) and `imaginarium-crypto`
+  (encryption, keyrings, signatures, ACL chain). The app only prints its
   version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
@@ -310,15 +312,51 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   - Bench (10k updates): open 5.6 ms, autosave 3.3 ms, recovery scan 18 ms.
   - Tooling installed on the dev VM: `nightly-2026-09-25` (minimal, fuzz
     only) and `cargo-fuzz` 0.13.2.
-- [ ] **M1.4 `imaginarium-crypto`** ← **next**:
-  - suite 1 wrappers;
-  - key hierarchy (epoch keys, labels);
-  - keyring (password via Argon2id, account and device keys via X-Wing);
-  - record encryption and segmented blobs (STREAM);
-  - signatures (Ed25519, hybrid with ML-DSA for authority records), ACL
-    chain verification;
-  - test vectors in `docs/format/test-vectors/`;
-  - benchmarks against the throughput table in the design.
+- [x] **M1.4 `imaginarium-crypto`** (done 2026-10-12, branch
+  `feat/m1.4-crypto`):
+  - Suite 1 record encryption (XChaCha20-Poly1305 with the format's AAD,
+    STREAM segments), epoch keys and subkeys, content-addressed blob ids.
+  - Keyrings: Argon2id passwords (NFC), X-Wing HPKE recipients, folder and
+    link keys. Key providers: `PasswordKeys`, `RecipientKeys`, `SharedKeys`,
+    `KnownKeys` (cached DEKs, so Argon2 isn't paid on every open).
+  - Signatures: Ed25519 devices, hybrid Ed25519 + hedged ML-DSA-65
+    identities (both halves must verify).
+  - `AclState`: replays the `ACLC` chain (genesis, linearity, forks,
+    permission table, devices, rotation, single owner, ownership transfer)
+    and authorizes content and keyrings **per epoch**.
+  - Format fix: a CRC-valid index that fails to decrypt is reported as a
+    key problem and **not "recovered"** (it used to open a file with a
+    wrong cached key as "damaged").
+  - Spec refinements (§8.4, §14 items 11–15): per-epoch authorization,
+    keyrings checked against the ACL chain (otherwise a Hub could plant a
+    key), no recovery on key errors, rotation after every `RemoveDevice`,
+    hedged ML-DSA, vector 6 has five segments.
+  - Tests: 34 unit tests, **test vectors 5–10** (11 files, written byte
+    for byte from seeded randomness; README lists the keys). The crate
+    dev-depends on itself with the `test-vectors` feature.
+  - Benchmarks (`cargo bench -p imaginarium-crypto`), this VM vs. the
+    design's table:
+
+    | Operation | Measured | Design |
+    |---|---|---|
+    | Seal / open 1 MiB | 2.47 ms (405 MiB/s) / 1.28 ms (781 MiB/s) | ~1–2 GB/s |
+    | BLAKE3 | 2.5 GiB/s | several GB/s |
+    | Ed25519 sign / verify | 34 / 69 µs | ~15 / 40 µs |
+    | Hybrid sign / verify | 1.0 ms / 224 µs | (rare records) |
+    | HPKE wrap / unwrap | 221 / 303 µs | ~100 µs unwrap |
+    | Argon2id (64 MiB, t=3) | 259 ms | ~250 ms by intent |
+    | Edit batch (200 B): seal+sign / verify+open | 39 / 74 µs | |
+    | ACL replay, 100 changes | 36 ms | |
+    | Open encrypted doc, 10k updates | 4.6 ms | |
+
+    Single-thread speed is about half of a current laptop's (Ed25519 and
+    the AEAD both land ~2× below the table; BLAKE3 is fine). Nothing is
+    over budget: a document open pays one HPKE unwrap or one Argon2 run.
+    Optimizations found by the benchmarks are in: in-place encryption
+    (−29 % seal), cached decoded identity keys (−42 % hybrid verify), no
+    state clone per ACL change (replay −26 % overall).
+  - Profile: bench build (release, thin LTO) 57 s wall; build plus run
+    331 CPU-s, peak 449 MB.
 - [ ] **M1.5 CRDT benchmark**: Loro vs Yrs vs Automerge on our workloads
   (10k-shape board, 300-page document, concurrent edits; memory, encode
   size, apply/merge time) using the `test-utils` fixtures. Confirm ADR-0009
@@ -345,4 +383,14 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
 
 ## Known issues and notes
 
-- None yet.
+- **Verifying every signature on open is too slow for big shared
+  documents**: about 70 µs per Ed25519 record on this VM, so ~0.7 s for 10k
+  updates. Decide in M1.6/M8: verify on receipt and remember it in the
+  local cache, use batch verification, or verify only what the newest
+  snapshot doesn't cover. The ACL replay (36 ms per 100 changes) can be
+  cached by head hash in the same way.
+- HPKE unwrap (303 µs) is 3× the design estimate, because `x-wing` 0.1.0
+  expands the private seed (ML-KEM key generation plus X25519) on every
+  decapsulation (checked in its source, `DecapsulationKey::decapsulate`). It runs
+  once per open, so it isn't worth patching now. Re-check after updating
+  `x-wing` (pinned until 0.1.1 is two weeks old).

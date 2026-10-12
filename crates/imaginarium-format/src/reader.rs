@@ -93,7 +93,9 @@ impl<F: Read + Seek> Reader<F> {
         );
         let (state, index_offset, end, opener, recovery) = match primary {
             Ok((state, opener, index_offset)) => (state, index_offset, file_len, opener, None),
-            Err(err) if options.recover => {
+            // Recovery is for torn writes. A wrong key or tampered ciphertext
+            // (behind a valid CRC) is reported, not "repaired" (spec §9.5).
+            Err(err) if options.recover && !err.is_key_problem() => {
                 let found = recovery::recover(&mut file, &header, file_len, &limits, keys, &err)?;
                 (
                     found.state,

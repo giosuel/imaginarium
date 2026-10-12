@@ -306,7 +306,9 @@ authentication.
 A `Keyring` contains, for each epoch, `DEK_e` wrapped for every recipient.
 The `KEYR` record itself is not encrypted. In documents with an ACL chain,
 it MUST be signed (§7) by a member whose role allows changing membership
-(§8.3).
+(§8.3), and readers MUST reject keyrings that fail this check (§8.4)
+instead of using their keys. Otherwise anyone who can append to the file,
+such as a Hub, could wrap a key it knows for a new epoch.
 
 All wraps of an epoch MUST unwrap to the same `DEK_e`.
 
@@ -353,8 +355,13 @@ msg = LABEL("imaginarium.imag v1 record signature") ‖ doc_id[16]
 - `SIGNATURE_ALGORITHM_ED25519`: `signature = Ed25519-Sign(sk, msg)`
   (RFC 8032, pure).
 - `SIGNATURE_ALGORITHM_ED25519_MLDSA65`:
-  `signature = Ed25519-Sign(sk_ed, msg) ‖ ML-DSA-65-Sign(sk_mldsa, msg, ctx = "")`.
-  Verifiers MUST check **both** and reject if either fails.
+  `signature = Ed25519-Sign(sk_ed, msg) ‖ ML-DSA-65-Sign(sk_mldsa, msg, ctx = "")`
+  (64 + 3309 bytes). Verifiers MUST check **both** and reject if either fails.
+  Signers SHOULD use the hedged (randomized) variant of FIPS 204, which
+  resists side-channel and fault attacks. Verification is the same for
+  hedged and deterministic signatures.
+- The ML-DSA-65 key is generated from a 32-byte seed ξ (FIPS 204
+  `ML-DSA.KeyGen_internal`), and the seed is what key bundles store.
 
 ### 7.3 When signatures are required
 
@@ -402,12 +409,38 @@ receiving keys). The current roles follow from replaying the chain.
 | `AddDevice`, `RemoveDevice` | the member themselves, or anyone who may remove that member |
 | `RotateEpoch` | `owner`, `admin` |
 
-A `RemoveMember`, or a `RemoveDevice` of a device that held keys, MUST be
-followed by a `RotateEpoch` before any new content is written. Writers
+A `RemoveMember` or `RemoveDevice` MUST be followed by a `RotateEpoch`
+before any new content is written. (Every device has an X-Wing key and may
+have received keys, so the chain treats every removed device as having
+held them.) Writers
 MUST NOT encrypt new records under an epoch older than the latest
 `RotateEpoch`. There MUST be exactly one owner. Transfer of ownership
 (`SetRole` to `owner`) MUST be signed by the current owner, who then
-becomes `admin`.
+becomes `admin`. The owner's role changes only through such a transfer,
+and the owner can't be removed. `AddMember` with role `owner` is invalid.
+The `Genesis` epoch is 1, and each `RotateEpoch` names the previous epoch
+plus one. A device belongs to exactly one member.
+
+### 8.4 Authorizing records
+
+Records don't say at which point of the chain they were written, and a
+file has no trusted clock. Readers therefore authorize them per **epoch**:
+
+- For each key, a reader tracks the highest role its member held at any
+  point of the chain while each epoch was current (a device inherits its
+  member's role while it is registered).
+- A `UPDT`, `SNAP` or `VERS` (§7.3) is valid if its signer is a device whose
+  role *in the record's epoch* is high enough for the record type and
+  stream. Its `epoch` MUST be one the chain has reached (not 0).
+- A `KEYR` is valid if its signer is an identity that was `owner` or
+  `admin` in the newest epoch the keyring contains.
+
+Edits made before a removal therefore stay valid after it. The limit: a
+removed member who kept the old epoch key can still write records under
+that old epoch that look as if they were made before the removal. Hubs
+close this gap for shared documents by checking every pushed record against
+the *current* ACL head (sync protocol §5.1). After the `RotateEpoch`, a
+removed member can't write under the new epoch at all.
 
 ## 9. Index, opening, appending, compaction, recovery
 
@@ -482,6 +515,13 @@ If the trailer is invalid:
 
 Recovered files SHOULD be compacted before further appends.
 
+Recovery is for torn writes and corruption, which the CRCs detect. If an
+index record has a valid CRC but fails to decrypt, the key is missing or
+wrong, or the ciphertext was tampered with. Readers MUST report that and
+MUST NOT fall back to recovery, which would present a wrong password as a
+damaged file, or let a removed member read around the index of an epoch
+they no longer have.
+
 ## 10. Extensibility and compatibility
 
 ### 10.1 Rules for future versions
@@ -554,8 +594,9 @@ expected bytes:
 4. Unknown records: critical, non-critical, and `SAFE_TO_COPY` on
    compaction.
 5. An encrypted record (suite 1) with fixed `DEK`, nonce and header.
-6. A segmented encrypted blob (three segments), plus tampering cases
-   (swapped, truncated, last flag missing).
+6. A segmented encrypted blob (five segments: the smallest segmented blob
+   is just over 1 MiB, §5.3), plus tampering cases (swapped, truncated,
+   last flag missing).
 7. A password keyring (small Argon2 parameters, allowed only for vectors).
 8. An HPKE keyring wrap with a deterministic seed.
 9. Ed25519 and hybrid signatures over a record.
@@ -590,9 +631,22 @@ These refine `../design/file-format.md` while writing the normative text:
    re-encoding a decoded header would silently drop unknown fields of
    newer versions, and break the AAD and signatures.
 9. *(Found while implementing M1.3)* **`key_records` in the `INDX`
-   header** of encrypted documents.
-10. *(Found while implementing M1.3)* **Recovery adopts complete records
-    after the last good commit** (§9.5). Otherwise the most common crash
-    (autosave interrupted before its commit) would lose the newest edits. Without it, a reader would need the
+   header** of encrypted documents. Without it, a reader would need the
    key to decrypt the index that tells it where the keys are, and would
    have to scan the whole file instead.
+10. *(Found while implementing M1.3)* **Recovery adopts complete records
+    after the last good commit** (§9.5). Otherwise the most common crash
+    (autosave interrupted before its commit) would lose the newest edits.
+11. *(Found while implementing M1.4)* **Records are authorized per epoch**
+    (§8.4), because records carry no position in the ACL chain. The design
+    said "at the time of the change", which a reader can't determine.
+12. *(Found while implementing M1.4)* **Keyrings are checked against the
+    ACL chain** before their keys are used (§6.4). Without it, whoever can
+    append to a file could wrap a key it knows for a new epoch.
+13. *(Found while implementing M1.4)* **No recovery after a decryption
+    failure** of a CRC-valid index (§9.5).
+14. *(Found while implementing M1.4)* **Every `RemoveDevice` requires a
+    rotation** (§8.3), because the chain can't know which devices received
+    keys. Signers SHOULD use hedged ML-DSA (§7.2).
+15. *(Found while implementing M1.4)* Test vector 6 has **five segments**,
+    not three: §5.3 only segments blobs above 1 MiB, in 256 KiB pieces.

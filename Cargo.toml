@@ -20,6 +20,7 @@ publish = false
 [workspace.dependencies]
 # Internal crates. Members depend on each other via `name.workspace = true`.
 imaginarium-commands = { path = "crates/imaginarium-commands" }
+imaginarium-crypto = { path = "crates/imaginarium-crypto" }
 imaginarium-format = { path = "crates/imaginarium-format" }
 imaginarium-profiling = { path = "crates/imaginarium-profiling" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
@@ -27,20 +28,29 @@ imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
 
 # External crates are added here (with exact minor versions) when a
 # milestone first needs them, never speculatively.
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
+blake3 = "1.8.7"
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 crc32c = "0.6.8"
+ed25519-dalek = { version = "3.0.0", features = ["alloc"] }
 getrandom = "0.4.3"
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "hkdfsha2", "mlkem", "x25519"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core"] }
 prost = "0.14.4"
 prost-build = "0.14.4"
 proptest = "1.11.0"
 protox = "0.9.1"
+rand_core = "0.10.1"
 serde = "1.0.229"
 serde_json = "1.0.154"
 thiserror = "2.0.21"
+unicode-normalization = "0.1.25"
 toml = { version = "1.1.8", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false }
 tracing-tracy = { version = "0.12.0", default-features = false }
+zeroize = { version = "1.9.0", features = ["derive"] }
 zstd = { version = "0.14.0", default-features = false }
 
 [workspace.lints.rust]
@@ -102,6 +112,8 @@ opt-level = 0
 [profile.dev.package.beef]
 opt-level = 0
 [profile.dev.package.cc]
+opt-level = 0
+[profile.dev.package.curve25519-dalek-derive]
 opt-level = 0
 [profile.dev.package.find-msvc-tools]
 opt-level = 0
@@ -168,5 +180,7 @@ opt-level = 0
 [profile.dev.package.unicode-width]
 opt-level = 0
 [profile.dev.package.zerocopy-derive]
+opt-level = 0
+[profile.dev.package.zeroize_derive]
 opt-level = 0
 # END GENERATED: build-time-only crates

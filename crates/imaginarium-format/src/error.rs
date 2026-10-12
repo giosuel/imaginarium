@@ -84,5 +84,13 @@ pub enum FormatError {
     NoValidIndex(String),
 }
 
+impl FormatError {
+    /// Whether the error means the key is missing or wrong, or encrypted
+    /// data was tampered with. Recovery (spec §9.5) can't fix these.
+    pub fn is_key_problem(&self) -> bool {
+        matches!(self, FormatError::NeedsKey | FormatError::Crypto(_))
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T, E = FormatError> = std::result::Result<T, E>;

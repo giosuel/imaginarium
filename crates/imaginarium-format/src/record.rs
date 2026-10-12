@@ -219,8 +219,24 @@ impl Record {
             .transpose()
     }
 
-    /// Bytes from `rtype` through `payload`: the body that signatures cover
-    /// (spec §7.2, after the label and doc id).
+    /// What a signature over this record covers (spec §7.2): the label,
+    /// the document id, then the record body from `rtype` through `payload`,
+    /// **with `SIGNED` set** in the flags, because that's how the record
+    /// is stored once signed.
+    pub fn signing_input(&self, doc_id: &crate::DocId) -> Vec<u8> {
+        const LABEL: &[u8] = b"imaginarium.imag v1 record signature";
+        let mut flagged = Self {
+            flags: self.flags | RecordFlags::SIGNED,
+            ..self.clone()
+        };
+        flagged.signature_bytes = None;
+        let mut out = LABEL.to_vec();
+        out.extend_from_slice(&doc_id.0);
+        flagged.write_body(&mut out);
+        out
+    }
+
+    /// Bytes from `rtype` through `payload`, with the flags as they are.
     pub fn signed_body(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.header_bytes.len() + self.payload.len() + 16);
         self.write_body(&mut out);
@@ -573,6 +589,23 @@ mod tests {
             started.elapsed() < std::time::Duration::from_millis(500),
             "no 1 GiB allocation"
         );
+    }
+
+    #[test]
+    fn signing_input_always_has_the_signed_flag() {
+        let doc = crate::DocId([3; 16]);
+        let input = sample().signing_input(&doc);
+        let signed = sample().with_signature(vec![9; 4]);
+        assert_eq!(
+            input,
+            signed.signing_input(&doc),
+            "same input before and after attaching"
+        );
+        let label = b"imaginarium.imag v1 record signature";
+        assert!(input.starts_with(label));
+        assert_eq!(&input[label.len()..label.len() + 16], &[3; 16]);
+        let flags_at = label.len() + 16 + 1; // after the 1-byte rtype varint
+        assert!(RecordFlags(input[flags_at]).contains(RecordFlags::SIGNED));
     }
 
     #[test]
