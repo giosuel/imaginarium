@@ -503,15 +503,27 @@ If the trailer is invalid:
 
 1. Search backwards from the end for the trailer magic `IMGEND\0\0`. For
    each candidate whose CRC and index record verify, use that index (the
-   last good save). Readers SHOULD then also adopt every complete,
-   CRC-valid record after that commit. For example, an autosave that
-   appended records but crashed before committing holds the user's newest
-   edits, and CRDT records are safe to apply even if they turn out to be
-   duplicates.
-2. If none is found, scan forward from offset 36. Parse records and verify
-   each CRC, stopping at the first invalid record. Then rebuild the heads
-   from the records found. For CRDT streams, applying all found `SNAP` and
+   last good save).
+2. Scan forward from the end of that commit, or from offset 36 if there is
+   none. Parse records and verify each CRC, stopping at the first invalid
+   record. An `INDX` record found this way is a commit whose trailer was
+   lost: if it loads (§9.2, step 2), use it instead, the newest one first.
+3. Readers SHOULD then adopt every complete, CRC-valid record after the
+   commit in use that authenticates under its keys (in encrypted
+   documents, it decrypts), up to the first one that doesn't. For example,
+   an autosave that appended records but crashed before committing holds
+   the user's newest edits, and CRDT records are safe to apply even if
+   they turn out to be duplicates. Uncommitted `KEYR` and `ACLC` records
+   MUST NOT be adopted: keys and access changes take effect only through a
+   commit.
+4. If no index loads at all, rebuild the heads from the records found
+   after offset 36, up to the first one that doesn't authenticate under
+   the keys among them. For CRDT streams, applying all found `SNAP` and
    `UPDT` records is safe, because CRDT merges are idempotent.
+
+Records that break §5.1 (plaintext in an encrypted document) count as
+invalid. Readers MAY limit how many candidate trailers and indexes they
+try, so a crafted file can't make recovery arbitrarily slow.
 
 Recovered files SHOULD be compacted before further appends.
 
@@ -520,7 +532,9 @@ index record has a valid CRC but fails to decrypt, the key is missing or
 wrong, or the ciphertext was tampered with. Readers MUST report that and
 MUST NOT fall back to recovery, which would present a wrong password as a
 damaged file, or let a removed member read around the index of an epoch
-they no longer have.
+they no longer have. This applies to every index recovery tries, including
+the ones found by scanning: a candidate that fails to decrypt ends
+recovery with that error.
 
 ## 10. Extensibility and compatibility
 

@@ -142,10 +142,42 @@ fn torn_autosave_recovers_the_previous_commit_and_adopts_complete_records() {
 }
 
 #[test]
-fn corrupted_only_trailer_falls_back_to_a_forward_scan() {
+fn corrupted_only_trailer_uses_its_index() {
+    // The index before the broken trailer is intact, so it's used as is.
     let mut bytes = sample_file();
     let last = bytes.len() - 1;
     bytes[last - 10] ^= 0xFF; // inside the trailer
+    let reader = open(bytes);
+    match &reader.recovery().unwrap().method {
+        RecoveryMethod::PreviousCommit {
+            commit_end,
+            adopted_records,
+            discarded_bytes,
+        } => {
+            assert_eq!(*commit_end, (sample_file().len() - 24) as u64);
+            assert_eq!(*adopted_records, 0);
+            assert_eq!(*discarded_bytes, 24, "only the broken trailer");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(
+        reader
+            .index()
+            .head(&StreamKey::main())
+            .unwrap()
+            .update_ids
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn without_any_usable_index_the_records_are_rebuilt() {
+    let mut bytes = sample_file();
+    let index_offset = imaginarium_format::Trailer::decode(&bytes[bytes.len() - 24..])
+        .unwrap()
+        .index_offset;
+    bytes[index_offset as usize + 3] ^= 0xFF; // the only index
     let reader = open(bytes);
     match &reader.recovery().unwrap().method {
         RecoveryMethod::ForwardScan {
@@ -154,9 +186,7 @@ fn corrupted_only_trailer_falls_back_to_a_forward_scan() {
             ..
         } => {
             assert_eq!(*records, 5);
-            // The scan skips the index record and stops at the broken
-            // trailer: the last 24 bytes.
-            assert_eq!(*stopped_at, (sample_file().len() - 24) as u64);
+            assert_eq!(*stopped_at, index_offset);
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -661,6 +691,162 @@ fn an_encrypted_index_must_list_every_key_record() {
         ..OpenOptions::default()
     };
     assert!(Reader::open_with(Cursor::new(bytes), strict, Some(&mut FixedKeys)).is_err());
+}
+
+/// [`encrypted_file`] plus a second commit whose SNAP and index are sealed
+/// with `key`: a newer epoch, if `key` isn't 0x42.
+fn encrypted_file_with_second_commit(key: u8) -> Vec<u8> {
+    let reader = Reader::open_with(
+        Cursor::new(encrypted_file()),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .unwrap();
+    let cipher = ToyCipher(key);
+    let mut writer = Writer::resume(reader).unwrap();
+    let newer = RecordBuilder::new(RecordType::SNAP, id(5))
+        .stream(pb::Stream::Main)
+        .codec("loro-1")
+        .build(&DOC, b"newer secret".to_vec(), Some(&cipher))
+        .unwrap();
+    writer.append(&newer).unwrap();
+    writer.commit(Some(&cipher)).unwrap();
+    writer.into_inner().into_inner()
+}
+
+#[test]
+fn recovery_reports_a_newer_index_it_cannot_decrypt() {
+    // The newest commit is under an epoch this reader has no key for (a
+    // removed member, say). Damaging its trailer must not let the reader
+    // fall back to the older commit and read around it (spec §9.5).
+    let mut bytes = encrypted_file_with_second_commit(0x43);
+    let last = bytes.len() - 1;
+    bytes[last - 12] ^= 0x01; // the trailer CRC
+    let err = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .err()
+    .expect("recovery read around the newer index");
+    assert!(err.is_key_problem(), "{err}");
+}
+
+#[test]
+fn recovery_does_not_fall_back_past_an_index_it_cannot_decrypt() {
+    // Same, with the newest trailer intact and a torn write after it.
+    let mut bytes = encrypted_file_with_second_commit(0x43);
+    bytes.extend_from_slice(b"torn");
+    let err = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .err()
+    .expect("recovery fell back to the older commit");
+    assert!(err.is_key_problem(), "{err}");
+}
+
+#[test]
+fn recovery_uses_a_newer_index_whose_trailer_was_lost() {
+    let reader = open(sample_file());
+    let mut writer = Writer::resume(reader).unwrap();
+    writer.append(&update(8, pb::Stream::Main)).unwrap();
+    writer.commit(None).unwrap();
+    let mut bytes = writer.into_inner().into_inner();
+    let len = bytes.len();
+    bytes[len - 12] ^= 0x01; // the trailer CRC
+    let reader = open(bytes);
+    match &reader.recovery().unwrap().method {
+        RecoveryMethod::PreviousCommit {
+            commit_end,
+            adopted_records,
+            discarded_bytes,
+        } => {
+            assert_eq!(*commit_end, (len - 24) as u64, "the newest index");
+            assert_eq!(*adopted_records, 0);
+            assert_eq!(*discarded_bytes, 24);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(reader.index().entries().len(), 6);
+}
+
+#[test]
+fn recovery_adopts_only_records_that_authenticate() {
+    // After the last commit: a genuine uncommitted update, then a record
+    // with a valid CRC that the document's key doesn't open (forged, or
+    // from an epoch the commit doesn't know). Adopting the second would
+    // make the document fail to open.
+    let mut bytes = encrypted_file();
+    let committed = bytes.len() as u64;
+    for key in [0x42, 0x43] {
+        let record = RecordBuilder::new(RecordType::UPDT, id(key))
+            .stream(pb::Stream::Main)
+            .codec("loro-1")
+            .build(&DOC, b"edit".to_vec(), Some(&ToyCipher(key)))
+            .unwrap();
+        bytes.extend(record.encode());
+    }
+    let mut reader = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .unwrap();
+    match &reader.recovery().unwrap().method {
+        RecoveryMethod::PreviousCommit {
+            commit_end,
+            adopted_records,
+            ..
+        } => {
+            assert_eq!(*commit_end, committed);
+            assert_eq!(*adopted_records, 1);
+        }
+        other => panic!("{other:?}"),
+    }
+    let head = reader.index().head(&StreamKey::main()).unwrap().clone();
+    assert_eq!(head.update_ids, vec![id(0x42).0.to_vec()]);
+    for entry in reader.index().entries().to_vec() {
+        reader.read_content(&entry).unwrap();
+    }
+}
+
+#[test]
+fn recovery_does_not_adopt_uncommitted_key_records() {
+    // A KEYR after the last commit could carry keys nobody authorized.
+    // Only committed key records count. Content after it is still adopted
+    // if it authenticates.
+    let mut bytes = encrypted_file();
+    let keyring = RecordBuilder::new(RecordType::KEYR, id(7))
+        .build(&DOC, vec![0x43], None)
+        .unwrap();
+    bytes.extend(keyring.encode());
+    let update = RecordBuilder::new(RecordType::UPDT, id(8))
+        .stream(pb::Stream::Main)
+        .codec("loro-1")
+        .build(&DOC, b"edit".to_vec(), Some(&ToyCipher(0x42)))
+        .unwrap();
+    bytes.extend(update.encode());
+    let reader = Reader::open_with(
+        Cursor::new(bytes),
+        OpenOptions::default(),
+        Some(&mut FixedKeys),
+    )
+    .unwrap();
+    match &reader.recovery().unwrap().method {
+        RecoveryMethod::PreviousCommit {
+            adopted_records, ..
+        } => assert_eq!(*adopted_records, 1),
+        other => panic!("{other:?}"),
+    }
+    let keyrings = reader
+        .index()
+        .entries()
+        .iter()
+        .filter(|e| e.rtype == RecordType::KEYR.0)
+        .count();
+    assert_eq!(keyrings, 1);
 }
 
 // --- Crash safety, property-based ------------------------------------------

@@ -16,7 +16,7 @@ files **byte for byte** and reads them with the results below.
 | `01-minimal.imag` | Header, `META` (`DocumentMeta`: format 1.0, `blob_id_key` = 32 × `0xB1`), `SNAP` (stream main, codec `loro-1`), `INDX`, trailer | No recovery. Entries: `META` at offset 36, `SNAP`. Snapshot content `opaque snapshot bytes`. |
 | `02-two-commits.imag` | Vector 1, then one incremental save: `UPDT` `0x03…`, new `INDX`, new trailer | Its first 427 bytes equal vector 1 (append-only). Three entries. Main head = `SNAP 0x02…` + update `0x03…`. |
 | `03a-torn-append.imag` | Vector 2, plus a complete uncommitted `UPDT 0x04…` and the first half of `UPDT 0x05…` | Recovery `PreviousCommit` with 1 adopted record. Main head has updates `0x03…`, `0x04…`. |
-| `03b-corrupt-trailer.imag` | Vector 1 with one flipped byte in the trailer's CRC | Recovery `ForwardScan` with 2 records. |
+| `03b-corrupt-trailer.imag` | Vector 1 with one flipped byte in the trailer's CRC | Recovery `PreviousCommit`: the index before the trailer is intact (spec §9.5, step 2). No adopted records, 24 discarded bytes. |
 | `03c-no-index.imag` | Header and three records (`META`, `SNAP`, `UPDT`), no index or trailer | Recovery `ForwardScan` with 3 records. |
 | `04-unknown-records.imag` | `META`, extension `0x4001` (`SAFE_TO_COPY`), extension `0x4002` (no flags) | Compaction keeps `0x4001` byte-for-byte, drops `0x4002`, and reports it. |
 
