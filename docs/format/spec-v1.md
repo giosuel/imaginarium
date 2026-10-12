@@ -1,7 +1,8 @@
 # The `.imag` file format, version 1
 
-- **Status: Draft 1.** It becomes normative with tag `v0.0.2-m1`. Until then,
-  changes are allowed and are recorded in §14.
+- **Status: normative** (version 1, tag `v0.0.2-m1`, 2026-10-12). Changes
+  from here on follow §10: additive only, and a new minor version for
+  anything readers must know about. §14 records how this text came about.
 - Media type: `application/vnd.imaginarium.imag`. Extension: `.imag`.
 - Schema: [`proto/imag_v1.proto`](proto/imag_v1.proto) (normative).
 - Background and rationale: [`../design/file-format.md`](../design/file-format.md).
@@ -681,3 +682,16 @@ These refine `../design/file-format.md` while writing the normative text:
     keys. Signers SHOULD use hedged ML-DSA (§7.2).
 15. *(Found while implementing M1.4)* Test vector 6 has **five segments**,
     not three: §5.3 only segments blobs above 1 MiB, in 256 KiB pieces.
+16. *(Found in the M1 review)* **Recipient wraps need a trusted ACL owner**
+    (§6.4.2, ADR-0018). Whether a document "has an ACL chain" came from the
+    file itself, so removing or replacing the chain made forged keyrings
+    acceptable. Account-key documents therefore carry a `Genesis`.
+17. *(Found in the M1 review)* **Recovery builds on the newest index that
+    loads** (§9.5), also one whose trailer was lost, and every candidate
+    that fails to decrypt is reported. Damaging the newest trailer used to
+    let a reader without the newest epoch's key fall back to an older
+    commit. Adopted records must authenticate, uncommitted `KEYR`/`ACLC`
+    records are not adopted, and plaintext records in encrypted documents
+    count as invalid (§5.1). Vector 03b now recovers from its index.
+18. *(Found in the M1 review)* **Rolled-back ACL chains** are documented as
+    a limit that needs remembered state (§12).
