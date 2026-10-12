@@ -1,0 +1,37 @@
+[package]
+name = "imaginarium-format"
+description = "Reference implementation of the .imag container format (docs/format/spec-v1.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+crc32c.workspace = true
+getrandom.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+crc32c.workspace = true
+criterion.workspace = true
+imaginarium-test-utils.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "container"
+harness = false

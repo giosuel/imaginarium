@@ -277,7 +277,13 @@ signature profile.
   The ciphertext includes the 16-byte tag.
 
 This binds every record to its document, type, flags and complete header
-(object id, stream, epoch, suite, `plain_len`, codec, segment). Records
+(object id, stream, epoch, suite, `plain_len`, codec, segment).
+
+The AAD and signatures (§7.2) use the **header bytes exactly as stored**.
+Implementations MUST keep `header` (and `sig`) verbatim. They MUST NOT
+re-encode a decoded `RecordHeader`, because a reader that doesn't know a
+newer field would drop it, and the AAD and signature would no longer
+match. Copying a record (compaction, sync) MUST copy its bytes unchanged. Records
 therefore can't be moved between documents, relabelled, or have their
 header altered without decryption failing.
 
@@ -412,13 +418,23 @@ the per-stream heads (latest snapshot plus subsequent updates), and the
 offset of the previous index. In encrypted documents, the index MUST be
 encrypted (`K_content`) and is not readable without the key.
 
+Keys come from `KEYR` records, and the index is encrypted. To break that
+cycle, the `RecordHeader` of an encrypted document's `INDX` MUST list all
+`KEYR` and `ACLC` records of the file in `key_records` (offset and length).
+These records are plaintext anyway. The list is authenticated as part of
+the AAD (§6.3.1). Readers MUST verify that each listed record has type
+`KEYR` or `ACLC`, and, after decrypting the index, that the list matches
+the index entries. Unencrypted documents MUST leave `key_records` empty.
+
 ### 9.2 Opening
 
 1. Read the 24-byte trailer and verify its CRC and magic. Otherwise go to
    §9.5.
 2. Read the index record at `index_offset` and verify `index_len` and the
-   CRC. Decrypt it if needed.
-3. Load the `KEYR`/`ACLC` records (if encrypted), then `META`, then, for
+   CRC. If the document is encrypted, first load the `KEYR` and `ACLC`
+   records listed in the index header's `key_records`, obtain the epoch
+   key, then decrypt the index.
+3. Load `META`, then, for
    `STREAM_MAIN`, the head snapshot followed by its updates in order. At
    this point the document can be shown.
 4. Load blobs on demand, by offset. Load the discussion and extension
@@ -454,7 +470,11 @@ If the trailer is invalid:
 
 1. Search backwards from the end for the trailer magic `IMGEND\0\0`. For
    each candidate whose CRC and index record verify, use that index (the
-   last good save).
+   last good save). Readers SHOULD then also adopt every complete,
+   CRC-valid record after that commit. For example, an autosave that
+   appended records but crashed before committing holds the user's newest
+   edits, and CRDT records are safe to apply even if they turn out to be
+   duplicates.
 2. If none is found, scan forward from offset 36. Parse records and verify
    each CRC, stopping at the first invalid record. Then rebuild the heads
    from the records found. For CRDT streams, applying all found `SNAP` and
@@ -566,3 +586,13 @@ These refine `../design/file-format.md` while writing the normative text:
    Per edit batch (~50 ms) this is negligible.
 7. **ACL chain** is specified concretely: linear, index plus `prev_hash`,
    fork means tampering, and a permission table.
+8. *(Found while implementing M1.3)* **Verbatim header bytes** (§6.3.1):
+   re-encoding a decoded header would silently drop unknown fields of
+   newer versions, and break the AAD and signatures.
+9. *(Found while implementing M1.3)* **`key_records` in the `INDX`
+   header** of encrypted documents.
+10. *(Found while implementing M1.3)* **Recovery adopts complete records
+    after the last good commit** (§9.5). Otherwise the most common crash
+    (autosave interrupted before its commit) would lose the newest edits. Without it, a reader would need the
+   key to decrypt the index that tells it where the keys are, and would
+   have to scan the whole file instead.

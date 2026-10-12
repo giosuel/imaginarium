@@ -57,6 +57,17 @@ message RecordHeader {
   // Writer-local sequence number, increasing within one writer and stream.
   // Used for ordering diagnostics only. CRDTs don't need it for merging.
   uint64 seq = 10;
+  // INDX of encrypted documents only: where the KEYR and ACLC records are,
+  // so a reader can obtain keys before decrypting the index (§9.1).
+  repeated RecordRef key_records = 11;
+}
+
+// Location of a record in a file.
+message RecordRef {
+  // Byte offset of the record's first byte.
+  uint64 offset = 1;
+  // Total length of the record in bytes, from rtype through the CRC.
+  uint64 length = 2;
 }
 
 // One segment of a large blob (§5.3).
