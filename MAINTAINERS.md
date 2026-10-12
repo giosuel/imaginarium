@@ -181,6 +181,7 @@ automatically on first use.
 ```sh
 cargo build --workspace                                   # debug build
 cargo run -p imaginarium-app                              # run the app (binary: `imaginarium`)
+cargo run -p imaginarium-cli -- verify FILE.imag          # the `imag` tool: inspect, verify, export-json
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check

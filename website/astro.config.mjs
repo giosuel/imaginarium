@@ -34,6 +34,7 @@ export default defineConfig({
             { label: 'Overview', link: '/developers/' },
             { label: 'Architecture', link: '/developers/architecture/' },
             { label: 'Contributing', link: '/developers/contributing/' },
+            { label: 'The imag tool', link: '/developers/imag/' },
             { label: 'Project plan', link: '/developers/reference/plan/' },
             { label: '.imag spec (v1)', link: '/developers/reference/format/spec-v1/' },
             { label: 'Document schema (v1)', link: '/developers/reference/format/schema-v1/' },
