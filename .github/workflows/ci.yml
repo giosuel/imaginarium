@@ -44,8 +44,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: rustfmt
         run: cargo fmt --all --check
-      - name: Repository checks (layers, headers, tracked files)
+      - name: Repository checks (layers, headers, tracked files, dev profile)
         run: cargo xtask check
+      - name: clippy (all features, e.g. tracy)
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: rustdoc
         run: cargo doc --workspace --no-deps --locked
         env:
@@ -89,6 +91,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: test
         run: cargo test --workspace --locked
+      - name: test (all features)
+        if: matrix.name == 'linux'
+        run: cargo test --workspace --all-features --locked
 
   dco:
     name: dco (Signed-off-by)
