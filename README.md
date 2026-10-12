@@ -16,9 +16,13 @@ self-hostable server.
 
 ## Status
 
-Planning. See [`docs/PLAN.md`](docs/PLAN.md) for the roadmap,
-[`docs/design/`](docs/design/) for design documents and
-[`docs/adr/`](docs/adr/) for architecture decisions.
+Planning complete, starting milestone M0. Useful starting points:
+
+- [`docs/STATUS.md`](docs/STATUS.md): current progress and next step
+- [`docs/PLAN.md`](docs/PLAN.md): vision, architecture, roadmap
+- [`docs/README.md`](docs/README.md): index of all documentation
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): how to contribute (DCO)
+- [`CLAUDE.md`](CLAUDE.md): conventions for AI agents and maintainers
 
 ## License
 
