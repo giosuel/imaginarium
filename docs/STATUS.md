@@ -9,10 +9,12 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.4 `imaginarium-profiling`** (see the checklist below)
-- **Code status:** Cargo workspace with 6 crates. The library crates are
-  still skeletons. `xtask` has working repo checks (`cargo xtask check`).
-  The app only prints its version.
+- **Next step:** **M0.5 `imaginarium-settings`** (see the checklist below)
+- **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
+  checks and dev-profile generator), `imaginarium-profiling` (tracing,
+  Tracy, frame stats) and `imaginarium-test-utils` (fixtures).
+  `settings` and `commands` are still skeletons. The app only prints its
+  version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -50,6 +52,8 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
   x11rb-protocol, syn, accesskit_unix and the zstd-sys C build.
   - With line-tables-only deps (PR #4): 2,099 CPU-s, peak 1.39 GB,
     `target/` 2.3 GB.
+  - With compile-time-only crates at opt 0 (ADR-0017): **1,415 CPU-s**,
+    3 min 55 s wall at load ~9.
   - The scratch project is not in the repo. To reproduce: create a crate
     depending on those crates, copy our profiles, and run
     `cargo build --timings` under `/usr/bin/time -v`.
@@ -125,31 +129,28 @@ Commit after each item. Each item lists its acceptance criteria (AC).
   - The owner's token has the "Workflows" permission (the push succeeded).
     It **cannot** read repo administration settings (403 on branch
     protection).
-- [ ] **M0.4 `imaginarium-profiling`** ← **next**
-  - `tracing` subscriber setup (env filter, pretty/JSON).
-  - Optional `tracy` feature (`tracing-tracy`).
-  - `FrameStats` ring buffer (p50/p95/p99 frame time) for the later HUD.
-  - Span naming conventions documented.
-  - Benchmark harness conventions (criterion), with a shared fixture API in
-    `test-utils` (stub generators for "10k-shape board" and "300-page
-    document", filled in later).
-  - AC: unit tests for the percentile maths, and a criterion example bench
-    that runs.
-  - **Also evaluate the dev profile for proc macros.**
-    `[profile.dev.package."*"] opt-level = 2` takes precedence over
-    `build-override`, so proc macros get optimized. That's about 760 of
-    roughly 2,100 CPU-s in a clean dev build of the heavy stack (`syn`:
-    354 s dev vs 72 s release; derive crates 10–25×).
-    - Options: (a) keep it; (b) default `opt-level = 0` plus named
-      `opt-level = 2` overrides for the hot runtime crates (vello*, wgpu*,
-      naga, parley, swash/skrifa/read-fonts, loro*, zstd, image codecs);
-      (c) named `opt-level = 0` overrides for the proc-macro stack.
-    - Measure **both** clean-build CPU-s **and** incremental rebuild time of
-      a crate with many derives before deciding. Decide in an ADR if
-      option (b) is chosen.
-    - The line-tables-only change for deps is already done (PR #4).
-      `codegen-units = 16` was tested and makes no difference.
-- [ ] **M0.5 `imaginarium-settings`**
+- [x] **M0.4 `imaginarium-profiling`** (done 2026-10-12, PR #5)
+  - `subscriber::init(&TracingConfig)`: compact, pretty or JSON logs to
+    stderr. The filter comes from config, then `IMAGINARIUM_LOG`, then
+    `RUST_LOG`, then `info`.
+  - `tracy` feature: the client starts only when requested
+    (`manual-lifetime`), with `timer-fallback` (works on this VM without an
+    invariant TSC), `ondemand` and `only-localhost`. The default features
+    would abort at program load on this VM.
+  - `frame::FrameStats`: O(1) ring buffer, nearest-rank p50/p95/p99,
+    `count_over(budget)`. Bench: record ~11 ns, summary over 600 samples
+    ~12 µs.
+  - Conventions for span names and levels, frame-phase span names and
+    benchmarks are in the `imaginarium-profiling` crate docs.
+  - `imaginarium-test-utils`: SplitMix64 `Rng` (reference-vector pinned),
+    `BoardFixture::LARGE` (10k shapes), `DocumentFixture::LARGE` (300 pages),
+    `DeckFixture::LARGE` (100 slides).
+  - **Dev profile decided (ADR-0017)**: compile-time-only crates are built
+    with `opt-level = 0` through a generated block in `Cargo.toml`
+    (`cargo xtask dev-profile --write`, checked by `cargo xtask check`).
+    Clean builds: this workspace −47 % CPU, heavy stack −33 %.
+  - AC: ✅ percentile unit tests, and the criterion bench runs.
+- [ ] **M0.5 `imaginarium-settings`** ← **next**
   - Typed registry: key, type (bool/int/float/string/enum/color/path/
     secret-ref/list), default, validation, **scope** (app, user, workspace,
     document, hub), UI metadata (title, description, synonyms, group,

@@ -201,6 +201,18 @@ Workspace layout: product crates live in `crates/imaginarium-<name>/`,
 repo tooling in `xtask/`. Shared lints and profiles are in the root
 `Cargo.toml`. Every crate sets `[lints] workspace = true`.
 
+**After adding or updating dependencies:** run `cargo xtask dev-profile
+--write` and commit `Cargo.toml` together with `Cargo.lock`. It regenerates
+the dev-profile overrides for compile-time-only crates (ADR-0017). `cargo
+xtask check` and CI fail while they are stale.
+
+**Profiling:** see the `imaginarium-profiling` crate docs.
+- Logs: `IMAGINARIUM_LOG=debug`.
+- Tracy: `--features imaginarium-profiling/tracy` with
+  `--profile profiling`.
+- Benchmarks: `cargo bench -p <crate>`, following the conventions in those
+  docs.
+
 **Adding a crate:** create `crates/imaginarium-<name>/` with the workspace
 package fields and `[lints] workspace = true`. Then check that it is in
 the layer table (`LAYERS` in `xtask/src/layers.rs`) and in the PLAN §4.1
