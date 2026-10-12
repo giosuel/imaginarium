@@ -1,0 +1,5 @@
+# libFuzzer working data. Crashes found are turned into regression tests.
+/target/
+/corpus/
+/artifacts/
+/coverage/

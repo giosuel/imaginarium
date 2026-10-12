@@ -1,0 +1,40 @@
+# Fuzz targets for imaginarium-format (cargo-fuzz / libFuzzer).
+# Not part of the main workspace, because fuzzing needs a nightly toolchain.
+# Run: cd crates/imaginarium-format/fuzz && cargo +nightly-2026-09-25 fuzz run <target>
+[package]
+name = "imaginarium-format-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+imaginarium-format = { path = ".." }
+libfuzzer-sys = "=0.4.13"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode_record"
+path = "fuzz_targets/decode_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_file"
+path = "fuzz_targets/open_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_content"
+path = "fuzz_targets/open_content.rs"
+test = false
+doc = false
+bench = false
