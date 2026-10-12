@@ -541,6 +541,16 @@ Effort: **xhigh** for `reactive`, the `ui` core and `render`, **high** for
 `text` and the gate app. One branch and PR per step (or smaller).
 Screenshots go to the owner from M2.4 on (Xvfb + Mesa lavapipe).
 
+**Gate machine** (owner's laptop, 2026-10-12): EndeavourOS (Arch, rolling,
+kernel 7.2), **Hyprland (Wayland)**, Intel Core i9-11900H with its **Intel
+UHD (Xe) integrated GPU** plus a GeForce RTX 3050 Laptop (hybrid graphics),
+32 GB RAM. The gate runs on the integrated GPU (ADR-0007) and reports the
+RTX 3050 as well. A workstation with the same setup (Ryzen 9 9950X3D, RTX
+5090, 96 GB) exists but isn't used for now. Binaries built on this VM
+(glibc 2.41) run on Arch's newer glibc. Wayland-specific risks for the
+gate: winit's idle-loop spin (#4668), text-input-v3 IME, fractional
+scaling.
+
 **This VM has no GPU** (and neither do the CI runners). Functional checks
 run here with lavapipe and the CPU backend. The real numbers come from the
 owner's Linux machine: a prebuilt gate binary writes a report (owner
@@ -600,9 +610,6 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
-- **The owner's Linux machine for the M2 gate:** distro and version (the
-  prebuilt binary must not need a newer glibc), GPU, and Wayland or X11.
-
 ## Known issues and notes
 
 - **Signatures are verified on open** (since M1.8: every record a document
