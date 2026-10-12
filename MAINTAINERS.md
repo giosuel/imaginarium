@@ -84,6 +84,9 @@ bypass would apply to agents too.
    against `main`. Fill in the template (`.github/pull_request_template.md`).
    AI agents end the PR description with the attribution lines provided by
    the harness.
+   - Gotcha: `gh pr edit` fails with gh 2.46 ("Projects (classic) is being
+     deprecated"). Use the REST API instead:
+     `gh api -X PATCH repos/giosuel/imaginarium/pulls/<n> -f title=… -F body=@file.md`.
 5. **The owner reviews and merges.** Agents don't merge their own PRs unless
    the owner explicitly says so for that PR.
    - Merge strategy: **merge commit** (no squash, no rebase-merge). This keeps
