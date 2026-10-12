@@ -1,0 +1,6 @@
+# Pinned toolchain for reproducible builds on every OS and in CI.
+# Bump deliberately: update `rust-version` in Cargo.toml in the same commit.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
