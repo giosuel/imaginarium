@@ -179,17 +179,23 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo xtask check                                         # layering, dependency rules, licenses, SPDX headers
 cargo xtask help                                          # list repo automation tasks
 cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
 
 Not available yet:
-- `cargo xtask check-layers` (layering and SPDX header check) arrives in M0.2.
 - `cargo deny check` arrives with CI in M0.3 (`cargo install --locked cargo-deny`).
 
 Workspace layout: product crates live in `crates/imaginarium-<name>/`,
 repo tooling in `xtask/`. Shared lints and profiles are in the root
 `Cargo.toml`. Every crate sets `[lints] workspace = true`.
+
+**Adding a crate:** create `crates/imaginarium-<name>/` with the workspace
+package fields and `[lints] workspace = true`. Then check that it is in
+the layer table (`LAYERS` in `xtask/src/layers.rs`) and in the PLAN §4.1
+crate map; most planned crates are listed there already. `cargo xtask
+check` fails for crates without a layer.
 
 ## Decisions and docs
 

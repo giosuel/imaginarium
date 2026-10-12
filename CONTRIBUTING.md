@@ -37,7 +37,7 @@ packages may use content licenses such as CC-BY, declared in their
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    cargo deny check
-   cargo xtask check-layers
+   cargo xtask check
    ```
 4. Update docs with your change (user guide and/or developer docs). Docs
    are part of done.
