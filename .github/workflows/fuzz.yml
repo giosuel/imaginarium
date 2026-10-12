@@ -1,0 +1,51 @@
+name: fuzz
+
+# Weekly, time-boxed fuzzing of the parsers of untrusted input
+# (MAINTAINERS.md, "Fuzzing"). Crashes are uploaded as artifacts; each one
+# becomes a regression test before it is fixed.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_record, open_file, open_content]
+    env:
+      SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '600' }}
+    defaults:
+      run:
+        working-directory: crates/imaginarium-format/fuzz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the fuzzing toolchain
+        run: rustup toolchain install nightly-2026-09-25 --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo +nightly-2026-09-25 install cargo-fuzz --version 0.13.2 --locked
+      - name: Seed the corpus with the test vectors
+        run: |
+          mkdir -p "corpus/${{ matrix.target }}"
+          cp ../../../docs/format/test-vectors/*.imag "corpus/${{ matrix.target }}/"
+      - name: Fuzz
+        run: cargo +nightly-2026-09-25 fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: crates/imaginarium-format/fuzz/artifacts/
+          if-no-files-found: ignore
