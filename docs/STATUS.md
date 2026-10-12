@@ -589,14 +589,21 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
     handles.
   - Unchanged re-runs keep their edges, and disposal unsubscribes lazily,
     so 10k readers of one signal cost linear time.
-  - Tests: 15 behaviour tests, property tests on random graphs against a
-    direct evaluation (a planted bug makes them fail).
-  - Benchmarks: write to effect 98 ns; 10k effects on one signal 0.77 ms;
-    a batch of 10k signal → memo → effect chains 3.4 ms; a 1,000-memo
-    chain 135 µs; a 1,000-row scope created and disposed 0.6 ms. Later
-    optimization if needed: fewer `RefCell` round trips per node (the
-    batch case is ~110 ns per node), and an iterative `update` for memo
-    chains deeper than a few thousand.
+  - **Module review** (separate agent, medium effort) found 2 critical,
+    2 high and 3 medium bugs. The worst: a write during a computation's
+    run was lost and could leave an effect stuck forever, and a child
+    effect could run before its parent disposed it. All fixed, each with
+    a regression test that failed first (`6c1d13b`). Writes are now
+    allowed anywhere, and panics leave nodes usable.
+  - Tests: 24 behaviour tests, and property tests on random graphs
+    against a direct evaluation, including effects that write signals
+    (also their own source). Planted versions of the bugs make them fail.
+  - Benchmarks: write to effect 110 ns; 10k effects on one signal
+    0.88 ms; a batch of 10k signal → memo → effect chains 2.8 ms; a
+    1,000-memo chain 132 µs; a 1,000-row scope created and disposed
+    0.53 ms. Later optimization if needed: fewer `RefCell` round trips per
+    node, and an iterative `update` for memo chains deeper than a few
+    thousand.
 - [ ] **M2.2 `imaginarium-render`** ← **next**:
   - a display list per node and Vello scene building;
   - a 256² tile cache per zoom bucket, dirty-tile tracking and a
