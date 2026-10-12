@@ -44,8 +44,9 @@ needs the secret. Only recipient (HPKE) wraps are.
   `imag`, which report the owner instead of checking it.
 
 ## Consequences
-- Account-key files grow by one `Genesis` (about 5.4 KB with the hybrid
-  identity key and signature), and their keyrings are signed.
+- Account-key files grow by about 11 KiB: the `Genesis` (7.8 KiB with the
+  hybrid identity key, the device keys and the signature, measured on
+  vector 10a) and a hybrid signature on each keyring (3.4 KiB).
 - Every caller that opens with a recipient key has to know whom it trusts.
   For the app that is the account identity, or a value stored with the
   document's entry in the local library.
