@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.1 Normative spec v1** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Next step:** **M1.2 Sync protocol design** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -257,17 +257,22 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     the fallback. The M1.5 benchmark decides.
   - New rule in MAINTAINERS: **the two-week rule also applies to crates**.
     Pin `x-wing` 0.1.0 until 0.1.1 is 14 days old (2026-10-15).
-- [ ] **M1.1 Normative spec v1** ← **next**: `docs/format/spec-v1.md` (RFC-style
-  MUST/SHOULD), `docs/format/proto/*.proto`
-  - byte layout (header, record framing, varints, flags, CRC32C, index,
-    trailer);
-  - record types and their payloads;
-  - AEAD AAD/nonce construction, key derivation labels, keyring and
-    signature formats, ACL chain;
-  - compaction and recovery algorithms, and conformance levels;
-  - the test-vector plan.
-  - AC: an independent implementer could write a reader from it alone.
-- [ ] **M1.2 Sync protocol design**: `docs/design/sync-protocol.md`
+- [x] **M1.1 Normative spec v1, Draft 1** (done 2026-10-12, PR #11).
+  [`docs/format/spec-v1.md`](format/spec-v1.md) and
+  [`proto/imag_v1.proto`](format/proto/imag_v1.proto) (validated with
+  protox + prost-build: it compiles and round-trips). Also on the website.
+  - It becomes normative at tag `v0.0.2-m1`. Until then, implementation
+    findings (M1.3/M1.4) may change it, recorded in spec §14.
+  - Refinements to the design (spec §14):
+    - `doc_id` (not `file_id`) in the AAD;
+    - `DocumentMeta.blob_id_key` independent of epochs;
+    - `SIGNED` framing section;
+    - `plain_len`;
+    - a per-record `codec`;
+    - ~100 B overhead per encrypted record.
+  - Still open for later minors: the logical schema (`schema-v1.md`,
+    M1.6), and the Hub-side ACL rules (sync protocol, M1.2).
+- [ ] **M1.2 Sync protocol design** ← **next**: `docs/design/sync-protocol.md`
   (object exchange, live update frames, presence, server sequence
   numbers, snapshot GC without plaintext).
 - [ ] **M1.3 `imaginarium-format`**:
