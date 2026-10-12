@@ -171,8 +171,12 @@ pub(crate) enum Outcome {
 /// Checks (or with `write`, updates) the generated block in `root/Cargo.toml`.
 pub(crate) fn run(root: &Path, metadata: &FullMetadata, write: bool) -> Result<Outcome, String> {
     let path = root.join("Cargo.toml");
-    let manifest = fs::read_to_string(&path)
+    let raw = fs::read_to_string(&path)
         .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    // Compare by content: a CRLF checkout (e.g. Windows with autocrlf) must
+    // not look stale. Writing keeps the file's line endings.
+    let crlf = raw.contains("\r\n");
+    let manifest = raw.replace("\r\n", "\n");
     let crates = build_time_only(metadata);
     let block = render_block(&crates);
     let updated = splice_block(&manifest, &block)?;
@@ -183,6 +187,11 @@ pub(crate) fn run(root: &Path, metadata: &FullMetadata, write: bool) -> Result<O
         });
     }
     if write {
+        let updated = if crlf {
+            updated.replace('\n', "\r\n")
+        } else {
+            updated
+        };
         fs::write(&path, updated)
             .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
         return Ok(Outcome::Written {
@@ -352,6 +361,33 @@ mod tests {
         let new_block = render_block(&["syn".to_owned()].into_iter().collect());
         let spliced = splice_block(&manifest, &new_block).unwrap();
         assert_eq!(spliced, format!("[a]\n\n{new_block}\n[b]\nx = 1\n"));
+    }
+
+    #[test]
+    fn crlf_manifests_are_compared_by_content() {
+        let dir =
+            std::env::temp_dir().join(format!("imaginarium-devprofile-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let metadata = sample();
+        let block = render_block(&build_time_only(&metadata));
+        let lf = format!("[workspace]\nmembers = []\n\n{block}");
+        fs::write(dir.join("Cargo.toml"), lf.replace('\n', "\r\n")).unwrap();
+
+        let outcome = run(&dir, &metadata, false).unwrap();
+        assert!(
+            matches!(outcome, Outcome::UpToDate { .. }),
+            "CRLF must not look stale"
+        );
+
+        // Writing keeps the file's CRLF line endings.
+        fs::write(dir.join("Cargo.toml"), "[workspace]\r\nmembers = []\r\n").unwrap();
+        run(&dir, &metadata, true).unwrap();
+        let written = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert!(
+            !written.replace("\r\n", "").contains('\n'),
+            "only CRLF line endings"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
