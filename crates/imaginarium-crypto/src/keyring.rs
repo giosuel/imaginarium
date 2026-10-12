@@ -594,7 +594,7 @@ impl KeyProvider for RecipientKeys {
             && acl.genesis_owner() != owner
         {
             return Err(CryptoError::Acl(format!(
-                "the chain was started by {:?}, not by the expected owner {owner:?}",
+                "the chain was started by {}, not by the expected owner {owner}",
                 acl.genesis_owner()
             ))
             .into());

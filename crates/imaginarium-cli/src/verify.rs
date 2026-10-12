@@ -67,7 +67,9 @@ pub(crate) enum Verdict {
 /// Runs every check it can.
 pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<Verdict> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    // Argument problems (a missing key file, say) before any output.
     let owner = keys.expected_owner()?;
+    let credentials = keys.credentials()?;
     writeln!(out, "imag verify {}", path.display())?;
     let mut report = Report {
         out,
@@ -109,7 +111,7 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<Ve
 
     // 2. The container: trailer and index (decrypted with the key).
     let file = std::fs::File::open(path)?;
-    let mut reader = match imaginarium_io_native::open_reader(file, keys.credentials()?) {
+    let mut reader = match imaginarium_io_native::open_reader(file, credentials) {
         Ok(reader) => reader,
         Err(NativeError::Format(FormatError::NeedsKey)) => {
             let reason = "encrypted: give --password-stdin, --password-env or --key-file";
@@ -278,7 +280,7 @@ fn check_acl(
 ) -> Outcome {
     let acl = match AclState::replay(doc_id, chain) {
         Ok(acl) => acl,
-        Err(err) => return Outcome::Fail(format!("ACL chain: {err}")),
+        Err(err) => return Outcome::Fail(err.to_string()),
     };
     let mut problems = Vec::new();
     let mut verified = 0;
