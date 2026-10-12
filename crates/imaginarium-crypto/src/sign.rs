@@ -3,6 +3,8 @@
 //! Record signatures (spec §7): Ed25519 device keys for frequent records,
 //! and hybrid Ed25519 + ML-DSA-65 identity keys for authority records.
 
+use std::sync::{Arc, OnceLock};
+
 use ed25519_dalek::Signer as _;
 use imaginarium_format::{DocId, Record, RecordFlags, pb};
 use ml_dsa::{Keypair as _, MlDsa65};
@@ -95,6 +97,7 @@ impl IdentityKey {
         IdentityPublic {
             ed25519: self.ed25519.verifying_key().to_bytes(),
             mldsa65: self.mldsa.verifying_key().encode().to_vec(),
+            decoded: Arc::default(),
         }
     }
 
@@ -136,24 +139,77 @@ impl DevicePublic {
     fn verify(&self, message: &[u8], signature: &[u8]) -> Result<()> {
         let key = ed25519_dalek::VerifyingKey::from_bytes(&self.0)
             .map_err(|_| CryptoError::InvalidKey("Ed25519 public key"))?;
-        let signature = ed25519_dalek::Signature::from_slice(signature)
-            .map_err(|_| CryptoError::Signature("malformed Ed25519 signature".into()))?;
-        // `verify_strict` also rejects non-canonical signatures and weak keys.
-        key.verify_strict(message, &signature)
-            .map_err(|_| CryptoError::Signature("Ed25519 verification failed".into()))
+        verify_ed25519(&key, message, signature)
     }
 }
 
+fn verify_ed25519(
+    key: &ed25519_dalek::VerifyingKey,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let signature = ed25519_dalek::Signature::from_slice(signature)
+        .map_err(|_| CryptoError::Signature("malformed Ed25519 signature".into()))?;
+    // `verify_strict` also rejects non-canonical signatures and weak keys.
+    key.verify_strict(message, &signature)
+        .map_err(|_| CryptoError::Signature("Ed25519 verification failed".into()))
+}
+
 /// An identity's public keys.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The keys are decoded on first use and the result is shared by all
+/// clones: decoding an ML-DSA-65 key expands its public matrix, which costs
+/// about as much as a verification, and an ACL replay verifies the same few
+/// identities over and over.
+#[derive(Clone)]
 pub struct IdentityPublic {
-    /// Ed25519 public key.
-    pub ed25519: [u8; 32],
-    /// ML-DSA-65 public key (1952 bytes).
-    pub mldsa65: Vec<u8>,
+    ed25519: [u8; 32],
+    mldsa65: Vec<u8>,
+    decoded: Arc<OnceLock<DecodedIdentity>>,
+}
+
+struct DecodedIdentity {
+    ed25519: ed25519_dalek::VerifyingKey,
+    mldsa65: ml_dsa::VerifyingKey<MlDsa65>,
 }
 
 impl IdentityPublic {
+    /// From the raw public keys. Lengths are checked here, and the keys
+    /// themselves on first use.
+    pub fn new(ed25519: [u8; 32], mldsa65: Vec<u8>) -> Result<Self> {
+        if mldsa65.len() != MLDSA65_PUBLIC_KEY_LEN {
+            return Err(CryptoError::InvalidKey("identity ML-DSA-65 public key"));
+        }
+        Ok(Self {
+            ed25519,
+            mldsa65,
+            decoded: Arc::default(),
+        })
+    }
+
+    /// From the signature keys of a protobuf `Identity`. Invalid Ed25519
+    /// points are rejected here.
+    pub fn from_pb(identity: &pb::Identity) -> Result<Self> {
+        let ed25519 = identity
+            .ed25519_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKey("identity Ed25519 public key"))?;
+        let public = Self::new(ed25519, identity.mldsa65_public_key.clone())?;
+        public.decoded()?;
+        Ok(public)
+    }
+
+    /// The Ed25519 public key (32 bytes).
+    pub fn ed25519(&self) -> &[u8; 32] {
+        &self.ed25519
+    }
+
+    /// The ML-DSA-65 public key (1952 bytes).
+    pub fn mldsa65(&self) -> &[u8] {
+        &self.mldsa65
+    }
+
     /// The key id: BLAKE3 of `ed25519 ‖ mldsa65`, first 16 bytes (spec §7.1).
     pub fn key_id(&self) -> KeyId {
         let mut bytes = self.ed25519.to_vec();
@@ -161,20 +217,18 @@ impl IdentityPublic {
         KeyId::of(&bytes)
     }
 
-    /// From the signature keys of a protobuf `Identity`.
-    pub fn from_pb(identity: &pb::Identity) -> Result<Self> {
-        let ed25519 = identity
-            .ed25519_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidKey("identity Ed25519 public key"))?;
-        if identity.mldsa65_public_key.len() != MLDSA65_PUBLIC_KEY_LEN {
-            return Err(CryptoError::InvalidKey("identity ML-DSA-65 public key"));
+    fn decoded(&self) -> Result<&DecodedIdentity> {
+        if let Some(decoded) = self.decoded.get() {
+            return Ok(decoded);
         }
-        Ok(Self {
-            ed25519,
-            mldsa65: identity.mldsa65_public_key.clone(),
-        })
+        let ed25519 = ed25519_dalek::VerifyingKey::from_bytes(&self.ed25519)
+            .map_err(|_| CryptoError::InvalidKey("identity Ed25519 public key"))?;
+        let encoded = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(self.mldsa65.as_slice())
+            .map_err(|_| CryptoError::InvalidKey("identity ML-DSA-65 public key"))?;
+        let mldsa65 = ml_dsa::VerifyingKey::<MlDsa65>::decode(&encoded);
+        Ok(self
+            .decoded
+            .get_or_init(|| DecodedIdentity { ed25519, mldsa65 }))
     }
 
     fn verify(&self, message: &[u8], signature: &[u8]) -> Result<()> {
@@ -184,22 +238,36 @@ impl IdentityPublic {
             ));
         }
         let (ed, ml) = signature.split_at(ED25519_SIGNATURE_LEN);
-        DevicePublic(self.ed25519).verify(message, ed)?;
-        let encoded_key = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(self.mldsa65.as_slice())
-            .map_err(|_| CryptoError::InvalidKey("ML-DSA-65 public key"))?;
-        let key = ml_dsa::VerifyingKey::<MlDsa65>::decode(&encoded_key);
+        let keys = self.decoded()?;
+        verify_ed25519(&keys.ed25519, message, ed)?;
         let encoded_sig = ml_dsa::EncodedSignature::<MlDsa65>::try_from(ml)
             .map_err(|_| CryptoError::Signature("malformed ML-DSA signature".into()))?;
         let sig = ml_dsa::Signature::<MlDsa65>::decode(&encoded_sig)
             .ok_or_else(|| CryptoError::Signature("malformed ML-DSA signature".into()))?;
         // Both halves must verify (spec §7.2).
-        if key.verify_with_context(message, b"", &sig) {
+        if keys.mldsa65.verify_with_context(message, b"", &sig) {
             Ok(())
         } else {
             Err(CryptoError::Signature(
                 "ML-DSA-65 verification failed".into(),
             ))
         }
+    }
+}
+
+impl PartialEq for IdentityPublic {
+    fn eq(&self, other: &Self) -> bool {
+        self.ed25519 == other.ed25519 && self.mldsa65 == other.mldsa65
+    }
+}
+
+impl Eq for IdentityPublic {}
+
+impl std::fmt::Debug for IdentityPublic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("IdentityPublic")
+            .field(&self.key_id())
+            .finish()
     }
 }
 
@@ -362,7 +430,7 @@ mod tests {
         .unwrap();
         let verifier = Verifier::Identity(identity.public());
         verify_record(&signed, &DOC, &verifier).unwrap();
-        assert_eq!(identity.public().mldsa65.len(), MLDSA65_PUBLIC_KEY_LEN);
+        assert_eq!(identity.public().mldsa65().len(), MLDSA65_PUBLIC_KEY_LEN);
 
         let mut signature = pb::Signature::decode(signed.signature_bytes().unwrap()).unwrap();
         assert_eq!(

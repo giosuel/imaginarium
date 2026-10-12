@@ -3,7 +3,7 @@
 //! Suite 1 record encryption (spec §6.3): XChaCha20-Poly1305 with the
 //! format's AAD, and the STREAM nonce construction for blob segments.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadInOut, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use imaginarium_format::{
     DocId, FormatError, ObjectId, Record, RecordBuilder, RecordOpener, RecordSealer, RecordType,
@@ -19,6 +19,8 @@ pub const SUITE_1: u32 = 1;
 
 /// Nonce length of XChaCha20-Poly1305.
 const NONCE_LEN: usize = 24;
+/// Poly1305 tag length.
+const TAG_LEN: usize = 16;
 /// STREAM nonce prefix length (spec §6.3.2): 24 − 4 (counter) − 1 (last flag).
 const PREFIX_LEN: usize = 19;
 
@@ -97,26 +99,36 @@ impl<R: Randomness> RecordSealer for Suite1Sealer<'_, R> {
         plaintext: &[u8],
     ) -> imaginarium_format::Result<Vec<u8>> {
         let cipher = cipher(self.key, rtype)?;
-        let payload = Payload {
-            msg: plaintext,
-            aad,
-        };
         match &header.segment {
             Some(segment) => {
                 let nonce = segment_nonce(segment)?;
                 cipher
-                    .encrypt(&nonce, payload)
+                    .encrypt(
+                        &nonce,
+                        Payload {
+                            msg: plaintext,
+                            aad,
+                        },
+                    )
                     .map_err(|_| CryptoError::Authentication.into())
             }
             None => {
                 let mut nonce = [0u8; NONCE_LEN];
                 self.rng.borrow_mut().fill(&mut nonce)?;
-                let ciphertext = cipher
-                    .encrypt(&XNonce::from(nonce), payload)
-                    .map_err(|_| FormatError::from(CryptoError::Authentication))?;
-                let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+                // One buffer, encrypted in place: `nonce ‖ ciphertext ‖ tag`.
+                // Copying large payloads twice costs more than the cipher on
+                // machines where fresh memory is expensive (VMs).
+                let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
                 out.extend_from_slice(&nonce);
-                out.extend_from_slice(&ciphertext);
+                out.extend_from_slice(plaintext);
+                let tag = cipher
+                    .encrypt_inout_detached(
+                        &XNonce::from(nonce),
+                        aad,
+                        (&mut out[NONCE_LEN..]).into(),
+                    )
+                    .map_err(|_| FormatError::from(CryptoError::Authentication))?;
+                out.extend_from_slice(&tag);
                 Ok(out)
             }
         }

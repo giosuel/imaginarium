@@ -178,37 +178,42 @@ impl AclState {
         doc_id: &DocId,
         records: impl IntoIterator<Item = &'r Record>,
     ) -> Result<Self> {
-        let mut by_index: BTreeMap<u64, &Record> = BTreeMap::new();
+        let mut by_index: BTreeMap<u64, (&Record, pb::AclChange)> = BTreeMap::new();
         for record in records {
             if record.rtype() != RecordType::ACLC {
                 continue;
             }
-            let index = decode_change(doc_id, record)?.index;
-            match by_index.get(&index) {
-                Some(existing) if existing.encode() != record.encode() => {
-                    return Err(CryptoError::AclFork(index));
+            let change = decode_change(doc_id, record)?;
+            match by_index.get(&change.index) {
+                Some((existing, _)) if existing.encode() != record.encode() => {
+                    return Err(CryptoError::AclFork(change.index));
                 }
                 Some(_) => {}
                 None => {
-                    by_index.insert(index, record);
+                    by_index.insert(change.index, (record, change));
                 }
             }
         }
-        let mut records = by_index.into_values();
-        let first = records
+        let mut changes = by_index.into_values();
+        let (first, _) = changes
             .next()
             .ok_or_else(|| acl("the document has no ACL chain"))?;
         let mut state = Self::genesis(doc_id, first)?;
-        for record in records {
-            state.apply(record)?;
+        for (record, change) in changes {
+            state.apply_decoded(record, change)?;
         }
         Ok(state)
     }
 
     /// Applies the next change of the chain, after checking its position,
-    /// signature and permissions (spec §8.2–§8.3).
+    /// signature and permissions (spec §8.2–§8.3). A rejected change leaves
+    /// the state unchanged.
     pub fn apply(&mut self, record: &Record) -> Result<()> {
         let change = decode_change(&self.doc_id, record)?;
+        self.apply_decoded(record, change)
+    }
+
+    fn apply_decoded(&mut self, record: &Record, change: pb::AclChange) -> Result<()> {
         if change.index != self.next_index {
             return Err(acl(format!(
                 "expected change {}, found {}",
@@ -233,7 +238,9 @@ impl AclState {
         )?;
         let signer_role = signer.role;
 
-        let mut next = self.clone();
+        // Every arm checks everything before it changes anything, so a
+        // rejected change leaves the state as it was (no clone needed).
+        let next = &mut *self;
         use pb::acl_change::Change;
         match change.change.ok_or_else(|| acl("empty change"))? {
             Change::Genesis(_) => return Err(acl("only the first change may be a genesis")),
@@ -273,9 +280,6 @@ impl AclState {
                     if member_id == next.owner {
                         return Err(acl("already the owner"));
                     }
-                    let previous = next.owner;
-                    next.member_mut(&previous)?.role = Role::Admin;
-                    next.owner = member_id;
                 } else if old == Role::Owner {
                     return Err(acl(
                         "the owner's role changes only by transferring ownership",
@@ -283,7 +287,15 @@ impl AclState {
                 } else if !may_manage(signer_role, Some(old), role) {
                     return Err(acl("not allowed to change this member's role"));
                 }
-                next.member_mut(&member_id)?.role = role;
+                if role == Role::Owner {
+                    let previous = std::mem::replace(&mut next.owner, member_id);
+                    if let Some(member) = next.members.get_mut(&previous) {
+                        member.role = Role::Admin;
+                    }
+                }
+                if let Some(member) = next.members.get_mut(&member_id) {
+                    member.role = role;
+                }
             }
             Change::RemoveMember(remove) => {
                 let member_id = key_id(&remove.member_id)?;
@@ -339,8 +351,7 @@ impl AclState {
                 next.rotation_required = false;
             }
         }
-        next.advance(record);
-        *self = next;
+        self.advance(record);
         Ok(())
     }
 
@@ -493,12 +504,6 @@ impl AclState {
             .ok_or_else(|| acl("not a member"))
     }
 
-    fn member_mut(&mut self, member_id: &KeyId) -> Result<&mut Member> {
-        self.members
-            .get_mut(member_id)
-            .ok_or_else(|| acl("not a member"))
-    }
-
     /// Moves the head past `record` and records what everyone may do now.
     fn advance(&mut self, record: &Record) {
         self.head_hash = *blake3::hash(&record.encode()).as_bytes();
@@ -559,8 +564,8 @@ pub fn genesis_record(
 /// The protobuf `Identity` for a member's public keys.
 pub fn identity_pb(identity: &IdentityPublic, xwing_public_key: Vec<u8>) -> pb::Identity {
     pb::Identity {
-        ed25519_public_key: identity.ed25519.to_vec(),
-        mldsa65_public_key: identity.mldsa65.clone(),
+        ed25519_public_key: identity.ed25519().to_vec(),
+        mldsa65_public_key: identity.mldsa65().to_vec(),
         xwing_public_key,
     }
 }
@@ -618,10 +623,8 @@ struct ParsedIdentity {
 
 fn parse_identity(identity: Option<&pb::Identity>) -> Result<ParsedIdentity> {
     let identity = identity.ok_or_else(|| acl("missing identity"))?;
+    // Also rejects Ed25519 keys that aren't curve points.
     let public = IdentityPublic::from_pb(identity)?;
-    // Reject keys that can never verify (e.g. small-order points) up front.
-    ed25519_dalek::VerifyingKey::from_bytes(&public.ed25519)
-        .map_err(|_| CryptoError::InvalidKey("identity Ed25519 public key"))?;
     if identity.xwing_public_key.len() != XWING_PUBLIC_KEY_LEN {
         return Err(CryptoError::InvalidKey("identity X-Wing public key"));
     }
@@ -634,6 +637,8 @@ fn parse_identity(identity: Option<&pb::Identity>) -> Result<ParsedIdentity> {
 fn parse_device(device: Option<&pb::Device>, member_id: KeyId) -> Result<Device> {
     let device = device.ok_or_else(|| acl("missing device"))?;
     let public = DevicePublic::from_slice(&device.ed25519_public_key)?;
+    // Reject keys that aren't curve points up front (weak keys are rejected
+    // by `verify_strict` when verifying).
     ed25519_dalek::VerifyingKey::from_bytes(&public.0)
         .map_err(|_| CryptoError::InvalidKey("device Ed25519 public key"))?;
     if device.xwing_public_key.len() != XWING_PUBLIC_KEY_LEN {
@@ -1048,6 +1053,53 @@ mod tests {
         state
             .verify_content(&owner.update(2, pb::Stream::Main))
             .unwrap();
+    }
+
+    #[test]
+    fn rejected_changes_leave_the_state_unchanged() {
+        let owner = User::new();
+        let (admin, editor) = (User::new(), User::new());
+        let (mut state, _) = chain(
+            &owner,
+            vec![
+                (admin.add(Role::Admin), &owner),
+                (editor.add(Role::Editor), &owner),
+                (editor.add_device(), &editor),
+            ],
+        )
+        .unwrap();
+        let snapshot = |state: &AclState| {
+            (
+                state.members().clone(),
+                state.devices().clone(),
+                state.owner(),
+                state.epoch(),
+                state.next_index(),
+                state.head_hash(),
+                state.rotation_required(),
+            )
+        };
+        let before = snapshot(&state);
+        let rejected = [
+            (admin.set_role(Role::Owner), &admin),
+            (owner.set_role(Role::Viewer), &owner),
+            (editor.add(Role::Viewer), &owner),
+            (admin.remove(), &admin),
+            (rotate(5), &owner),
+            (User::new().add(Role::Viewer), &editor),
+        ];
+        for (change, signer) in rejected {
+            let record = state
+                .next_change(change, &signer.identity, &mut OsRandomness)
+                .unwrap();
+            assert!(state.apply(&record).is_err());
+            assert_eq!(snapshot(&state), before);
+        }
+        assert!(
+            state
+                .verify_content(&editor.update(1, pb::Stream::Main))
+                .is_ok()
+        );
     }
 
     #[test]
