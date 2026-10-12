@@ -2,8 +2,10 @@
 
 - Status: **Accepted design, defaults decided** (2026-10-12). The normative spec follows in M1.
 - Scope: the on-disk *and* on-server representation of an Imaginarium document
-- Normative spec: will be extracted into `docs/format/spec-v1.md` (RFC-style
-  MUST/SHOULD, with test vectors) once this design is accepted.
+- **Normative spec: [`docs/format/spec-v1.md`](../format/spec-v1.md).** Where
+  the two differ, the spec wins. Its §14 lists the refinements: `doc_id`
+  in the AAD, an epoch-independent BlobId key, a signature framing section,
+  `plain_len`, a per-record codec, and the measured overhead.
 - Reference implementation: crate `imaginarium-format` (no app dependencies,
   fuzzed, usable by third parties)
 
