@@ -162,6 +162,17 @@ impl<F: Write + Seek + Durable> Writer<F> {
     /// stable storage. Encrypted documents need `index_sealer` (the index
     /// is encrypted under `K_content`, spec §9.1).
     pub fn commit(&mut self, index_sealer: Option<&dyn RecordSealer>) -> Result<()> {
+        self.commit_with_index_id(ObjectId::random()?, index_sealer)
+    }
+
+    /// Like [`Writer::commit`], with a given object id for the index record
+    /// instead of a random one. Use it only for reproducible output, such as
+    /// test vectors. Normal saves use [`Writer::commit`].
+    pub fn commit_with_index_id(
+        &mut self,
+        index_id: ObjectId,
+        index_sealer: Option<&dyn RecordSealer>,
+    ) -> Result<()> {
         let encrypted = self.header.is_encrypted();
         if encrypted != index_sealer.is_some() {
             return Err(FormatError::Invalid(if encrypted {
@@ -171,7 +182,7 @@ impl<F: Write + Seek + Durable> Writer<F> {
             }));
         }
         self.state.previous_index_offset = self.last_index_offset;
-        let mut builder = RecordBuilder::new(RecordType::INDX, ObjectId::random()?);
+        let mut builder = RecordBuilder::new(RecordType::INDX, index_id);
         if encrypted {
             builder = builder.key_records(self.state.key_records());
         }
