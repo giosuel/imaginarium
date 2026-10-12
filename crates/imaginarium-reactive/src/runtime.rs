@@ -5,14 +5,22 @@
 //! The update algorithm is push-pull "coloring" (as in Reactively and
 //! Solid 2): a write marks its direct subscribers `Dirty` and everything
 //! further downstream `Check`. Reading a memo or running an effect first
-//! brings its sources up to date, newest information first, and recomputes
-//! only if a source really changed. That is glitch-free (no computation
-//! sees a mix of old and new values) and runs each computation at most once
-//! per update.
+//! brings its sources up to date and recomputes only if a source really
+//! changed. That is glitch-free (no computation sees a mix of old and new
+//! values) and runs each computation at most once per update.
 //!
-//! No user code runs while the arena is borrowed: computations are taken
-//! out of their node, run, and put back. User code can therefore read and
-//! write other signals freely.
+//! Rules that keep it correct when user code does unusual things:
+//! - A computation is marked `Clean` *before* it runs, and subscribes to
+//!   each source as it reads it. A write during the run marks it again,
+//!   so it runs once more instead of keeping a stale result.
+//! - Effects that writes trigger wait until no computation is running and
+//!   no batch is open.
+//! - An effect's owners run before it, so a child effect never runs on
+//!   state its parent is about to replace.
+//! - Disposal never edits other nodes' lists. Stale entries are skipped by
+//!   their generation and compacted later.
+//! - No user code runs while the arena is borrowed, and a panicking user
+//!   closure leaves the node as it was before the run.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -22,6 +30,11 @@ use std::rc::Rc;
 /// More effect runs than this in one flush means an effect keeps
 /// triggering itself (directly or through others).
 const MAX_EFFECT_RUNS_PER_FLUSH: usize = 1_000_000;
+
+/// Subscriber and child lists are compacted (disposed entries dropped)
+/// when they reach a power of two at least this long, so lists of
+/// long-lived nodes stay proportional to their live entries.
+const COMPACT_FROM: usize = 64;
 
 /// A node handle: arena slot plus generation, so a handle to a disposed
 /// node never reaches the slot's next tenant.
@@ -66,21 +79,25 @@ struct Node {
     /// Memos and effects. `None` while it runs.
     compute: Option<Box<dyn Compute>>,
     running: bool,
-    /// What this computation read in its latest run.
+    /// What this computation read in its latest run. May contain disposed
+    /// nodes, which are skipped.
     sources: Vec<NodeId>,
     /// While it runs: how many of the previous run's sources it has read
     /// again, in the same order. Those edges are kept as they are.
     cursor: usize,
-    /// While it runs: sources read after the first difference.
-    new_sources: Vec<NodeId>,
-    /// Computations that read this node. May contain disposed ones, which
-    /// are dropped the next time the list is walked.
+    /// While it runs: sources read after the first difference, and whether
+    /// reading them subscribed it (it didn't if it already was).
+    new_sources: Vec<(NodeId, bool)>,
+    /// Computations that read this node. May contain disposed ones.
     subscribers: Vec<NodeId>,
     owner: Option<NodeId>,
+    /// May contain disposed ones.
     children: Vec<NodeId>,
     cleanups: Vec<Box<dyn FnOnce()>>,
-    /// The run that last tracked this node, to skip duplicate edges.
+    /// The run that last tracked this node, to skip repeated reads.
     tracked_by_run: u64,
+    /// Scratch mark for `finish_tracking`.
+    mark: u64,
 }
 
 impl Node {
@@ -101,7 +118,12 @@ impl Node {
             children: Vec::new(),
             cleanups: Vec::new(),
             tracked_by_run: 0,
+            mark: 0,
         }
+    }
+
+    fn is(&self, id: NodeId) -> bool {
+        self.alive && self.generation == id.generation
     }
 }
 
@@ -121,6 +143,7 @@ pub(crate) struct Runtime {
     /// Where new nodes are attached.
     owner: Cell<Option<NodeId>>,
     next_run: Cell<u64>,
+    /// Open batches plus running computations: effects wait while it's > 0.
     batch_depth: Cell<u32>,
     pending: RefCell<VecDeque<NodeId>>,
     flushing: Cell<bool>,
@@ -157,6 +180,30 @@ fn replace<T: Copy>(cell: &Cell<T>, value: T) -> Restore<'_, T> {
     }
 }
 
+/// Puts a computation back into its node after it ran, also when it
+/// panicked.
+struct Running<'a> {
+    rt: &'a Runtime,
+    id: NodeId,
+    run: u64,
+    compute: Option<Box<dyn Compute>>,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let compute = self.compute.take();
+        if self.rt.is_alive(self.id) {
+            self.rt.with_node_mut(self.id, |node| {
+                node.running = false;
+                node.compute = compute;
+            });
+            self.rt.finish_tracking(self.id, self.run);
+        } else {
+            drop(compute); // it disposed itself; drop it unborrowed
+        }
+    }
+}
+
 impl Runtime {
     fn new() -> Self {
         Self {
@@ -175,6 +222,9 @@ impl Runtime {
     // ---- nodes ------------------------------------------------------------
 
     /// Creates a node owned by the current owner.
+    ///
+    /// # Panics
+    /// With more than `u32::MAX` nodes alive.
     pub(crate) fn create(
         &self,
         kind: Kind,
@@ -190,8 +240,11 @@ impl Runtime {
         let index = match self.free.borrow_mut().pop() {
             Some(index) => index,
             None => {
+                let Ok(index) = u32::try_from(nodes.len()) else {
+                    panic!("more than u32::MAX reactive nodes");
+                };
                 nodes.push(Node::vacant(0));
-                u32::try_from(nodes.len() - 1).unwrap_or(u32::MAX)
+                index
             }
         };
         let slot = &mut nodes[index as usize];
@@ -209,7 +262,7 @@ impl Runtime {
             ..Node::vacant(slot.generation)
         };
         if let Some(owner) = owner {
-            nodes[owner.index as usize].children.push(id);
+            push_compacting(&mut nodes, owner, id, |node| &mut node.children);
         }
         id
     }
@@ -218,16 +271,18 @@ impl Runtime {
         self.nodes
             .borrow()
             .get(id.index as usize)
-            .is_some_and(|node| node.alive && node.generation == id.generation)
+            .is_some_and(|node| node.is(id))
     }
 
     /// The node's value cell, if the node is alive.
     pub(crate) fn value(&self, id: NodeId) -> Option<Rc<dyn Any>> {
-        let nodes = self.nodes.borrow();
-        let node = nodes.get(id.index as usize)?;
-        (node.alive && node.generation == id.generation)
-            .then(|| node.value.clone())
-            .flatten()
+        self.with_node(id, |node| node.value.clone()).flatten()
+    }
+
+    /// Entries in a node's subscriber list, live or not, for leak tests.
+    pub(crate) fn subscriber_entries(&self, id: NodeId) -> usize {
+        self.with_node(id, |node| node.subscribers.len())
+            .unwrap_or(0)
     }
 
     /// Live nodes, for tests of disposal.
@@ -237,15 +292,20 @@ impl Runtime {
 
     // ---- reading ----------------------------------------------------------
 
-    /// Records that the running computation read `id`.
+    /// Records that the running computation read `id`, and subscribes it.
     pub(crate) fn track(&self, id: NodeId) {
         let Some((observer, run)) = self.observer.get() else {
             return;
         };
-        if observer == id || !self.is_alive(observer) || !self.is_alive(id) {
+        if observer == id {
             return;
         }
         let mut nodes = self.nodes.borrow_mut();
+        let alive =
+            |nodes: &[Node], id: NodeId| nodes.get(id.index as usize).is_some_and(|n| n.is(id));
+        if !alive(&nodes, observer) || !alive(&nodes, id) {
+            return;
+        }
         let source = &mut nodes[id.index as usize];
         if source.tracked_by_run == run {
             return; // read before in this run
@@ -254,61 +314,85 @@ impl Runtime {
         let reader = &mut nodes[observer.index as usize];
         if reader.new_sources.is_empty() && reader.sources.get(reader.cursor) == Some(&id) {
             reader.cursor += 1; // the same as last time: keep the edge
-        } else {
-            reader.new_sources.push(id);
+            return;
+        }
+        // Subscribe now, not after the run, so a write later in this same
+        // run reaches it. A source of the previous run is subscribed
+        // already.
+        let subscribed_already = reader
+            .sources
+            .get(reader.cursor..)
+            .is_some_and(|rest| rest.contains(&id));
+        reader.new_sources.push((id, !subscribed_already));
+        if !subscribed_already {
+            push_compacting(&mut nodes, id, observer, |node| &mut node.subscribers);
         }
     }
 
-    /// After a run: keep the unchanged prefix of the sources, subscribe to
-    /// the new ones, unsubscribe from the ones no longer read. A run that
-    /// reads what it read last time touches no subscriber list.
-    fn finish_tracking(&self, id: NodeId) {
+    /// After a run: the sources are the unchanged prefix plus what was read
+    /// after it; unsubscribe from the rest. A run that reads what it read
+    /// last time doesn't get here.
+    fn finish_tracking(&self, id: NodeId, run: u64) {
         let mut nodes = self.nodes.borrow_mut();
-        let Some(node) = nodes.get_mut(id.index as usize) else {
+        let Some(node) = live_mut(&mut nodes, id) else {
             return;
         };
-        if !node.alive || node.generation != id.generation {
+        let cursor = node.cursor.min(node.sources.len());
+        if cursor == node.sources.len() && node.new_sources.is_empty() {
             return;
         }
-        let cursor = node.cursor;
-        if cursor == node.sources.len() && node.new_sources.is_empty() {
-            return; // read exactly what it read last time
-        }
-        let dropped = node.sources.split_off(cursor);
+        let mut sources = std::mem::take(&mut node.sources);
         let added = std::mem::take(&mut node.new_sources);
-        let mut subscribe = Vec::new();
-        for source in added {
-            if !node.sources.contains(&source) {
-                node.sources.push(source);
-                if !dropped.contains(&source) {
-                    subscribe.push(source); // `dropped` ones are still subscribed
+        let dropped = sources.split_off(cursor);
+        // Marks instead of `contains`: linear in the number of sources.
+        for &source in &sources {
+            if let Some(source_node) = live_mut(&mut nodes, source) {
+                source_node.mark = run;
+            }
+        }
+        for (source, subscribed) in added {
+            match live_mut(&mut nodes, source) {
+                Some(source_node) if source_node.mark != run => {
+                    source_node.mark = run;
+                    sources.push(source);
                 }
+                Some(source_node) if subscribed => {
+                    // A repeated read that subscribed a second time.
+                    if let Some(at) = source_node.subscribers.iter().rposition(|&s| s == id) {
+                        source_node.subscribers.swap_remove(at);
+                    }
+                }
+                _ => {}
             }
         }
-        let unsubscribe: Vec<NodeId> = dropped
-            .into_iter()
-            .filter(|source| !node.sources.contains(source))
-            .collect();
-        for source in subscribe {
-            if let Some(source_node) = live_mut(&mut nodes, source) {
-                source_node.subscribers.push(id);
-            }
-        }
-        for source in unsubscribe {
-            if let Some(source_node) = live_mut(&mut nodes, source) {
+        for source in dropped {
+            if let Some(source_node) = live_mut(&mut nodes, source)
+                && source_node.mark != run
+            {
                 source_node.subscribers.retain(|&s| s != id);
             }
+        }
+        if let Some(node) = live_mut(&mut nodes, id) {
+            node.sources = sources;
         }
     }
 
     /// Brings a memo or effect up to date: recomputes it if a source really
-    /// changed. Panics on a cycle (a memo that reads itself).
+    /// changed.
+    ///
+    /// # Panics
+    /// On a cycle: a memo read while it computes, by itself or by a memo it
+    /// reads.
     pub(crate) fn update(&self, id: NodeId) {
-        let Some(state) = self.state(id) else {
+        let Some((state, running)) = self.with_node(id, |node| (node.state, node.running)) else {
             return;
         };
+        if running {
+            panic!("reactive cycle: a memo depends on itself");
+        }
         if state == State::Check {
             // By index, not over a copy: this runs for every affected node.
+            // Nothing but this node's own runs changes its source list.
             let mut i = 0;
             while let Some(source) = self
                 .with_node(id, |node| node.sources.get(i).copied())
@@ -318,24 +402,28 @@ impl Runtime {
                 if self.kind(source) == Some(Kind::Memo) {
                     self.update(source);
                 }
-                if self.state(id) == Some(State::Dirty) {
+                if self.state(id) != Some(State::Check) {
                     break;
                 }
+            }
+            if self.state(id) == Some(State::Check) {
+                self.set_state(id, State::Clean); // nothing it read changed
+                return;
             }
         }
         if self.state(id) == Some(State::Dirty) {
             self.recompute(id);
         }
-        self.set_state(id, State::Clean);
     }
 
     fn recompute(&self, id: NodeId) {
-        if self.with_node(id, |node| node.running).unwrap_or(false) {
-            panic!("reactive cycle: a memo or effect depends on itself");
-        }
         self.reset(id);
-        let Some(mut compute) = self
+        let run = self.next_run.get();
+        self.next_run.set(run + 1);
+        let Some(compute) = self
             .with_node_mut(id, |node| {
+                // Clean before the run: a write during it marks it again.
+                node.state = State::Clean;
                 node.running = true;
                 node.cursor = 0;
                 node.new_sources.clear();
@@ -345,34 +433,36 @@ impl Runtime {
         else {
             return;
         };
-        let run = self.next_run.get();
-        self.next_run.set(run + 1);
         let changed = {
+            let mut running = Running {
+                rt: self,
+                id,
+                run,
+                compute: Some(compute),
+            };
+            // Effects that this run's writes trigger wait for it to end.
+            let _depth = replace(&self.batch_depth, self.batch_depth.get() + 1);
             let _observer = replace(&self.observer, Some((id, run)));
             let _owner = replace(&self.owner, Some(id));
-            compute.run()
+            running.compute.as_mut().is_some_and(|c| c.run())
         };
-        let still_here = self
-            .with_node_mut(id, |node| {
-                node.running = false;
-                node.compute = Some(compute);
-            })
-            .is_some();
-        if !still_here {
-            return; // it disposed itself
-        }
-        self.finish_tracking(id);
         if changed && self.kind(id) == Some(Kind::Memo) {
-            // Its subscribers were marked `Check` when the change started.
+            // Subscribers that are checking whether to run (marked `Check`
+            // when the change started) now must. A `Clean` one is the
+            // computation reading this memo right now: it sees the new
+            // value, and marking it would leave it `Dirty` without a run.
             let mut nodes = self.nodes.borrow_mut();
             let subscribers = take_live_subscribers(&mut nodes, id);
             for &subscriber in &subscribers {
-                if let Some(node) = live_mut(&mut nodes, subscriber) {
+                if let Some(node) = live_mut(&mut nodes, subscriber)
+                    && node.state == State::Check
+                {
                     node.state = State::Dirty;
                 }
             }
             put_subscribers(&mut nodes, id, subscribers);
         }
+        self.flush_unless_batching();
     }
 
     /// Before a computation runs again: dispose what it created last time
@@ -400,7 +490,7 @@ impl Runtime {
     // ---- writing ----------------------------------------------------------
 
     /// After a signal's value changed: mark everything downstream and run
-    /// the effects (now, or at the end of the outermost batch).
+    /// the effects (now, or once no batch is open and nothing computes).
     pub(crate) fn notify(&self, id: NodeId) {
         {
             let mut nodes = self.nodes.borrow_mut();
@@ -413,16 +503,16 @@ impl Runtime {
             stack.extend(subscribers.iter().map(|&s| (s, State::Dirty)));
             put_subscribers(&mut nodes, id, subscribers);
             while let Some((next, state)) = stack.pop() {
-                let Some(node) = nodes.get_mut(next.index as usize) else {
+                let Some(node) = live_mut(&mut nodes, next) else {
                     continue;
                 };
-                if !node.alive || node.generation != next.generation || node.state >= state {
+                if node.state >= state {
                     continue;
                 }
                 let was_clean = node.state == State::Clean;
                 node.state = state;
                 if !was_clean {
-                    continue; // already marked downstream
+                    continue; // marked before, and everything downstream with it
                 }
                 if node.kind == Kind::Effect {
                     pending.push_back(next);
@@ -444,7 +534,8 @@ impl Runtime {
         }
     }
 
-    /// Runs pending effects until none are left.
+    /// Runs pending effects until none are left. If one panics, the rest
+    /// wait for the next write.
     fn flush(&self) {
         if self.flushing.get() {
             return; // the running flush picks them up
@@ -462,12 +553,36 @@ impl Runtime {
                 debug_assert!(false, "an effect keeps triggering itself");
                 break;
             }
-            if self
-                .state(effect)
-                .is_some_and(|state| state != State::Clean)
-            {
-                self.update(effect);
+            self.run_top(effect);
+        }
+    }
+
+    /// Updates an effect, after its owners that are out of date: an owner's
+    /// run disposes its old children, which then never run on state it is
+    /// about to replace.
+    fn run_top(&self, id: NodeId) {
+        // Out-of-date owners, innermost first. Usually there are none, so
+        // the list is only allocated when needed.
+        let mut stale: Vec<NodeId> = Vec::new();
+        let mut current = self.with_node(id, |node| node.owner).flatten();
+        while let Some(owner) = current {
+            let Some((kind, state, next)) =
+                self.with_node(owner, |node| (node.kind, node.state, node.owner))
+            else {
+                break;
+            };
+            if matches!(kind, Kind::Effect | Kind::Memo) && state != State::Clean {
+                stale.push(owner);
             }
+            current = next;
+        }
+        for &owner in stale.iter().rev() {
+            if self.state(owner).is_some_and(|state| state != State::Clean) {
+                self.update(owner);
+            }
+        }
+        if self.state(id).is_some_and(|state| state != State::Clean) {
+            self.update(id);
         }
     }
 
@@ -500,8 +615,8 @@ impl Runtime {
 
     // ---- disposal ---------------------------------------------------------
 
-    /// Disposes a node and everything it owns: cleanups run, edges go, the
-    /// slot is freed.
+    /// Disposes a node and everything it owns: cleanups run, the slot is
+    /// freed.
     pub(crate) fn dispose(&self, id: NodeId) {
         if !self.is_alive(id) {
             return;
@@ -525,39 +640,23 @@ impl Runtime {
         }
         self.run_cleanups(id);
         let mut nodes = self.nodes.borrow_mut();
-        let Some(node) = nodes.get_mut(id.index as usize) else {
+        let Some(node) = live_mut(&mut nodes, id) else {
             return;
         };
-        if !node.alive || node.generation != id.generation {
-            return;
-        }
-        let sources = std::mem::take(&mut node.sources);
-        let subscribers = std::mem::take(&mut node.subscribers);
-        let owner = node.owner.take();
+        // Other nodes' lists (sources, subscribers, children) still name
+        // it. They skip it by its generation and drop it when compacted:
+        // editing them here would shift lists that a running update walks,
+        // and make disposing many readers of one signal quadratic.
         garbage.values.extend(node.value.take());
         garbage.computes.extend(node.compute.take());
-        node.alive = false;
-        node.generation = node.generation.wrapping_add(1);
-        node.state = State::Clean;
-        // Its sources' subscriber lists still name it: they drop it the
-        // next time they are walked. Removing it from each now would make
-        // disposing many readers of one signal quadratic.
-        drop(sources);
-        for subscriber in subscribers {
-            if let Some(subscriber_node) = nodes.get_mut(subscriber.index as usize)
-                && subscriber_node.generation == subscriber.generation
-            {
-                subscriber_node.sources.retain(|&s| s != id);
-            }
-        }
-        if let Some(owner) = owner
-            && let Some(owner_node) = nodes.get_mut(owner.index as usize)
-            && owner_node.generation == owner.generation
-        {
-            owner_node.children.retain(|&c| c != id);
-        }
+        let generation = node.generation;
+        *node = Node::vacant(generation.wrapping_add(1));
         drop(nodes);
-        self.free.borrow_mut().push(id.index);
+        if generation < u32::MAX - 1 {
+            self.free.borrow_mut().push(id.index);
+        }
+        // Otherwise the slot is retired: its generation would wrap, and a
+        // stale handle could reach the next tenant.
     }
 
     // ---- helpers ----------------------------------------------------------
@@ -565,13 +664,12 @@ impl Runtime {
     fn with_node<R>(&self, id: NodeId, f: impl FnOnce(&Node) -> R) -> Option<R> {
         let nodes = self.nodes.borrow();
         let node = nodes.get(id.index as usize)?;
-        (node.alive && node.generation == id.generation).then(|| f(node))
+        node.is(id).then(|| f(node))
     }
 
     fn with_node_mut<R>(&self, id: NodeId, f: impl FnOnce(&mut Node) -> R) -> Option<R> {
         let mut nodes = self.nodes.borrow_mut();
-        let node = nodes.get_mut(id.index as usize)?;
-        (node.alive && node.generation == id.generation).then(|| f(node))
+        live_mut(&mut nodes, id).map(f)
     }
 
     fn state(&self, id: NodeId) -> Option<State> {
@@ -589,9 +687,32 @@ impl Runtime {
 
 /// The node, if `id` is alive.
 fn live_mut(nodes: &mut [Node], id: NodeId) -> Option<&mut Node> {
-    nodes
-        .get_mut(id.index as usize)
-        .filter(|node| node.alive && node.generation == id.generation)
+    nodes.get_mut(id.index as usize).filter(|node| node.is(id))
+}
+
+/// Pushes `entry` onto one of `owner`'s lists, dropping disposed entries
+/// when the list reaches a power of two: amortized O(1), and the list stays
+/// proportional to its live entries.
+fn push_compacting(
+    nodes: &mut [Node],
+    owner: NodeId,
+    entry: NodeId,
+    list: impl Fn(&mut Node) -> &mut Vec<NodeId>,
+) {
+    let Some(node) = live_mut(nodes, owner) else {
+        return;
+    };
+    let mut entries = std::mem::take(list(node));
+    entries.push(entry);
+    if entries.len() >= COMPACT_FROM && entries.len().is_power_of_two() {
+        entries.retain(|&e| nodes.get(e.index as usize).is_some_and(|n| n.is(e)));
+        if entries.capacity() > 4 * entries.len().max(COMPACT_FROM) {
+            entries.shrink_to(2 * entries.len());
+        }
+    }
+    if let Some(node) = live_mut(nodes, owner) {
+        *list(node) = entries;
+    }
 }
 
 /// Takes `id`'s subscriber list out of its node, without the disposed
@@ -602,11 +723,7 @@ fn take_live_subscribers(nodes: &mut [Node], id: NodeId) -> Vec<NodeId> {
         return Vec::new();
     };
     let mut subscribers = std::mem::take(&mut node.subscribers);
-    subscribers.retain(|&s| {
-        nodes
-            .get(s.index as usize)
-            .is_some_and(|n| n.alive && n.generation == s.generation)
-    });
+    subscribers.retain(|&s| nodes.get(s.index as usize).is_some_and(|n| n.is(s)));
     subscribers
 }
 

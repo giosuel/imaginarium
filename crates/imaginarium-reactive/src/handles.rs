@@ -102,7 +102,8 @@ impl<T: 'static> Signal<T> {
     /// computation.
     ///
     /// # Panics
-    /// If the signal was disposed, or if `f` writes this same signal.
+    /// If the signal was disposed, or if `f` writes this same signal, also
+    /// indirectly (an effect that a write in `f` triggers writes it).
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.try_with(f).unwrap_or_else(|| disposed("signal"))
     }
@@ -170,6 +171,12 @@ impl<T: 'static> Signal<T> {
     pub fn dispose(self) {
         with_runtime(|rt| rt.dispose(self.id));
     }
+
+    /// Entries in its subscriber list (live or not), for leak tests.
+    #[doc(hidden)]
+    pub fn subscriber_entries_for_tests(&self) -> usize {
+        with_runtime(|rt| rt.subscriber_entries(self.id))
+    }
 }
 
 /// A signal without a value: computations that [`track`](Trigger::track)
@@ -214,11 +221,16 @@ struct MemoCompute<T, F> {
 
 impl<T: PartialEq + 'static, F: FnMut(Option<&T>) -> T> Compute for MemoCompute<T, F> {
     fn run(&mut self) -> bool {
-        // Take the old value out, so `f` runs without a borrow held.
-        let old = self.value.borrow_mut().take();
-        let new = (self.f)(old.as_ref());
-        let changed = old.as_ref() != Some(&new);
-        *self.value.borrow_mut() = Some(new);
+        // The old value stays in place (borrowed) while `f` runs, so a
+        // panic in `f` keeps it. Nothing else reads it meanwhile: a read
+        // of this memo during its own run is a cycle and panics first.
+        let new = {
+            let old = self.value.borrow();
+            (self.f)(old.as_ref())
+        };
+        let mut value = self.value.borrow_mut();
+        let changed = value.as_ref() != Some(&new);
+        *value = Some(new);
         changed
     }
 }
@@ -341,8 +353,26 @@ impl<F: FnMut()> Compute for EffectCompute<F> {
 /// toolkit, effects are where signals meet widgets: they mark widgets for
 /// layout or paint.
 ///
-/// It runs once right away (or at the end of the current batch), then
-/// after every change, at most once per batch.
+/// It runs once right away (or when the current batch or computation
+/// ends), then after every change, at most once per batch. It may write
+/// signals, also ones it reads: it then runs again with the new values.
+/// Effects it creates belong to it and are disposed before it runs again,
+/// and they never run before it.
+///
+/// If it panics, the panic propagates out of the write that ran it, and it
+/// runs again on its next change.
+///
+/// ```
+/// use imaginarium_reactive::{effect, signal};
+/// use std::{cell::RefCell, rc::Rc};
+///
+/// let name = signal(String::from("Ada"));
+/// let shown = Rc::new(RefCell::new(String::new()));
+/// let label = shown.clone();
+/// effect(move || *label.borrow_mut() = format!("Hello, {}", name.get()));
+/// name.set(String::from("Grace"));
+/// assert_eq!(*shown.borrow(), "Hello, Grace");
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Effect {
     id: NodeId,

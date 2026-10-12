@@ -301,3 +301,180 @@ fn deep_chains_and_wide_fan_outs_update_correctly() {
     source.set(1);
     assert_eq!(total.get(), 10_000);
 }
+
+// ---- found in the M2.1 review ----------------------------------------------
+
+#[test]
+fn a_write_while_a_computation_runs_is_not_lost() {
+    // The write lands while the effect (and the memo it reads) run: both
+    // must run again, and later writes must still reach the effect.
+    let s = signal(0);
+    let m = memo(move |_| s.get());
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let l = log.clone();
+    effect(move || {
+        let v = m.get();
+        l.borrow_mut().push(v);
+        if v == 0 {
+            s.set(1);
+        }
+    });
+    s.set(2);
+    s.set(3);
+    assert_eq!(log.borrow().last(), Some(&3), "{:?}", log.borrow());
+}
+
+#[test]
+fn an_effect_that_writes_its_own_source_settles() {
+    let s = signal(0);
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || {
+        let v = s.get();
+        k.set(v);
+        if v < 3 {
+            s.set(v + 1);
+        }
+    });
+    assert_eq!((s.get_untracked(), seen.get()), (3, 3));
+}
+
+#[test]
+fn disposing_an_earlier_source_during_an_update_skips_nothing() {
+    // m1 creates a signal that the effect reads first. When m1 re-runs, it
+    // disposes that signal: the effect's later sources must still be
+    // checked.
+    let s = signal(0);
+    let inner: Rc<Cell<Option<imaginarium_reactive::Signal<i32>>>> = Rc::new(Cell::new(None));
+    let i = inner.clone();
+    let m1 = memo(move |_| {
+        i.set(Some(signal(0)));
+        s.get() / 2
+    });
+    let m2 = memo(move |_| s.get());
+    let _ = m1.get();
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || {
+        if let Some(x) = inner.get() {
+            let _ = x.try_with(|v| *v);
+        }
+        let _ = m1.get();
+        k.set(m2.get());
+    });
+    s.set(1);
+    assert_eq!(seen.get(), 1);
+}
+
+#[test]
+fn disposing_a_source_during_a_run_is_safe() {
+    let (a, b) = (signal(1), signal(2));
+    let runs = Count::default();
+    let r = runs.clone();
+    let trigger = signal(0);
+    effect(move || {
+        r.bump();
+        let _ = trigger.get();
+        let _ = a.try_with(|v| *v);
+        let _ = b.get();
+        if a.is_alive() && trigger.get_untracked() == 1 {
+            a.dispose();
+        }
+    });
+    trigger.set(1);
+    b.set(3);
+    assert_eq!(runs.get(), 3);
+}
+
+#[test]
+fn child_effects_never_outlive_their_parent() {
+    // A conditional subtree: when the list empties, the parent re-runs
+    // and drops the child; the child must not run on the empty list first.
+    let list = signal(vec![1]);
+    effect(move || {
+        if !list.with(Vec::is_empty) {
+            effect(move || {
+                let _ = list.with(|l| l[0]);
+            });
+        }
+    });
+    list.set(Vec::new());
+    list.set(vec![2]);
+}
+
+#[test]
+fn a_panicking_computation_recovers() {
+    let s = signal(0);
+    let m = memo(move |_| {
+        let v = s.get();
+        assert!(v != 1, "boom");
+        v
+    });
+    assert_eq!(m.get(), 0);
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || {
+        let v = s.get();
+        assert!(v != 2, "boom");
+        k.set(v);
+    });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.set(1);
+        m.get()
+    }));
+    assert!(panicked.is_err());
+    // The memo kept its value and runs again on the next change.
+    s.set(3);
+    assert_eq!(m.get(), 3);
+    assert_eq!(seen.get(), 3);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.set(2)));
+    assert!(panicked.is_err());
+    s.set(4);
+    assert_eq!(seen.get(), 4, "the effect runs again after it panicked");
+}
+
+#[test]
+fn a_memo_that_writes_a_signal_does_not_trip_the_cycle_check() {
+    let (s, t) = (signal(0), signal(0));
+    let m = memo(move |_| {
+        t.set(s.get());
+        s.get()
+    });
+    effect(move || {
+        if t.get() > 0 {
+            let _ = m.get();
+        }
+    });
+    s.set(1);
+    assert_eq!(m.get(), 1);
+}
+
+#[test]
+fn readers_that_come_and_go_do_not_grow_a_quiet_signal() {
+    // A theme signal that is never written, read by short-lived views.
+    let theme = signal(0);
+    for _ in 0..10_000 {
+        let scope = Scope::new();
+        scope.run(|| {
+            effect(move || {
+                let _ = theme.get();
+            });
+        });
+        scope.dispose();
+    }
+    assert!(theme.subscriber_entries_for_tests() < 200);
+}
+
+#[test]
+fn wide_computations_and_scopes_stay_linear() {
+    // Quadratic bookkeeping would take seconds here even in release.
+    let start = std::time::Instant::now();
+    let signals: Vec<_> = (0..20_000).map(signal).collect();
+    let reads = signals.clone();
+    let total = memo(move |_| reads.iter().map(|s| s.get()).sum::<i64>());
+    assert_eq!(total.get(), (0..20_000).sum::<i64>());
+    for s in signals {
+        s.dispose();
+    }
+    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+}

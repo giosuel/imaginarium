@@ -267,3 +267,253 @@ proptest! {
         prop_assert_eq!(live_nodes_for_tests(), baseline);
     }
 }
+
+/// A node of a graph whose effects also write: a memo, or an effect that
+/// forwards its result into a signal (`set_if_changed`), both computing
+/// the sum of their inputs modulo `modulus`.
+#[derive(Clone, Debug)]
+struct Item {
+    forward: bool,
+    inputs: Vec<Item2Input>,
+    modulus: u32,
+}
+
+/// Input of a writing graph: signal `i` or item `i`.
+#[derive(Clone, Copy, Debug)]
+enum Item2Input {
+    Signal(usize),
+    Item(usize),
+}
+
+#[derive(Clone, Debug)]
+struct WritingGraph {
+    signals: usize,
+    items: Vec<Item>,
+    readers: Vec<Vec<Item2Input>>,
+    clamps: Vec<Clamp>,
+}
+
+/// An effect that reads signal `signal` (directly or through a memo) and
+/// lowers it to `limit` when it's higher: a computation writing its own
+/// source mid-run.
+#[derive(Clone, Copy, Debug)]
+struct Clamp {
+    signal: usize,
+    limit: u32,
+    via_memo: bool,
+}
+
+fn item_input(signals: usize, items: usize) -> BoxedStrategy<Item2Input> {
+    let signal = (0..signals).prop_map(Item2Input::Signal);
+    if items == 0 {
+        signal.boxed()
+    } else {
+        prop_oneof![signal, (0..items).prop_map(Item2Input::Item)].boxed()
+    }
+}
+
+fn writing_graph() -> impl Strategy<Value = WritingGraph> {
+    (1usize..4, 1usize..7, 1usize..5).prop_flat_map(|(signals, item_count, readers)| {
+        let items: Vec<BoxedStrategy<Item>> = (0..item_count)
+            .map(|i| {
+                (
+                    any::<bool>(),
+                    prop::collection::vec(item_input(signals, i), 1..4),
+                    2u32..6,
+                )
+                    .prop_map(|(forward, inputs, modulus)| Item {
+                        forward,
+                        inputs,
+                        modulus,
+                    })
+                    .boxed()
+            })
+            .collect();
+        let readers = prop::collection::vec(
+            prop::collection::vec(item_input(signals, item_count), 1..4),
+            readers,
+        );
+        let clamps = prop::collection::vec(
+            (0..signals, 0u32..3, any::<bool>()).prop_map(|(signal, limit, via_memo)| Clamp {
+                signal,
+                limit,
+                via_memo,
+            }),
+            0..3,
+        );
+        (Just(signals), items, readers, clamps).prop_map(|(signals, items, readers, clamps)| {
+            WritingGraph {
+                signals,
+                items,
+                readers,
+                clamps,
+            }
+        })
+    })
+}
+
+enum ItemHandle {
+    Memo(Memo<u32>),
+    Forwarded(Signal<u32>),
+}
+
+fn read_item(signals: &[Signal<u32>], items: &[ItemHandle], input: Item2Input) -> u32 {
+    match input {
+        Item2Input::Signal(i) => signals[i].get(),
+        Item2Input::Item(i) => match items[i] {
+            ItemHandle::Memo(m) => m.get(),
+            ItemHandle::Forwarded(s) => s.get(),
+        },
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Effects that write signals others read: no write is lost and
+    /// nothing gets stuck. Values are right after every batch, and a reader
+    /// whose inputs changed ran and last saw the final values. (Readers of
+    /// forwarded signals may also run on an intermediate value: effects
+    /// aren't memos.)
+    #[test]
+    fn graphs_whose_effects_write_settle(
+        (graph, writes) in writing_graph().prop_flat_map(|g| {
+            let signals = g.signals;
+            (Just(g), batches(signals))
+        })
+    ) {
+        let scope = Scope::new();
+        let (signals, items, logs, clamp_logs) = scope.run(|| {
+            let signals: Vec<Signal<u32>> = (0..graph.signals).map(|_| signal(0)).collect();
+            let mut items: Vec<ItemHandle> = Vec::new();
+            for item in &graph.items {
+                let earlier: Rc<Vec<ItemHandle>> = Rc::new(items.iter().map(|h| match h {
+                    ItemHandle::Memo(m) => ItemHandle::Memo(*m),
+                    ItemHandle::Forwarded(s) => ItemHandle::Forwarded(*s),
+                }).collect());
+                let (signals, inputs, modulus) = (signals.clone(), item.inputs.clone(), item.modulus);
+                let sum = move || {
+                    inputs.iter().map(|&i| read_item(&signals, &earlier, i)).sum::<u32>() % modulus
+                };
+                items.push(if item.forward {
+                    let out = signal(0);
+                    effect(move || {
+                        let value = sum();
+                        out.set_if_changed(value);
+                    });
+                    ItemHandle::Forwarded(out)
+                } else {
+                    ItemHandle::Memo(memo(move |_| sum()))
+                });
+            }
+            let items = Rc::new(items);
+            let logs: Vec<Rc<RefCell<Vec<Vec<u32>>>>> = graph.readers.iter().map(|reads| {
+                let log = Rc::new(RefCell::new(Vec::new()));
+                let (signals, items, reads, sink) = (signals.clone(), items.clone(), reads.clone(), log.clone());
+                effect(move || {
+                    let seen = reads.iter().map(|&i| read_item(&signals, &items, i)).collect();
+                    sink.borrow_mut().push(seen);
+                });
+                log
+            }).collect();
+            let clamp_logs: Vec<Rc<RefCell<Vec<u32>>>> = graph.clamps.iter().map(|clamp| {
+                let log = Rc::new(RefCell::new(Vec::new()));
+                let (target, limit, sink) = (signals[clamp.signal], clamp.limit, log.clone());
+                let through = clamp.via_memo.then(|| memo(move |_| target.get()));
+                effect(move || {
+                    let value = through.map_or_else(|| target.get(), |m| m.get());
+                    sink.borrow_mut().push(value);
+                    if value > limit {
+                        target.set(limit);
+                    }
+                });
+                log
+            }).collect();
+            (signals, items, logs, clamp_logs)
+        });
+
+        let evaluate = |current: &[u32]| {
+            let mut values: Vec<u32> = Vec::new();
+            for item in &graph.items {
+                let v = item.inputs.iter().map(|&i| match i {
+                    Item2Input::Signal(s) => current[s],
+                    Item2Input::Item(k) => values[k],
+                }).sum::<u32>() % item.modulus;
+                values.push(v);
+            }
+            values
+        };
+        let reads = |inputs: &[Item2Input], current: &[u32], values: &[u32]| -> Vec<u32> {
+            inputs.iter().map(|&i| match i {
+                Item2Input::Signal(s) => current[s],
+                Item2Input::Item(k) => values[k],
+            }).collect()
+        };
+
+        let mut current = vec![0u32; graph.signals];
+        let mut values = evaluate(&current);
+        for batch_writes in writes {
+            let before: Vec<usize> = logs.iter().map(|l| l.borrow().len()).collect();
+            let clamps_before: Vec<usize> = clamp_logs.iter().map(|l| l.borrow().len()).collect();
+            let previous = values.clone();
+            let previous_signals = current.clone();
+            let mut written = vec![false; graph.signals];
+            batch(|| {
+                for &(i, value) in &batch_writes {
+                    signals[i].set(value);
+                    current[i] = value;
+                    written[i] = true;
+                }
+            });
+            for clamp in &graph.clamps {
+                current[clamp.signal] = current[clamp.signal].min(clamp.limit);
+            }
+            for (i, expected) in current.iter().enumerate() {
+                prop_assert_eq!(signals[i].get_untracked(), *expected, "signal {}", i);
+            }
+            for (c, clamp) in graph.clamps.iter().enumerate() {
+                let log = clamp_logs[c].borrow();
+                // Directly, it hears of every write. Through a memo, only of
+                // a net change: another clamp may have lowered the value
+                // back before this one was checked.
+                let notified = if clamp.via_memo {
+                    current[clamp.signal] != previous_signals[clamp.signal]
+                } else {
+                    written[clamp.signal]
+                };
+                if notified {
+                    prop_assert!(log.len() > clamps_before[c], "clamp {} missed a write", c);
+                }
+                if log.len() > clamps_before[c] {
+                    // It saw its own write: it ran again after lowering it.
+                    prop_assert_eq!(*log.last().unwrap(), current[clamp.signal], "clamp {}", c);
+                }
+            }
+            values = evaluate(&current);
+            for (k, expected) in values.iter().enumerate() {
+                let actual = match items[k] {
+                    ItemHandle::Memo(m) => m.get_untracked(),
+                    ItemHandle::Forwarded(s) => s.get_untracked(),
+                };
+                prop_assert_eq!(actual, *expected, "item {}", k);
+            }
+            for (r, inputs) in graph.readers.iter().enumerate() {
+                let log = logs[r].borrow();
+                let ran = log.len() > before[r];
+                let touched = inputs.iter().any(|&i| match i {
+                    Item2Input::Signal(s) => written[s],
+                    Item2Input::Item(k) => values[k] != previous[k],
+                });
+                // A forwarder can write an intermediate value before the
+                // one it forwards from has run (effects have no order),
+                // so a reader may run although its final inputs equal the
+                // old ones. It must never miss a change, though.
+                prop_assert!(ran || !touched, "reader {} missed a change", r);
+                if ran {
+                    prop_assert_eq!(log.last().cloned().unwrap(), reads(inputs, &current, &values));
+                }
+            }
+        }
+        scope.dispose();
+    }
+}
