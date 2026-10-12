@@ -130,6 +130,12 @@ impl RecordBuilder {
     }
 
     /// Marks the record as a segment of a larger blob (spec §5.3).
+    ///
+    /// In encrypted documents, `nonce_prefix` MUST be fresh random bytes for
+    /// every blob, shared by its segments only: segment nonces are the
+    /// prefix plus the segment index (spec §6.3.2), so reusing a prefix under
+    /// the same epoch reuses nonces. Use `imaginarium_crypto::blob_records`,
+    /// which does this, instead of building segments by hand.
     pub fn segment(
         mut self,
         index: u32,

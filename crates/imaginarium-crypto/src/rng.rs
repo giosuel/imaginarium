@@ -45,6 +45,11 @@ impl Prefilled {
         Ok(Self { bytes, pos: 0 })
     }
 
+    /// Bytes not taken yet.
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
     fn take(&mut self, dest: &mut [u8]) -> std::result::Result<(), RandomnessExhausted> {
         let end = self.pos + dest.len();
         let src = self.bytes.get(self.pos..end).ok_or(RandomnessExhausted)?;

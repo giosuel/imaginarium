@@ -291,6 +291,14 @@ pub fn wrap_hpke(
         &mut encap_rng,
     )
     .map_err(|err| CryptoError::InvalidInput(format!("HPKE seal: {err:?}")))?;
+    // The encapsulation must use exactly the randomness prepared for it. If
+    // an `hpke` update draws more, `UnwrapErr` stops it (a panic, never weak
+    // randomness); if it draws less, this catches the changed assumption.
+    if encap_rng.0.remaining() != 0 {
+        return Err(CryptoError::InvalidInput(
+            "HPKE encapsulation used less randomness than expected".into(),
+        ));
+    }
     Ok(pb::KeyWrap {
         kind: pb::WrapKind::Hpke as i32,
         recipient_id: recipient_id.0.to_vec(),
@@ -390,9 +398,25 @@ fn decode_keyrings(
         .collect()
 }
 
+/// How many different Argon2 keys one [`PasswordKeys`] derives at most.
+/// Every password wrap may have its own salt and parameters, and each
+/// derivation can cost up to 1 GiB and 16 passes (spec §6.4.1). Without a
+/// cap, a crafted file with many wraps would take hours to reject a wrong
+/// password. Real files need one, or one per epoch.
+pub const MAX_PASSWORD_DERIVATIONS: usize = 16;
+
+/// The salt and parameters a password KEK is derived with.
+type KekId = (Vec<u8>, u32, u32, u32);
+
 /// Unlocks documents with a password ([`KeyProvider`]).
+///
+/// Each key derived from the password is kept for the provider's lifetime,
+/// so wraps that share a salt, and repeated opens (recovery may unlock more
+/// than once), run Argon2 once. At most [`MAX_PASSWORD_DERIVATIONS`]
+/// different keys are derived; wraps beyond that count as not unwrappable.
 pub struct PasswordKeys {
     password: Zeroizing<String>,
+    keks: std::collections::HashMap<KekId, Zeroizing<[u8; 32]>>,
 }
 
 impl PasswordKeys {
@@ -400,7 +424,34 @@ impl PasswordKeys {
     pub fn new(password: &str) -> Self {
         Self {
             password: Zeroizing::new(password.to_owned()),
+            keks: std::collections::HashMap::new(),
         }
+    }
+
+    fn unwrap(&mut self, doc_id: &DocId, epoch: u32, wrap: &pb::KeyWrap) -> Result<EpochKey> {
+        let params = wrap.argon2.as_ref().ok_or_else(|| {
+            CryptoError::InvalidInput("password wrap without Argon2 parameters".into())
+        })?;
+        let id = (
+            params.salt.clone(),
+            params.memory_kib,
+            params.iterations,
+            params.parallelism,
+        );
+        if !self.keks.contains_key(&id) {
+            if self.keks.len() >= MAX_PASSWORD_DERIVATIONS {
+                return Err(CryptoError::Kdf(format!(
+                    "more than {MAX_PASSWORD_DERIVATIONS} different password keys in one document"
+                )));
+            }
+            let kek = password_kek(&self.password, params)?;
+            self.keks.insert(id.clone(), kek);
+        }
+        let kek = self
+            .keks
+            .get(&id)
+            .ok_or_else(|| CryptoError::Kdf("password key missing".into()))?;
+        aead_unwrap(kek, doc_id, epoch, wrap)
     }
 }
 
@@ -410,11 +461,10 @@ impl KeyProvider for PasswordKeys {
         header: &FileHeader,
         key_records: &[Record],
     ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
-        let password = self.password.clone();
         let keyrings = keyrings(&header.doc_id, key_records)?;
         unlock(keyrings, |epoch, wrap| {
             (wrap.kind() == pb::WrapKind::Password)
-                .then(|| unwrap_password(&header.doc_id, epoch, wrap, &password))
+                .then(|| self.unwrap(&header.doc_id, epoch, wrap))
         })
     }
 }
@@ -571,7 +621,20 @@ fn unlock(
         for epoch in &keyring.epochs {
             for wrap in &epoch.wraps {
                 match try_unwrap(epoch.epoch, wrap) {
-                    Some(Ok(key)) => keys.insert(key),
+                    Some(Ok(key)) => {
+                        // Spec §6.4: all wraps of an epoch hold the same key.
+                        // Otherwise which one counts would depend on order.
+                        if let Ok(known) = keys.get(key.epoch())
+                            && known.bytes() != key.bytes()
+                        {
+                            return Err(CryptoError::InvalidInput(format!(
+                                "two wraps of epoch {} hold different keys",
+                                key.epoch()
+                            ))
+                            .into());
+                        }
+                        keys.insert(key);
+                    }
                     Some(Err(err)) => last_error = Some(err),
                     None => {}
                 }
@@ -705,6 +768,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn password_keys_derive_each_kek_once_and_only_a_few() {
+        let key = EpochKey::from_bytes(1, [9; 32]);
+        let header = FileHeader::new(DOC, true);
+        let keyring = |wraps: Vec<pb::KeyWrap>| {
+            let keyring = pb::Keyring {
+                epochs: vec![pb::EpochKeys { epoch: 1, wraps }],
+            };
+            keyring_record(&DOC, ObjectId([1; 32]), &keyring, false).unwrap()
+        };
+        // The same salt twice, and two opens (recovery may unlock more than
+        // once): Argon2 runs once.
+        let wrap = wrap_password(&DOC, &key, "pw", FAST, &mut OsRandomness).unwrap();
+        let record = keyring(vec![wrap.clone(), wrap]);
+        let mut keys = PasswordKeys::new("pw");
+        for _ in 0..2 {
+            assert!(keys.opener(&header, std::slice::from_ref(&record)).is_ok());
+        }
+        assert_eq!(keys.keks.len(), 1);
+
+        // A hostile file with many salts: a wrong password runs Argon2 a
+        // bounded number of times, not once per wrap.
+        let wraps = (0..40)
+            .map(|_| wrap_password(&DOC, &key, "pw", FAST, &mut OsRandomness).unwrap())
+            .collect();
+        let mut wrong = PasswordKeys::new("nope");
+        assert!(wrong.opener(&header, &[keyring(wraps)]).is_err());
+        assert_eq!(wrong.keks.len(), MAX_PASSWORD_DERIVATIONS);
+    }
+
+    #[test]
+    fn all_wraps_of_an_epoch_must_hold_the_same_key() {
+        // Spec §6.4. Otherwise which key wins depends on keyring order.
+        let header = FileHeader::new(DOC, true);
+        let wraps = [[1; 32], [2; 32]]
+            .map(|bytes| {
+                let key = EpochKey::from_bytes(1, bytes);
+                wrap_password(&DOC, &key, "pw", FAST, &mut OsRandomness).unwrap()
+            })
+            .to_vec();
+        let keyring = pb::Keyring {
+            epochs: vec![pb::EpochKeys { epoch: 1, wraps }],
+        };
+        let record = keyring_record(&DOC, ObjectId([1; 32]), &keyring, false).unwrap();
+        let err = PasswordKeys::new("pw")
+            .opener(&header, &[record])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("different keys"), "{err}");
     }
 
     #[test]
