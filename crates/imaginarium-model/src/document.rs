@@ -11,7 +11,7 @@ use loro::{
 use crate::changes::{ChangeOrigin, ChangeSet};
 use crate::error::{ModelError, ReadOnlyReason, Result};
 use crate::ids::{Actor, UndoScope};
-use crate::schema::{self, DocumentKind, root};
+use crate::schema::{self, DocumentKind, node, root};
 use crate::txn::Transaction;
 use crate::value::Value;
 use crate::view::{DocumentView, RawEvent, apply_events, build};
@@ -95,11 +95,14 @@ pub struct Document {
     _subscription: Subscription,
     undo_user: UndoManager,
     undo_ai: UndoManager,
+    /// The actor message of the undo or redo in progress (see
+    /// [`undo_manager`]).
+    undo_message: Arc<Mutex<String>>,
     mode: Mode,
 }
 
-fn lock(inbox: &Mutex<Vec<RawEvent>>) -> MutexGuard<'_, Vec<RawEvent>> {
-    inbox
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -117,13 +120,30 @@ fn new_loro() -> LoroDoc {
     doc
 }
 
-fn undo_manager(doc: &LoroDoc, scope: UndoScope, config: UndoConfig) -> UndoManager {
+/// An undo stack for `scope`.
+///
+/// Loro commits every step it pops separately. When a step turns out to be
+/// a no-op (its target is gone), its empty commit uses up the pending commit
+/// message and origin, so the step that follows would be committed as
+/// Loro's anonymous `undo`: unattributed, and recorded by the other stack.
+/// `on_pop` therefore sets them again after every popped step.
+fn undo_manager(
+    doc: &LoroDoc,
+    scope: UndoScope,
+    config: UndoConfig,
+    message: Arc<Mutex<String>>,
+) -> UndoManager {
     let mut manager = UndoManager::new(doc);
     for prefix in scope.excluded_origins() {
         manager.add_exclude_origin_prefix(prefix);
     }
     manager.set_merge_interval(config.merge_interval_ms);
     manager.set_max_undo_steps(config.max_steps);
+    let doc = doc.clone();
+    manager.set_on_pop(Some(Box::new(move |_, _, _| {
+        doc.set_next_commit_message(&lock(&message));
+        doc.set_next_commit_origin(scope.undo_origin());
+    })));
     manager
 }
 
@@ -178,9 +198,11 @@ impl Document {
             lock(&sink).push(RawEvent::from_event(&event));
         }));
         let view = build(&doc);
+        let undo_message = Arc::new(Mutex::new(String::new()));
         Self {
-            undo_user: undo_manager(&doc, UndoScope::User, undo),
-            undo_ai: undo_manager(&doc, UndoScope::Assistant, undo),
+            undo_user: undo_manager(&doc, UndoScope::User, undo, undo_message.clone()),
+            undo_ai: undo_manager(&doc, UndoScope::Assistant, undo, undo_message.clone()),
+            undo_message,
             doc,
             view,
             inbox,
@@ -347,16 +369,63 @@ impl Document {
         if let Mode::ReadOnly(reason) = &self.mode {
             return Err(ModelError::ReadOnly(reason.clone()));
         }
-        self.doc.set_next_commit_message(&by.message());
-        self.doc.set_next_commit_origin(scope.undo_origin());
-        let manager = self.manager(scope);
-        let done = if undo {
-            manager.undo()?
-        } else {
-            manager.redo()?
-        };
-        let changes = self.drain(ChangeOrigin::Undo(scope));
-        Ok(done.then_some(changes))
+        let message = by.message();
+        *lock(&self.undo_message) = message.clone();
+        loop {
+            self.doc.set_next_commit_message(&message);
+            self.doc.set_next_commit_origin(scope.undo_origin());
+            let manager = self.manager(scope);
+            let done = if undo { manager.undo() } else { manager.redo() };
+            // `on_pop` set them again after the last step, too.
+            self.doc.clear_next_commit_options();
+            let done = done?;
+            let mut changes = self.drain(ChangeOrigin::Undo(scope));
+            let ghosts = self.remove_ghosts(&changes, &message, scope)?;
+            if !done {
+                return Ok(None);
+            }
+            if ghosts.is_empty() {
+                return Ok(Some(changes));
+            }
+            changes.forget(&ghosts);
+            if !changes.is_empty() {
+                return Ok(Some(changes));
+            }
+            // The step only brought back an empty node: it was stale, like
+            // the no-op steps Loro skips itself. Go on with the next one.
+        }
+    }
+
+    /// Deletes the nodes an undo or redo brought back without any content.
+    ///
+    /// Undoing a move of a node revives the node if it was deleted since.
+    /// If another actor's undo removed it, its properties went with it, and
+    /// what comes back is an empty node without kind or id. The deletion is
+    /// committed with the undo's origin, which neither stack records.
+    fn remove_ghosts(
+        &mut self,
+        changes: &ChangeSet,
+        message: &str,
+        scope: UndoScope,
+    ) -> Result<Vec<crate::NodeId>> {
+        let tree = self.doc.get_tree(root::NODES);
+        let mut ghosts = Vec::new();
+        for &id in &changes.created {
+            let Some(tid) = self.view.handles.get(&id).copied() else {
+                continue;
+            };
+            if tree.get_meta(tid)?.get(node::KIND).is_none() {
+                tree.delete(tid)?;
+                ghosts.push(id);
+            }
+        }
+        if !ghosts.is_empty() {
+            self.doc.set_next_commit_message(message);
+            self.doc.set_next_commit_origin(scope.undo_origin());
+            self.doc.commit();
+            self.drain(ChangeOrigin::Undo(scope));
+        }
+        Ok(ghosts)
     }
 
     /// Whether `scope` has a step to undo.
@@ -428,6 +497,20 @@ impl Document {
     pub fn compact_memory(&self) {
         self.doc.compact_change_store();
         self.doc.free_history_cache();
+    }
+
+    /// The actor recorded for this session's newest change (schema-v1.md
+    /// §11), for tests of attribution only.
+    #[doc(hidden)]
+    pub fn last_local_actor_for_tests(&self) -> Option<Actor> {
+        let peer = self.doc.peer_id();
+        let id = self
+            .doc
+            .oplog_frontiers()
+            .iter()
+            .find(|id| id.peer == peer)?;
+        let message = self.doc.get_change(id)?.message?;
+        Actor::from_message(&message)
     }
 
     /// Writes `meta.schema_version`, for tests of migrations only. The model

@@ -619,3 +619,89 @@ fn deleted_nodes_are_gone_for_the_rest_of_the_transaction() {
     assert!(doc.view().node(child).is_none());
     assert_consistent(&doc);
 }
+
+#[test]
+fn an_undo_that_skips_a_stale_step_stays_on_its_own_stack() {
+    // The user edited a node the assistant created, then the assistant's
+    // step was undone. The user's next undo skips the stale edit (a no-op
+    // now). That skip used to drop the undo's actor and origin, so the
+    // assistant's stack recorded the user's undo as its own step.
+    let mut doc = board();
+    let mine = shape(&mut doc, Parent::Root, 1.0);
+    let ai = Actor::Ai("s1".into());
+    let theirs = doc
+        .transact(&ai, |t| t.create_node(Parent::Root, None, &NodeKind::Shape))
+        .unwrap()
+        .0;
+    doc.transact(&Actor::User, |t| {
+        t.set_geometry(theirs, Geometry::new(5.0, 5.0, 1.0, 1.0))
+    })
+    .unwrap();
+    doc.undo(UndoScope::Assistant, &Actor::User)
+        .unwrap()
+        .unwrap();
+    assert!(doc.can_redo(UndoScope::Assistant));
+    let changes = doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert_eq!(changes.origin, ChangeOrigin::Undo(UndoScope::User));
+    assert_eq!(changes.deleted, vec![mine]);
+    assert_eq!(doc.last_local_actor_for_tests(), Some(Actor::User));
+    assert!(
+        doc.can_redo(UndoScope::Assistant),
+        "the assistant's redo stack was cleared"
+    );
+    assert!(
+        !doc.can_undo(UndoScope::Assistant),
+        "the user's undo landed on the assistant's stack"
+    );
+    // Both stacks still work.
+    doc.redo(UndoScope::Assistant, &Actor::User)
+        .unwrap()
+        .unwrap();
+    assert!(doc.view().node(theirs).is_some());
+    doc.redo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(doc.view().node(mine).is_some());
+    assert_consistent(&doc);
+}
+
+#[test]
+fn undoing_a_move_of_a_node_that_is_gone_leaves_no_empty_node() {
+    // Loro revives a deleted node when a move of it is undone. If another
+    // actor's undo removed the node (and its properties), what comes back
+    // is an empty node without kind or id. Nothing should come back.
+    for into_other in [false, true] {
+        let mut doc = board();
+        let mine = shape(&mut doc, Parent::Root, 1.0);
+        let ai = Actor::Ai("s1".into());
+        let theirs = doc
+            .transact(&ai, |t| t.create_node(Parent::Root, None, &NodeKind::Shape))
+            .unwrap()
+            .0;
+        let target = if into_other {
+            Parent::Node(mine)
+        } else {
+            Parent::Root
+        };
+        doc.transact(&Actor::User, |t| t.move_node(theirs, target, Some(0)))
+            .unwrap();
+        doc.undo(UndoScope::Assistant, &Actor::User)
+            .unwrap()
+            .unwrap();
+        let count = doc.view().node_count();
+        let changes = doc.undo(UndoScope::User, &Actor::User).unwrap();
+        assert!(
+            changes.as_ref().is_none_or(|c| c.created.is_empty()),
+            "{changes:?}"
+        );
+        assert!(doc.view().node_count() <= count);
+        let mut stack: Vec<NodeId> = doc.view().children(Parent::Root).collect();
+        while let Some(id) = stack.pop() {
+            let node = doc.view().node(id).unwrap();
+            assert!(
+                !matches!(node.kind(), NodeKind::Unknown(k) if k.is_empty()),
+                "an empty node came back: {id}"
+            );
+            stack.extend(doc.view().children(Parent::Node(id)));
+        }
+        assert_consistent(&doc);
+    }
+}

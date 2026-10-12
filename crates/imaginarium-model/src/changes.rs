@@ -80,6 +80,15 @@ impl ChangeSet {
             && !self.ext
     }
 
+    /// Drops every mention of `nodes`, for nodes that came and went within
+    /// one change.
+    pub(crate) fn forget(&mut self, nodes: &[NodeId]) {
+        self.created.retain(|id| !nodes.contains(id));
+        self.deleted.retain(|id| !nodes.contains(id));
+        self.moved.retain(|id| !nodes.contains(id));
+        self.changed.retain(|(id, _)| !nodes.contains(id));
+    }
+
     /// What changed about one node (nothing for created or deleted nodes).
     pub fn node(&self, id: NodeId) -> Option<NodeChanges> {
         self.changed
