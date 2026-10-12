@@ -56,7 +56,7 @@ can move between files and servers unchanged.
 
 A reader that doesn't support a record's codec MUST treat the stream as
 unreadable (§10.2). The document schema on top of the codec (containers,
-keys, node kinds) is defined in `schema-v1.md`, which is written in M1.6.
+keys, node kinds, text marks) is defined in [`schema-v1.md`](schema-v1.md).
 
 ### 3.2 Streams
 

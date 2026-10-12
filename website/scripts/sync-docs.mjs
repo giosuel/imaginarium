@@ -26,7 +26,7 @@ const outRoot = resolve(here, '..', 'src', 'content', 'docs', 'developers', 'ref
 const sources = new Map();
 sources.set('docs/PLAN.md', 'developers/reference/plan');
 for (const file of readdirSync(join(repoRoot, 'docs', 'format'))) {
-  if (/^spec-v\d+\.md$/.test(file)) {
+  if (/^(spec|schema)-v\d+\.md$/.test(file)) {
     sources.set(`docs/format/${file}`, `developers/reference/format/${file.replace(/\.md$/, '')}`);
   }
 }

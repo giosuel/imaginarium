@@ -36,6 +36,7 @@ export default defineConfig({
             { label: 'Contributing', link: '/developers/contributing/' },
             { label: 'Project plan', link: '/developers/reference/plan/' },
             { label: '.imag spec (v1)', link: '/developers/reference/format/spec-v1/' },
+            { label: 'Document schema (v1)', link: '/developers/reference/format/schema-v1/' },
             {
               label: 'Design documents',
               items: [{ autogenerate: { directory: 'developers/reference/design' } }],
