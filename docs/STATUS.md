@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.3 CI** (see the checklist below)
+- **Next step:** **M0.4 `imaginarium-profiling`** (see the checklist below)
 - **Code status:** Cargo workspace with 6 crates. The library crates are
   still skeletons. `xtask` has working repo checks (`cargo xtask check`).
   The app only prints its version.
@@ -17,8 +17,9 @@ Last updated: 2026-10-12
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
 - **Environment seen in the planning session:** Linux, Rust 1.99.0 stable,
-  Node 22 / npm 10 (for the website). `cargo-deny` and `cargo-machete` are
-  not installed yet (`cargo install --locked cargo-deny cargo-machete`).
+  Node 22 / npm 10 (for the website). `cargo-deny` 0.20.2 and
+  `cargo-machete` 0.9.2 are installed in `~/.cargo/bin` (official release
+  binaries, SHA-256 verified). CI pins the same versions.
   The pinned toolchain `1.99.0` (with rustfmt and clippy) was auto-installed
   by rustup next to `stable`.
 
@@ -98,19 +99,28 @@ Commit after each item. Each item lists its acceptance criteria (AC).
   - AC: ✅ 16 unit tests, including deliberately wrong dependencies. An
     end-to-end negative test (bad deps plus a file without a header) exits
     with code 1, with fix hints.
-- [ ] **M0.3 CI** (`.github/workflows/ci.yml`) ← **next**
-  - Matrix: ubuntu, windows, macos.
-  - Jobs: fmt, clippy, test, doc (`-D warnings`), `cargo deny`
-    (`deny.toml` with an AGPL-compatible license allowlist: MIT, Apache-2.0,
-    BSD-2/3, ISC, Zlib, MPL-2.0, Unicode-3.0, LGPL/GPL-3.0-compatible as
-    reviewed), `cargo machete`, `cargo xtask check`, and a DCO sign-off
-    check.
-  - AC: the CI workflow runs green on the PR that introduces it, on all 3 OSes.
-  - Then add a `required_status_checks` rule with the CI job names to
-    `.github/rulesets/main.json`, and ask the owner to re-import it.
-  - Note: pushing `.github/workflows/*` requires the owner's token to have
-    "Workflows: read and write" permission.
-- [ ] **M0.4 `imaginarium-profiling`**
+- [x] **M0.3 CI** (done 2026-10-12, PR #3, stacked on #2)
+  - `.github/workflows/ci.yml` runs on PRs into `main` and pushes to `main`:
+    - `lint`: rustfmt, `cargo xtask check`, rustdoc `-D warnings`
+    - `deps`: cargo-deny 0.20.2, cargo-machete 0.9.2
+    - `test`: clippy and tests on linux, windows and macos
+    - `dco`: Signed-off-by
+    - **`CI result`**: the aggregate, and the only required check in the
+      ruleset
+  - `deny.toml`: AGPL-compatible license allowlist, RustSec advisories, no
+    wildcard versions or openssl, crates.io only, 6 targets.
+  - New `cargo xtask check-tracked` blocks agent files and artifacts in git.
+  - Ruleset JSON now also requires "CI result". **The owner must re-import
+    `.github/rulesets/main.json`.**
+  - AC: ✅ the first CI run was green on all 3 OSes (lint 28 s, deps 13 s,
+    test linux 29 s, macos 48 s, windows 59 s).
+  - Actions are pinned to commit SHAs. To update one, look up the new
+    release's commit SHA with `gh api repos/<owner>/<repo>/commits/<tag>
+    --jq .sha`.
+  - The owner's token has the "Workflows" permission (the push succeeded).
+    It **cannot** read repo administration settings (403 on branch
+    protection).
+- [ ] **M0.4 `imaginarium-profiling`** ← **next**
   - `tracing` subscriber setup (env filter, pretty/JSON).
   - Optional `tracy` feature (`tracing-tracy`).
   - `FrameStats` ring buffer (p50/p95/p99 frame time) for the later HUD.

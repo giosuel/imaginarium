@@ -185,13 +185,17 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-cargo xtask check                                         # layering, dependency rules, licenses, SPDX headers
+cargo xtask check                                         # layering, dependency rules, licenses, SPDX headers, tracked files
+cargo deny check                                          # dependency licenses, advisories, bans, sources (deny.toml)
+cargo machete                                             # unused dependencies
 cargo xtask help                                          # list repo automation tasks
 cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
 
-Not available yet:
-- `cargo deny check` arrives with CI in M0.3 (`cargo install --locked cargo-deny`).
+CI (`.github/workflows/ci.yml`) runs all of the above on every PR, with
+tests on Linux, Windows and macOS. Only the aggregate **"CI result"** job is
+required by the ruleset, so jobs can be added without a ruleset change. Pin
+new or updated actions to a full commit SHA, with the tag in a comment.
 
 Workspace layout: product crates live in `crates/imaginarium-<name>/`,
 repo tooling in `xtask/`. Shared lints and profiles are in the root
