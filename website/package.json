@@ -1,0 +1,22 @@
+{
+  "name": "imaginarium-website",
+  "private": true,
+  "version": "0.0.1",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "description": "Imaginarium website: user guides, self-hosting and developer documentation.",
+  "scripts": {
+    "sync-docs": "node scripts/sync-docs.mjs",
+    "dev": "npm run sync-docs && astro dev",
+    "build": "npm run sync-docs && astro build",
+    "preview": "astro preview",
+    "check": "npm run sync-docs && astro check"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.4",
+    "astro": "7.3.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

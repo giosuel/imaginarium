@@ -1,0 +1,93 @@
+---
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Crate layer map (docs/PLAN.md §4.1), drawn with Starlight's theme colors
+// so it works in light and dark mode. Keep it in sync with the PLAN and
+// with LAYERS in xtask/src/layers.rs.
+const layers = [
+  { name: 'apps', crates: 'app (desktop) · hub (server) · cli (imag)' },
+  { name: 'product', crates: 'shell · canvas · ai-ui · admin-ui' },
+  { name: 'features', crates: 'diagram · layout · paint · io-* · packages' },
+  { name: 'services', crates: 'settings · sync · ai · ai-providers · ai-local · mcp · addon-host' },
+  { name: 'toolkit', crates: 'ui · reactive · render · text' },
+  { name: 'core', crates: 'model · commands · format · crypto · protocol' },
+  { name: 'support', crates: 'profiling · test-utils · addon-api' },
+];
+const rowHeight = 46;
+const gap = 8;
+const width = 760;
+const height = layers.length * (rowHeight + gap) + 24;
+---
+
+<figure class="layer-diagram">
+  <svg
+    viewBox={`0 0 ${width} ${height}`}
+    role="img"
+    aria-labelledby="layer-diagram-title layer-diagram-desc"
+  >
+    <title id="layer-diagram-title">Imaginarium crate layers</title>
+    <desc id="layer-diagram-desc">
+      Seven layers from apps at the top to support at the bottom. Dependencies
+      may only point downwards or sideways.
+    </desc>
+    {
+      layers.map((layer, i) => {
+        const y = i * (rowHeight + gap);
+        return (
+          <g>
+            <rect class="band" x="0" y={y} width={width - 60} height={rowHeight} rx="8" />
+            <text class="layer" x="16" y={y + 28}>
+              {layer.name}
+            </text>
+            <text class="crates" x="140" y={y + 28}>
+              {layer.crates}
+            </text>
+          </g>
+        );
+      })
+    }
+    <line class="arrow" x1={width - 30} y1="8" x2={width - 30} y2={height - 34} />
+    <polygon class="arrowhead" points={`${width - 38},${height - 38} ${width - 22},${height - 38} ${width - 30},${height - 24}`} />
+    <text class="note" x={width - 2} y={height - 6} text-anchor="end">
+      depends on
+    </text>
+  </svg>
+  <figcaption>
+    Dependencies point only downwards (or sideways within a layer).
+    <code>cargo xtask check</code> enforces this in CI.
+  </figcaption>
+</figure>
+
+<style>
+  .layer-diagram svg {
+    width: 100%;
+    height: auto;
+  }
+  .band {
+    fill: var(--sl-color-gray-6);
+    stroke: var(--sl-color-gray-5);
+  }
+  .layer {
+    fill: var(--sl-color-accent-high);
+    font-weight: 600;
+    font-size: 15px;
+  }
+  .crates {
+    fill: var(--sl-color-white);
+    font-size: 14px;
+  }
+  .arrow {
+    stroke: var(--sl-color-gray-3);
+    stroke-width: 2;
+  }
+  .arrowhead {
+    fill: var(--sl-color-gray-3);
+  }
+  .note {
+    fill: var(--sl-color-gray-3);
+    font-size: 11px;
+  }
+  figcaption {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+</style>
