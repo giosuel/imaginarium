@@ -8,8 +8,8 @@ Last updated: 2026-10-12
 
 ## Current position
 
-- **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.8 Wrap-up** (see the checklist below)
+- **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
+- **Next step:** **M1.0 Dependency research** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -76,7 +76,7 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
 - [x] Project name **Imaginarium**, license **AGPL-3.0-or-later**, **DCO**
 - [x] `MAINTAINERS.md`, `CONTRIBUTING.md`, this status file (agent files are git-ignored)
 
-## M0: Foundations and profiling (checklist)
+## M0: Foundations and profiling ✅ (tag `v0.0.1-m0`)
 
 Commit after each item. Each item lists its acceptance criteria (AC).
 
@@ -215,7 +215,7 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     `astro.config.mjs` assume `giosuel.github.io/imaginarium`.
   - AC: ✅ `npm run build` (27 pages, ~5 s). Screenshots were sent to the
     owner.
-- [ ] **M0.8 Wrap-up** ← **next**
+- [x] **M0.8 Wrap-up** (done 2026-10-12)
   - [x] Build commands in `MAINTAINERS.md`, kept current with each step.
   - [x] **Code review of M0.4–M0.7** (`/code-review high`). 10 findings,
     all confirmed with a failing test first and fixed in their own PR
@@ -231,23 +231,78 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     - website: the base path was hardcoded. Now `site.config.mjs` plus a
       remark plugin, plus a link checker in CI, which immediately found a
       missing favicon.
-  - [ ] After the owner merges #5–#8: tag `v0.0.1-m0` on `main` and push
-    the tag. Then M0 is done, and M1 starts at xhigh/max effort.
+  - [x] #5–#8 merged. `main` CI green at `171c097`. Annotated tag
+    **`v0.0.1-m0`** pushed.
 
-## After M0 (preview)
+## M1: Format, crypto, model (checklist)
 
-**M1, Format, crypto, model** (use xhigh/max effort). See PLAN §12.
+Use **xhigh/max effort** throughout. These crates are the hardest to change
+later. Commit after each item, and use one PR per item (or smaller). The
+design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
 
-1. Write the normative spec `docs/format/spec-v1.md` and the `.proto` files,
-   derived from `docs/design/file-format.md`.
-2. Write `docs/design/sync-protocol.md`.
-3. `imaginarium-format`: records, index, append, compaction, recovery, and
-   fuzz targets.
-4. `imaginarium-crypto`: suite 1 (hybrid PQ), keyring, ACL chain, test
-   vectors.
-5. `imaginarium-model`: Loro schema, view model, undo, migrations, and the
-   Loro/Yrs/Automerge benchmark.
-6. `imag` CLI (`inspect`, `verify`, `export-json`).
+- [ ] **M1.0 Dependency research** ← **next**
+  - Verify the maturity, maintenance, audits, MSRV and licenses of the
+    candidate crates, and record the result as a design note
+    (`docs/design/m1-dependencies.md`) or an ADR where a decision changes:
+    - AEAD XChaCha20-Poly1305 (`chacha20poly1305`), BLAKE3 (`blake3`),
+      Ed25519 (`ed25519-dalek`), Argon2id (`argon2`);
+    - post-quantum: X-Wing (`x-wing`?), ML-KEM (`ml-kem`), ML-DSA
+      (`ml-dsa`). Is there HPKE support for X-Wing (`hpke`, `hpke-rs`), or
+      do we specify an HPKE-style construction ourselves on top of
+      standard parts?
+    - protobuf: `prost` plus `.proto` as the normative schema. How is code
+      generated without `protoc` (e.g. `protox`), or are structs
+      hand-derived and checked against the `.proto` in a test?
+    - CRDT candidates: `loro` (encoding stability, shallow snapshots,
+      movable tree, rich text), `yrs`, `automerge`. Only the API survey
+      here; the benchmark is M1.5.
+  - AC: every primitive in suite 1 has a chosen crate with version and
+    rationale, or the spec is adjusted to what exists. Open risks are
+    listed.
+- [ ] **M1.1 Normative spec v1**: `docs/format/spec-v1.md` (RFC-style
+  MUST/SHOULD), `docs/format/proto/*.proto`
+  - byte layout (header, record framing, varints, flags, CRC32C, index,
+    trailer);
+  - record types and their payloads;
+  - AEAD AAD/nonce construction, key derivation labels, keyring and
+    signature formats, ACL chain;
+  - compaction and recovery algorithms, and conformance levels;
+  - the test-vector plan.
+  - AC: an independent implementer could write a reader from it alone.
+- [ ] **M1.2 Sync protocol design**: `docs/design/sync-protocol.md`
+  (object exchange, live update frames, presence, server sequence
+  numbers, snapshot GC without plaintext).
+- [ ] **M1.3 `imaginarium-format`**:
+  - container read/write, unencrypted path first;
+  - incremental append, index/trailer, recovery by backward scan,
+    compaction with atomic rename;
+  - `#![forbid(unsafe_code)]`;
+  - proptests (write → read round-trip), `cargo-fuzz` targets for the
+    parser;
+  - benchmarks: open time, append cost.
+- [ ] **M1.4 `imaginarium-crypto`**:
+  - suite 1 wrappers;
+  - key hierarchy (epoch keys, labels);
+  - keyring (password via Argon2id, account and device keys via X-Wing);
+  - record encryption and segmented blobs (STREAM);
+  - signatures (Ed25519, hybrid with ML-DSA for authority records), ACL
+    chain verification;
+  - test vectors in `docs/format/test-vectors/`;
+  - benchmarks against the throughput table in the design.
+- [ ] **M1.5 CRDT benchmark**: Loro vs Yrs vs Automerge on our workloads
+  (10k-shape board, 300-page document, concurrent edits; memory, encode
+  size, apply/merge time) using the `test-utils` fixtures. Confirm ADR-0009
+  or supersede it.
+- [ ] **M1.6 `imaginarium-model`**:
+  - schema (§3 of the design) on the chosen CRDT;
+  - `imbl` view model, transactions, `ChangeSet`;
+  - collaboration-aware undo;
+  - migrations and `required_features`;
+  - proptests: convergence, undo inverse.
+- [ ] **M1.7 `imaginarium-cli` (`imag`)**: `inspect`, `verify`,
+  `export-json`.
+- [ ] **M1.8 Wrap-up**: code review, publish the test vectors, update the
+  website docs, tag `v0.0.2-m1`.
 
 ## Open questions (owner)
 
