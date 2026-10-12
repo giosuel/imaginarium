@@ -33,6 +33,7 @@ imaginarium-reactive = { path = "crates/imaginarium-reactive" }
 imaginarium-render = { path = "crates/imaginarium-render" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
 imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
+imaginarium-ui = { path = "crates/imaginarium-ui" }
 
 # External crates are added here (with exact minor versions) when a
 # milestone first needs them, never speculatively.
@@ -170,6 +171,8 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.fixedbitset]
 opt-level = 0
+[profile.dev.package.foreign-types-macros]
+opt-level = 0
 [profile.dev.package.generic-array]
 opt-level = 0
 [profile.dev.package.gl_generator]
@@ -177,6 +180,8 @@ opt-level = 0
 [profile.dev.package.heck]
 opt-level = 0
 [profile.dev.package.ident_case]
+opt-level = 0
+[profile.dev.package.jni-macros]
 opt-level = 0
 [profile.dev.package.jni-sys-macros]
 opt-level = 0
@@ -218,6 +223,8 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.new_debug_unreachable]
 opt-level = 0
+[profile.dev.package.num_enum_derive]
+opt-level = 0
 [profile.dev.package.pest_derive]
 opt-level = 0
 [profile.dev.package.pest_generator]
@@ -228,11 +235,15 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.phf_shared]
 opt-level = 0
+[profile.dev.package.pin-project-internal]
+opt-level = 0
 [profile.dev.package.pkg-config]
 opt-level = 0
 [profile.dev.package.precomputed-hash]
 opt-level = 0
 [profile.dev.package.prettyplease]
+opt-level = 0
+[profile.dev.package.proc-macro-crate]
 opt-level = 0
 [profile.dev.package.proc-macro2]
 opt-level = 0
@@ -247,6 +258,8 @@ opt-level = 0
 [profile.dev.package.protox]
 opt-level = 0
 [profile.dev.package.protox-parse]
+opt-level = 0
+[profile.dev.package.quick-xml]
 opt-level = 0
 [profile.dev.package.quote]
 opt-level = 0
@@ -272,11 +285,11 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.thiserror-impl]
 opt-level = 0
+[profile.dev.package.toml_edit]
+opt-level = 0
 [profile.dev.package.tracing-attributes]
 opt-level = 0
 [profile.dev.package.unicode-ident]
-opt-level = 0
-[profile.dev.package.unicode-segmentation]
 opt-level = 0
 [profile.dev.package.unicode-xid]
 opt-level = 0
@@ -285,6 +298,8 @@ opt-level = 0
 [profile.dev.package.wasm-bindgen-macro]
 opt-level = 0
 [profile.dev.package.wasm-bindgen-macro-support]
+opt-level = 0
+[profile.dev.package.wayland-scanner]
 opt-level = 0
 [profile.dev.package.wesl]
 opt-level = 0
