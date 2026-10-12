@@ -8,9 +8,11 @@ mod keyring;
 mod keys;
 mod record;
 mod rng;
+mod sign;
 
 pub use error::{CryptoError, Result};
 pub use keyring::*;
 pub use keys::*;
 pub use record::*;
 pub use rng::*;
+pub use sign::*;
