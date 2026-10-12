@@ -262,11 +262,14 @@ impl WindowRenderer {
         );
     }
 
-    /// Draws `scene` (physical pixels) over `background` and presents it.
+    /// Draws `scene` over `background` and presents it. `transform` maps
+    /// the scene's coordinates to physical pixels (the window's scale
+    /// factor, for a scene in logical pixels).
     pub fn render(
         &mut self,
         scene: &Scene,
         background: Color,
+        transform: Affine,
     ) -> Result<FrameOutcome, RenderError> {
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -288,7 +291,7 @@ impl WindowRenderer {
         });
         let (w, h) = clamp_size(self.config.width, self.config.height);
         self.scene.reset_and_resize(w, h);
-        replay(scene, &mut self.scene, Affine::IDENTITY);
+        replay(scene, &mut self.scene, transform);
         let mut encoder = self
             .gpu
             .device
