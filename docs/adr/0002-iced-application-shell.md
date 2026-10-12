@@ -1,6 +1,6 @@
 # 0002. iced as application shell
 
-- Status: Proposed (needs owner confirmation before M1)
+- Status: Superseded by 0007
 - Date: 2026-10-12
 
 ## Context
