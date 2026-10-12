@@ -189,6 +189,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo xtask check                                         # layering, dependency rules, licenses, SPDX headers, tracked files
 cargo deny check                                          # dependency licenses, advisories, bans, sources (deny.toml)
 cargo machete                                             # unused dependencies
+cargo xtask dep-age                                       # two-week rule for every committed Cargo.lock (needs network)
 cargo xtask help                                          # list repo automation tasks
 cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
@@ -217,6 +218,10 @@ releases are the usual window for compromised packages.
   transitive versions, and entries from before a check existed are not
   vetted. This applies to every lockfile, including the separate
   workspaces under `benchmarks/` and `crates/*/fuzz/`.
+- `cargo xtask dep-age` does this for every committed `Cargo.lock` (CI runs
+  it in the deps job) and prints the `cargo update --precise` command for
+  each too-new version. Security-fix exceptions go in
+  `xtask/dep-age-exceptions.txt`, one `name version  # reason` per line.
 - When a requirement in `Cargo.toml` names a too-new minimum (e.g.
   `serde_json = "1.0.154"`), lower it to the version you pin.
 
@@ -247,6 +252,10 @@ that needs a nightly toolchain.
 - Run: `cd crates/imaginarium-format/fuzz && cargo +nightly-2026-09-25 fuzz
   run open_file -- -max_total_time=120`.
 - Seed new targets with the test vectors.
+- CI fuzzes every format target for 10 minutes each week
+  (`.github/workflows/fuzz.yml`, also startable by hand under Actions).
+  Crashing inputs are uploaded as artifacts of the failed run. Add each new
+  target to its matrix.
 - A crash found by fuzzing becomes a regression test in the crate before
   it is fixed.
 

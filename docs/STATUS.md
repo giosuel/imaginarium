@@ -478,15 +478,20 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     - 6 CLI tests running the binary: corrupt bytes, an interrupted save,
       a wrong password, and vectors 10a, 10b and 10c with the owner key.
 - [ ] **M1.8 Wrap-up** ← **next**:
-  - code review, publish the test vectors, update the website docs;
-  - **automate the two-week rule**: an xtask check of **every** entry of
-    every committed `Cargo.lock` (main and `benchmarks/*`), not only new
-    ones (PR #15 found 15 too-new entries from M0). Use the crates.io
-    sparse index (`https://index.crates.io/<path>/<crate>`, field
-    `pubtime`): CDN-served, one request per crate, no API rate limit. The
-    API (`/api/v1/crates/…`) answered HTTP 429 after ~200 requests;
-  - a **weekly CI fuzz job** (nightly, time-boxed);
-  - tag `v0.0.2-m1`.
+  - [x] **two-week rule automated**: `cargo xtask dep-age` checks every
+    entry of every committed `Cargo.lock` against the crates.io sparse
+    index `pubtime` (no API rate limit), and CI runs it in the deps job.
+    Its first run found six too-new versions in
+    `crates/imaginarium-format/fuzz/Cargo.lock`, now pinned;
+  - [x] **weekly CI fuzz job** (`.github/workflows/fuzz.yml`): every
+    format target for 10 minutes on Mondays, seeded with the test vectors,
+    crashing inputs uploaded as artifacts;
+  - [ ] **code review of M1** (separate reviewer agents at medium effort,
+    one each for crypto, format, model, io-native + CLI): fix the
+    confirmed findings test-first, on branch `fix/m1.8-review`;
+  - [ ] spec and schema from "Draft 1" to normative, update the website
+    docs;
+  - [ ] tag `v0.0.2-m1`.
 
 ## Open questions (owner)
 
