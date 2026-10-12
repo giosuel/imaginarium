@@ -6,3 +6,21 @@
 .vscode/
 *.swp
 /profiling/
+
+# AI agent / assistant tooling (never commit)
+.claude/
+CLAUDE.local.md
+**/CLAUDE.local.md
+AGENTS.local.md
+.cursor/
+.cursorrules
+.aider*
+.codex/
+.gemini/
+.windsurf/
+.continue/
+.roo/
+.cline/
+.clinerules
+.agent/
+.agents/
