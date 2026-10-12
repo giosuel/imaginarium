@@ -987,6 +987,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "imaginarium-io-native"
+version = "0.0.1"
+dependencies = [
+ "imaginarium-crypto",
+ "imaginarium-format",
+ "imaginarium-model",
+ "prost",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "imaginarium-model"
 version = "0.0.1"
 dependencies = [
