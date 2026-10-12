@@ -39,3 +39,10 @@ flamegraph*.svg
 dhat-heap.json
 heaptrack.*
 cargo-timing*.html
+
+# Website
+website/node_modules/
+website/dist/
+website/.astro/
+# Generated from docs/ by website/scripts/sync-docs.mjs
+website/src/content/docs/developers/reference/

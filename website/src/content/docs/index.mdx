@@ -1,0 +1,54 @@
+---
+title: Imaginarium
+description: One fast, open office suite. Documents, slides, layouts, diagrams and paint on one board, with built-in AI and end-to-end encrypted collaboration.
+template: splash
+hero:
+  tagline: Documents, presentations, page layouts, diagrams and drawings on one calm, whiteboard-like surface. Native, fast, open source.
+  actions:
+    - text: Read the plan
+      link: developers/reference/plan/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/giosuel/imaginarium
+      icon: github
+      variant: minimal
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Early development">
+Imaginarium is being built in the open. There is no release yet. This site
+grows with the project: the developer documentation is live, and the user
+guides fill in as features ship.
+</Aside>
+
+<CardGrid>
+  <Card title="One board for everything" icon="puzzle">
+    Boards, documents, slides, Publisher-style layouts and paint layers share
+    one document model. Drop a diagram into a slide or a page without
+    converting anything.
+  </Card>
+  <Card title="Calm by default" icon="setting">
+    No ribbon, no menu hunting. A blank canvas, contextual toolbars, and a
+    command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>⌘</kbd><kbd>K</kbd>) that finds every feature and setting.
+  </Card>
+  <Card title="AI that edits with you" icon="rocket">
+    Generate and rewrite text, generate and edit images (inpainting,
+    references, background removal, …), or let an assistant work on your
+    board. It works with local models (Qwen, Mistral, Flux, SD) or APIs
+    (Claude, ChatGPT, …).
+  </Card>
+  <Card title="Private collaboration" icon="approve-check">
+    Real-time editing, sharing, permissions and comments through a small,
+    self-hostable server that **can't read your files**: everything is end-to-end
+    encrypted.
+  </Card>
+  <Card title="Open formats" icon="document">
+    DOCX, ODT, PPTX and ODP in and out, plus `.imag`: a small, documented,
+    extensible native format.
+  </Card>
+  <Card title="Free software" icon="open-book">
+    AGPL-3.0-or-later, for Linux, Windows and macOS. Paid hosting will fund
+    development. The software stays open.
+  </Card>
+</CardGrid>

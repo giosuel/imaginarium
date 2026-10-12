@@ -192,6 +192,10 @@ cargo xtask help                                          # list repo automation
 cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
 
+Website (`website/`, see its README): `npm ci`, then `npm run dev` or
+`npm run build`. Developer reference pages are generated from `docs/`, so
+edit the originals there.
+
 CI (`.github/workflows/ci.yml`) runs all of the above on every PR, with
 tests on Linux, Windows and macOS. Only the aggregate **"CI result"** job is
 required by the ruleset, so jobs can be added without a ruleset change. Pin

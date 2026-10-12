@@ -1,0 +1,58 @@
+---
+title: Architecture
+description: Crate layers, data flow, and the mechanisms behind Imaginarium's performance.
+---
+
+import LayerDiagram from '../../../components/LayerDiagram.astro';
+
+Imaginarium is a Cargo workspace of small crates (`crates/imaginarium-*`),
+arranged in layers. The full rationale is in the
+[project plan](/developers/reference/plan/#4-architecture) and
+the [decision records](/developers/reference/adr/0001-workspace-and-ci/).
+
+## Layers
+
+<LayerDiagram />
+
+The core crates (model, format, crypto, commands, protocol) never depend on
+UI, GPU, networking, async runtimes or AI. That keeps them testable,
+fuzzable and reusable, for example by a future web viewer.
+
+## One way to change a document
+
+Every change, from the user, the AI assistant, an add-on or a remote
+collaborator, takes the same path:
+
+```text
+input ─► command ─► CRDT transaction ─► Loro document ─► diff events ─► view model
+                          │                                              │ change set
+                          ▼                                              ▼
+              encrypt + sign update record                fine-grained signals mark
+                ├─► append to the local .imag file        dirty widgets and nodes
+                └─► Hub (WebSocket) ─► other clients                     ▼
+                                                  incremental layout ─► dirty tiles ─► GPU
+```
+
+- **Commands** ([`imaginarium-commands`](https://github.com/giosuel/imaginarium/tree/main/crates/imaginarium-commands)):
+  everything a user can do is a registered command. The palette, shortcuts,
+  toolbars, add-ons and AI tools all run through `Registry::execute`.
+- **Documents are CRDTs** ([ADR-0009](/developers/reference/adr/0009-crdt-document-model/)),
+  so real-time collaboration through a server that can't read them works
+  without conflicts.
+- **Rendering redraws only what changed**: signals instead of a virtual
+  DOM, a tile cache, and nothing drawn while idle
+  ([ADR-0007](/developers/reference/adr/0007-own-ui-toolkit/)).
+
+## What exists today
+
+| Crate | Status |
+|---|---|
+| `xtask` | Repository checks and the dev-profile generator |
+| `imaginarium-profiling` | Tracing setup, optional Tracy, frame-time statistics |
+| `imaginarium-test-utils` | Deterministic fixtures for the performance budgets |
+| `imaginarium-settings` | Typed settings registry with TOML persistence |
+| `imaginarium-commands` | Command registry, AI tool bridge, keymaps, palette search |
+| `imaginarium-app` | Stub binary |
+
+The rest of the layer map is planned; see the
+[roadmap](/developers/reference/plan/#12-roadmap).

@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.7 Website skeleton** (see the checklist below)
+- **Next step:** **M0.8 Wrap-up** (see the checklist below)
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -42,6 +42,17 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
 - **No GPU** (emulated Cirrus VGA). Screenshots work with Xvfb plus Mesa
   lavapipe (software Vulkan). GPU performance gates (M2) **can't** be
   judged here; they need real hardware.
+- **Screenshots** (owner rule): Playwright 1.63.0 with headless Chromium
+  is installed in `target/screenshot-tool/` (git-ignored, outside the
+  product).
+  - If `target/` was cleaned, recreate it with `npm install --before=<date>
+    --save-exact playwright@1.63.0` and
+    `PLAYWRIGHT_BROWSERS_PATH=$PWD/browsers npx playwright install
+    chromium --only-shell`.
+  - For the website: `npx astro preview --port 4329` in `website/`, then
+    drive Playwright against `http://localhost:4329/imaginarium/`.
+  - For the native app (later): run it under `xvfb-run` with Mesa
+    lavapipe.
 - The linker is the default `rust-lld`. `clang` is present, `mold`/`sccache`
   are not.
 - **Baseline**: clean build of the planned heavy stack (Vello/wgpu, winit,
@@ -190,16 +201,38 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     0.07–0.14 ms.** Budget 1 ms ✅.
   - AC: ✅ 29 unit tests and 1 doctest, including ranking tests and the
     benchmark.
-- [ ] **M0.7 Website skeleton** ← **next** (`website/`, Astro Starlight)
-  - Sections: Home, Download (placeholder), User Guide, Self-hosting,
-    Developer Docs (Architecture overview with a crate-map diagram, ADR
-    index, File format, Contributing), and API reference link.
-  - CI build job.
-  - AC: `npm run build` succeeds locally.
-- [ ] **M0.8 Wrap-up**
-  - Fill in the build commands in `MAINTAINERS.md`.
-  - Code review of M0.
-  - Update this file, then tag `v0.0.1-m0`.
+- [x] **M0.7 Website skeleton** (done 2026-10-12, PR #8, stacked on #7)
+  - `website/`: Astro 7.3.5 + Starlight 0.42.4. Pages: landing, download,
+    guide intro, self-hosting overview, developer overview, architecture
+    (layer diagram component), contributing.
+  - The developer reference (PLAN, file-format design, all ADRs) is
+    **synced from `docs/` at build time** (`scripts/sync-docs.mjs`). The
+    output is git-ignored, so edit `docs/`, not the copies.
+  - Dependency policy: exact versions, `npm install --before=<two weeks
+    ago>`, lockfile committed, `ignore-scripts=true`.
+  - The CI job `website` builds it. **Not deployed yet**: GitHub Pages needs
+    the owner to enable Pages and allow a deploy workflow. `site`/`base` in
+    `astro.config.mjs` assume `giosuel.github.io/imaginarium`.
+  - AC: ✅ `npm run build` (27 pages, ~5 s). Screenshots were sent to the
+    owner.
+- [ ] **M0.8 Wrap-up** ← **next**
+  - [x] Build commands in `MAINTAINERS.md`, kept current with each step.
+  - [x] **Code review of M0.4–M0.7** (`/code-review high`). 10 findings,
+    all confirmed with a failing test first and fixed in their own PR
+    branches, then merged upwards (#5 → #6 → #7 → #8):
+    - settings: unreadable values were erased on save (data loss); a stray
+      entry could replace a table; dynamic values weren't normalized;
+      `#+f+f+f` parsed as a color;
+    - keymap: Super/Win was ignored on Linux/Windows; the `+` key couldn't
+      be bound;
+    - profiling: an empty `IMAGINARIUM_LOG` didn't fall through;
+    - xtask dev-profile: optional features were ignored; CRLF manifests
+      looked stale. Added `.gitattributes` (LF everywhere);
+    - website: the base path was hardcoded. Now `site.config.mjs` plus a
+      remark plugin, plus a link checker in CI, which immediately found a
+      missing favicon.
+  - [ ] After the owner merges #5–#8: tag `v0.0.1-m0` on `main` and push
+    the tag. Then M0 is done, and M1 starts at xhigh/max effort.
 
 ## After M0 (preview)
 
