@@ -9,10 +9,10 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.2 xtask checks** (see the checklist below)
-- **Code status:** Cargo workspace with 6 skeleton crates. Builds, tests,
-  clippy, fmt and docs are all green. There is no functionality yet beyond
-  the app printing its version and `cargo xtask help`.
+- **Next step:** **M0.3 CI** (see the checklist below)
+- **Code status:** Cargo workspace with 6 crates. The library crates are
+  still skeletons. `xtask` has working repo checks (`cargo xtask check`).
+  The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -21,6 +21,32 @@ Last updated: 2026-10-12
   not installed yet (`cargo install --locked cargo-deny cargo-machete`).
   The pinned toolchain `1.99.0` (with rustfmt and clippy) was auto-installed
   by rustup next to `stable`.
+
+## Development machine (measured 2026-10-12)
+
+The owner wants to know whether this machine is a bottleneck (see
+MAINTAINERS.md, "Reporting to the owner"). Known facts:
+
+- **KVM VM**: 8 vCPUs (Haswell, AVX2, no AVX-512), 22 GiB RAM, **no swap**,
+  emulated disk with about 34 GB free. `/tmp` is a **12 GB RAM-backed tmpfs
+  shared with other sessions**. **Never put build `target` dirs in `/tmp`**:
+  it filled up once and killed a build. Use subdirectories of the repo's
+  `target/` for scratch builds.
+- **Shared and busy**: other users' Rust builds, a game server and other
+  Claude sessions often push the load to 9–16 on 8 cores. Wall-clock
+  numbers vary a lot, so compare CPU-seconds.
+- **No GPU** (emulated Cirrus VGA). Screenshots work with Xvfb plus Mesa
+  lavapipe (software Vulkan). GPU performance gates (M2) **can't** be
+  judged here; they need real hardware.
+- The linker is the default `rust-lld`. `clang` is present, `mold`/`sccache`
+  are not.
+- **Baseline**: clean build of the planned heavy stack (Vello/wgpu, winit,
+  Parley, Taffy, AccessKit, Loro, crypto) with our profiles:
+  - debug: 8 min 43 s wall, 2,355 CPU-s, CPU-bound, peak 2.1 GB per process;
+  - release: 5 min 7 s wall, 985 CPU-s.
+
+  The most expensive crates are loro-internal, naga, wgpu-core,
+  x11rb-protocol, syn, accesskit_unix and the zstd-sys C build.
 
 ## Completed
 
@@ -58,22 +84,26 @@ Commit after each item. Each item lists its acceptance criteria (AC).
       `profiling` profile (release + debug info).
     - The workspace version is `0.0.1`. `repository` is set. `homepage`
       follows once the website is deployed (M0.7).
-- [ ] **M0.2 xtask checks** ← **next**
-  - `cargo xtask check-layers`: verify that crate dependencies respect the
-    layer map (define the layer table in `xtask`, mirroring PLAN §4.1) and
-    that every `.rs` file has an SPDX header.
-  - Also enforce that `imaginarium-test-utils` is only a dev-dependency and
-    that nothing depends on `xtask`.
-  - Implementation hint: read `cargo metadata --format-version 1 --no-deps`
-    and parse it. Consider adding `serde_json` to `xtask` only, which keeps
-    product crates dependency-free.
-  - AC: a deliberately wrong dependency makes it fail (unit test).
-- [ ] **M0.3 CI** (`.github/workflows/ci.yml`)
+- [x] **M0.2 xtask checks** (done 2026-10-12, PR #2)
+  - `cargo xtask check` runs `check-layers` and `check-headers`. CI will run
+    this.
+  - `check-layers` reads `cargo metadata --no-deps` (serde_json, an
+    xtask-only dependency). It enforces:
+    - the layer order (PLAN §4.1; dev-deps exempt),
+    - `test-utils` dev-only, and nothing depending on `xtask`,
+    - no UI/GPU/network/async crates in support/core,
+    - AGPL-3.0-or-later on every crate.
+  - The layer table `LAYERS` in `xtask/src/layers.rs` already lists every
+    planned crate. The CLI crate is named `imaginarium-cli` (binary `imag`).
+  - AC: ✅ 16 unit tests, including deliberately wrong dependencies. An
+    end-to-end negative test (bad deps plus a file without a header) exits
+    with code 1, with fix hints.
+- [ ] **M0.3 CI** (`.github/workflows/ci.yml`) ← **next**
   - Matrix: ubuntu, windows, macos.
   - Jobs: fmt, clippy, test, doc (`-D warnings`), `cargo deny`
     (`deny.toml` with an AGPL-compatible license allowlist: MIT, Apache-2.0,
     BSD-2/3, ISC, Zlib, MPL-2.0, Unicode-3.0, LGPL/GPL-3.0-compatible as
-    reviewed), `cargo machete`, `xtask check-layers`, and a DCO sign-off
+    reviewed), `cargo machete`, `cargo xtask check`, and a DCO sign-off
     check.
   - AC: the CI workflow runs green on the PR that introduces it, on all 3 OSes.
   - Then add a `required_status_checks` rule with the CI job names to

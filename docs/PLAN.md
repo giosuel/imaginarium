@@ -101,7 +101,7 @@ Dependencies point **downwards only**. Crates below the line know nothing
 about UI, networking or AI.
 
 ```
- apps        imaginarium-app (desktop)          imaginarium-hub (server)       imag (CLI)
+ apps        imaginarium-app (desktop)          imaginarium-hub (server)       imaginarium-cli (`imag`)
  ─────────────────────────────────────────────────────────────────────────────────────────
  product     shell · canvas · ai-ui · admin-ui
  features    diagram · layout · paint · io-ooxml · io-odf · io-export · packages
@@ -307,7 +307,8 @@ are built in M0, before any feature work.
 - `MAINTAINERS.md` and `CONTRIBUTING.md` describe conventions, the crate map, and
   "how to add a command, setting, format, AI provider or add-on".
 - Lints and checks: clippy `-D warnings`, rustfmt, `cargo deny` (AGPL-compatible
-  license allowlist and advisories), `cargo machete`, and a layering check.
+  license allowlist and advisories), `cargo machete`, and `cargo xtask check`
+  (layering, dependency rules, license metadata, SPDX headers).
 - Tests:
   - unit tests,
   - proptests (CRDT convergence, undo, format round-trip),

@@ -118,6 +118,12 @@ bypass would apply to agents too.
    with all cores at 100 %: more cores would help", or "the linker hits the
    RAM limit and swaps: more RAM is needed". Use `cargo build --timings` for
    per-crate build cost.
+   - Compare **CPU-seconds** (user + sys), not only wall time. The machine
+     may be shared, which skews wall time.
+   - Scratch builds and experiments use a subdirectory of the repo's
+     `target/` (e.g. `CARGO_TARGET_DIR=target/scratch-<name>`), **never
+     `/tmp`**. It may be a small RAM-backed tmpfs. Clean them up afterwards
+     (`cargo clean --target-dir …`).
 4. **Never commit generated artifacts:** screenshots, profiling outputs
    (timings HTML, tracy captures, flamegraphs, perf data, reports), or any
    agent or tool files. Keep them in the agent's scratch directory or in the
@@ -179,17 +185,23 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo xtask check                                         # layering, dependency rules, licenses, SPDX headers
 cargo xtask help                                          # list repo automation tasks
 cargo build --profile profiling                           # release + debug info, for tracy/perf
 ```
 
 Not available yet:
-- `cargo xtask check-layers` (layering and SPDX header check) arrives in M0.2.
 - `cargo deny check` arrives with CI in M0.3 (`cargo install --locked cargo-deny`).
 
 Workspace layout: product crates live in `crates/imaginarium-<name>/`,
 repo tooling in `xtask/`. Shared lints and profiles are in the root
 `Cargo.toml`. Every crate sets `[lints] workspace = true`.
+
+**Adding a crate:** create `crates/imaginarium-<name>/` with the workspace
+package fields and `[lints] workspace = true`. Then check that it is in
+the layer table (`LAYERS` in `xtask/src/layers.rs`) and in the PLAN §4.1
+crate map; most planned crates are listed there already. `cargo xtask
+check` fails for crates without a layer.
 
 ## Decisions and docs
 
