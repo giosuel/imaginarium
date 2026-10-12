@@ -25,10 +25,10 @@ pub(crate) struct KeyArgs {
     /// exported by Imaginarium).
     #[arg(long, value_name = "FILE")]
     pub key_file: Option<PathBuf>,
-    /// With --key-file: the key id (32 hex characters) of the identity that
-    /// must have started the document's ACL chain. Without it, any owner is
-    /// accepted, and `verify` shows who it was.
-    #[arg(long, value_name = "KEYID", requires = "key_file")]
+    /// The key id (32 hex characters) of the identity that must have
+    /// started the document's ACL chain. Without it, any owner is accepted,
+    /// and `verify` warns and shows who it was.
+    #[arg(long, value_name = "KEYID")]
     pub owner: Option<String>,
 }
 
@@ -38,10 +38,17 @@ impl KeyArgs {
         self.password_stdin || self.password_env.is_some() || self.key_file.is_some()
     }
 
-    /// Whether a recipient key is used without an expected owner, so the
-    /// document's origin isn't checked (ADR-0018).
-    pub(crate) fn owner_unchecked(&self) -> bool {
-        self.key_file.is_some() && self.owner.is_none()
+    /// The identity expected to have started the ACL chain (`--owner`).
+    pub(crate) fn expected_owner(&self) -> Result<Option<KeyId>> {
+        self.owner
+            .as_deref()
+            .map(|text| {
+                decode_hex(text)
+                    .ok()
+                    .and_then(|bytes| KeyId::from_slice(&bytes))
+                    .context("--owner takes a key id of 32 hex characters")
+            })
+            .transpose()
     }
 
     /// The credentials. Reads stdin or the key file once.
@@ -71,15 +78,7 @@ impl KeyArgs {
             );
             let keypair =
                 XWingKeyPair::from_private_bytes(&bytes).context("not an X-Wing private key")?;
-            let owner = match &self.owner {
-                Some(text) => Some(
-                    decode_hex(text)
-                        .ok()
-                        .and_then(|bytes| KeyId::from_slice(&bytes))
-                        .context("--owner takes a key id of 32 hex characters")?,
-                ),
-                None => None,
-            };
+            let owner = self.expected_owner()?;
             return Ok(Credentials::Recipient { keypair, owner });
         }
         Ok(Credentials::None)

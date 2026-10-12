@@ -14,7 +14,7 @@ use crate::keys::KeyArgs;
 pub(crate) fn run(path: &Path, keys: &KeyArgs, compact: bool, out: &mut dyn Write) -> Result<()> {
     let opened = imaginarium_io_native::open_path(path, keys.credentials()?)
         .with_context(|| format!("opening {}", path.display()))?;
-    if keys.owner_unchecked()
+    if keys.owner.is_none()
         && let Some(acl) = &opened.acl
     {
         let owner: String = acl

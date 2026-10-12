@@ -7,8 +7,10 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use imaginarium_crypto::{AclState, signer_key_id};
-use imaginarium_format::{FormatError, ObjectId, Record, RecordFlags, RecordType};
+use imaginarium_crypto::{AclState, KeyId, signer_key_id};
+use imaginarium_format::{
+    DocId, FormatError, ObjectId, Record, RecordFlags, RecordType, TRAILER_LEN, Trailer,
+};
 use imaginarium_io_native::{IndexedRecords, NativeError, read_document};
 use imaginarium_model::Mode;
 
@@ -51,9 +53,21 @@ impl Report<'_> {
     }
 }
 
-/// Runs every check. `Ok(true)` if nothing failed.
-pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bool> {
+/// The overall result of `verify`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Every check ran, and none failed.
+    Ok,
+    /// No check failed, but some couldn't run (no key, say).
+    Incomplete,
+    /// At least one check failed.
+    Problems,
+}
+
+/// Runs every check it can.
+pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<Verdict> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let owner = keys.expected_owner()?;
     writeln!(out, "imag verify {}", path.display())?;
     let mut report = Report {
         out,
@@ -63,11 +77,25 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
     };
 
     // 1. Framing and checksums of every record, without keys or the index.
-    let scanned = scan(&bytes)?;
+    let scanned = match scan(&bytes) {
+        Ok(scanned) => scanned,
+        Err(err) => {
+            report.check("records", Outcome::Fail(format!("{err:#}")))?;
+            return finish(report);
+        }
+    };
     let records = scanned.records.len();
+    // Unreadable bytes are an interrupted save only if no commit follows
+    // them: the scan stops there, so check the file's last bytes instead.
+    let ends_with_commit = bytes
+        .len()
+        .checked_sub(TRAILER_LEN)
+        .is_some_and(|start| Trailer::decode(&bytes[start..]).is_ok());
     let outcome = match &scanned.stopped {
         None => Outcome::Ok(format!("{records} records, all checksums valid")),
-        Some((offset, reason)) if scanned.trailers.last().is_some_and(|last| offset > last) => {
+        Some((offset, reason))
+            if !ends_with_commit && scanned.trailers.last().is_some_and(|last| offset > last) =>
+        {
             Outcome::Warn(format!(
                 "{records} records; {} after the last commit can't be read (an interrupted save?): {reason}",
                 size(bytes.len() - offset)
@@ -86,9 +114,16 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
         Err(NativeError::Format(FormatError::NeedsKey)) => {
             let reason = "encrypted: give --password-stdin, --password-env or --key-file";
             report.check("container", Outcome::Skipped(reason.into()))?;
-            for name in ["contents", "blobs", "signatures", "document"] {
+            for name in ["contents", "blobs"] {
                 report.check(name, Outcome::Skipped("needs the key".into()))?;
             }
+            // Key records are plaintext, and signatures cover the stored
+            // (encrypted) bytes: the chain and every signature can be
+            // checked without the key, from all records in the file.
+            let all: Vec<Record> = scanned.records.into_iter().map(|s| s.record).collect();
+            let outcome = signatures(&scanned.header.doc_id, &all, owner);
+            report.check("signatures", outcome)?;
+            report.check("document", Outcome::Skipped("needs the key".into()))?;
             return finish(report);
         }
         Err(err) => {
@@ -114,25 +149,26 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
     // 3. Every indexed record, its content decrypted and decompressed.
     let mut indexed: Vec<Record> = Vec::with_capacity(entries.len());
     let mut problems = Vec::new();
-    for entry in &entries {
-        match reader.read_record(entry) {
-            Ok(record) => indexed.push(record),
-            Err(err) => problems.push(format!("at {}: {err}", entry.offset)),
-        }
-    }
     let mut contents = 0;
-    for (entry, record) in entries.iter().zip(&indexed) {
-        if matches!(record.rtype(), RecordType::INDX) {
-            continue;
+    for entry in &entries {
+        let record = match reader.read_record(entry) {
+            Ok(record) => record,
+            Err(err) => {
+                problems.push(format!("at {}: {err}", entry.offset));
+                continue;
+            }
+        };
+        if record.rtype() != RecordType::INDX {
+            match reader.read_content(entry) {
+                Ok(_) => contents += 1,
+                Err(err) => problems.push(format!(
+                    "{} at {}: {err}",
+                    type_name(record.rtype()),
+                    entry.offset
+                )),
+            }
         }
-        match reader.read_content(entry) {
-            Ok(_) => contents += 1,
-            Err(err) => problems.push(format!(
-                "{} at {}: {err}",
-                type_name(record.rtype()),
-                entry.offset
-            )),
-        }
+        indexed.push(record);
     }
     let encrypted = indexed
         .iter()
@@ -173,32 +209,7 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
 
     // 5. Signatures and the ACL chain.
     let doc_id = reader.header().doc_id;
-    let chain: Vec<Record> = indexed
-        .iter()
-        .filter(|r| r.rtype() == RecordType::ACLC)
-        .cloned()
-        .collect();
-    let signed = indexed
-        .iter()
-        .filter(|r| r.signature_bytes().is_some())
-        .count();
-    if chain.is_empty() {
-        report.check(
-            "signatures",
-            if signed == 0 {
-                Outcome::Ok("no signed records, no ACL chain".into())
-            } else {
-                Outcome::Skipped(format!(
-                    "{signed} signed records, but no ACL chain to check them against"
-                ))
-            },
-        )?;
-    } else {
-        report.check(
-            "signatures",
-            check_acl(&doc_id, &chain, &indexed, keys.owner_unchecked()),
-        )?;
-    }
+    report.check("signatures", signatures(&doc_id, &indexed, owner))?;
 
     // 6. The document itself.
     let records = IndexedRecords::new(&reader);
@@ -232,15 +243,38 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
     finish(report)
 }
 
-/// Replays the chain and checks every keyring and content signature. With
-/// `owner_unchecked` (a recipient key without `--owner`), nothing showed
-/// that the chain is the document's real one, so a valid chain is a warning
-/// that names its owner (ADR-0018).
+/// The signatures check over `records`: the ACL chain among them, every
+/// keyring and every content signature.
+fn signatures(doc_id: &DocId, records: &[Record], owner: Option<KeyId>) -> Outcome {
+    let chain: Vec<Record> = records
+        .iter()
+        .filter(|r| r.rtype() == RecordType::ACLC)
+        .cloned()
+        .collect();
+    if !chain.is_empty() {
+        return check_acl(doc_id, &chain, records, owner);
+    }
+    match records
+        .iter()
+        .filter(|r| r.signature_bytes().is_some())
+        .count()
+    {
+        0 => Outcome::Ok("no signed records, no ACL chain".into()),
+        signed => Outcome::Skipped(format!(
+            "{signed} signed records, but no ACL chain to check them against"
+        )),
+    }
+}
+
+/// Replays the chain and checks every keyring and content signature.
+/// Without an expected `owner` (`--owner`), nothing shows that the chain is
+/// the document's real one, so a valid chain is a warning that names its
+/// owner (ADR-0018).
 fn check_acl(
-    doc_id: &imaginarium_format::DocId,
+    doc_id: &DocId,
     chain: &[Record],
     records: &[Record],
-    owner_unchecked: bool,
+    owner: Option<KeyId>,
 ) -> Outcome {
     let acl = match AclState::replay(doc_id, chain) {
         Ok(acl) => acl,
@@ -263,22 +297,24 @@ fn check_acl(
             }
         }
     }
-    let owner = hex(&acl.genesis_owner().0);
+    let started_by = hex(&acl.genesis_owner().0);
     let summary = format!(
-        "ACL chain valid ({} changes, {} members, epoch {}, started by {owner}); \
+        "ACL chain valid ({} changes, {} members, epoch {}, started by {started_by}); \
          {verified} records verified",
         acl.next_index(),
         acl.members().len(),
         acl.epoch()
     );
-    if !problems.is_empty() {
-        Outcome::Fail(summarize(&problems))
-    } else if owner_unchecked {
-        Outcome::Warn(format!(
-            "{summary}, but the owner wasn't checked: pass --owner {owner} if you trust it"
-        ))
-    } else {
-        Outcome::Ok(summary)
+    match owner {
+        _ if !problems.is_empty() => Outcome::Fail(summarize(&problems)),
+        Some(owner) if owner != acl.genesis_owner() => Outcome::Fail(format!(
+            "the ACL chain was started by {started_by}, not by the expected owner {}",
+            hex(&owner.0)
+        )),
+        Some(_) => Outcome::Ok(summary),
+        None => Outcome::Warn(format!(
+            "{summary}, but the owner wasn't checked: pass --owner {started_by} if you trust it"
+        )),
     }
 }
 
@@ -299,7 +335,7 @@ fn summarize(problems: &[String]) -> String {
     text
 }
 
-fn finish(report: Report<'_>) -> Result<bool> {
+fn finish(report: Report<'_>) -> Result<Verdict> {
     let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let mut notes = Vec::new();
     if report.warnings > 0 {
@@ -313,14 +349,19 @@ fn finish(report: Report<'_>) -> Result<bool> {
     } else {
         format!(" ({})", notes.join(", "))
     };
-    let summary = if report.failures == 0 {
-        format!("Result: ok{notes}")
-    } else {
-        format!(
-            "Result: {} found{notes}",
-            plural(report.failures, "problem")
+    let (summary, verdict) = if report.failures > 0 {
+        (
+            format!(
+                "Result: {} found{notes}",
+                plural(report.failures, "problem")
+            ),
+            Verdict::Problems,
         )
+    } else if report.skipped > 0 {
+        (format!("Result: incomplete{notes}"), Verdict::Incomplete)
+    } else {
+        (format!("Result: ok{notes}"), Verdict::Ok)
     };
     writeln!(report.out, "{summary}")?;
-    Ok(report.failures == 0)
+    Ok(verdict)
 }

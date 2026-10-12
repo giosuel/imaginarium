@@ -179,9 +179,11 @@ fn verify_passes_good_files_and_explains_problems() {
     );
     assert_eq!(out.code, 0, "{}", out.stdout);
     assert!(out.stdout.contains("decrypted"));
+    // Without the key some checks can't run: not a failure, but not "ok"
+    // either, so `imag verify f && deploy` doesn't pass unchecked files.
     let out = imag(&["verify", s(&secret)], None, &[]);
-    assert_eq!(out.code, 0, "skipped checks are not failures");
-    assert!(out.stdout.contains("skipped"), "{}", out.stdout);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    assert!(out.stdout.contains("Result: incomplete"), "{}", out.stdout);
     let out = imag(
         &["verify", "--password-stdin", s(&secret)],
         Some("wrong\n"),
@@ -207,6 +209,96 @@ fn verify_passes_good_files_and_explains_problems() {
     std::fs::write(&torn_path, &torn).unwrap();
     let out = imag(&["verify", s(&torn_path)], None, &[]);
     assert!(out.stdout.contains("warn  records"), "{}", out.stdout);
+
+    // A damaged header is a problem in the file, not a failure to run.
+    let mut headless = std::fs::read(&plain).unwrap();
+    headless[0] ^= 0xff;
+    let headless_path = dir.join("headless.imag");
+    std::fs::write(&headless_path, &headless).unwrap();
+    let out = imag(&["verify", s(&headless_path)], None, &[]);
+    assert_eq!(out.code, 1, "{}{}", out.stdout, out.stderr);
+    assert!(out.stdout.contains("FAIL  records"), "{}", out.stdout);
+}
+
+#[test]
+fn verify_tells_corruption_inside_the_file_from_an_interrupted_save() {
+    // Vector 2: two commits. Damage the update of the second one: a later
+    // commit follows, so this is corruption, not an interrupted save.
+    let dir = scratch("midfile");
+    let mut bytes = std::fs::read(vector("02-two-commits.imag")).unwrap();
+    bytes[427 + 10] ^= 0xff;
+    let path = dir.join("midfile.imag");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = imag(&["verify", s(&path)], None, &[]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.stdout.contains("FAIL  records"), "{}", out.stdout);
+}
+
+#[test]
+fn verify_reports_each_unreadable_record_once() {
+    // Damage META (the first record of vector 1). The other entries must
+    // still be content-checked against their own records.
+    let dir = scratch("meta");
+    let mut bytes = std::fs::read(vector("01-minimal.imag")).unwrap();
+    bytes[36 + 20] ^= 0xff;
+    let path = dir.join("meta.imag");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = imag(&["verify", s(&path)], None, &[]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    let contents = out
+        .stdout
+        .lines()
+        .find(|line| line.contains("contents"))
+        .unwrap()
+        .to_owned();
+    assert_eq!(contents.matches("at 36").count(), 1, "{contents}");
+    assert!(!contents.contains("SNAP at 36"), "{contents}");
+}
+
+#[test]
+fn verify_checks_the_acl_chain_without_a_key() {
+    // Key records are plaintext and signatures cover the stored bytes: an
+    // unauthorized change is caught without the key.
+    let out = imag(
+        &["verify", s(&vector("10c-acl-unauthorized.imag"))],
+        None,
+        &[],
+    );
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(
+        out.stdout.contains("not allowed to add a member"),
+        "{}",
+        out.stdout
+    );
+    let out = imag(&["verify", s(&vector("10a-acl-chain.imag"))], None, &[]);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    assert!(out.stdout.contains("ACL chain valid"), "{}", out.stdout);
+}
+
+#[test]
+fn inspect_survives_hostile_segment_headers() {
+    use imaginarium_format::{DocId, FileHeader, ObjectId, RecordBuilder, RecordType, Writer};
+    let dir = scratch("segments");
+    let mut writer = Writer::create(
+        std::io::Cursor::new(Vec::new()),
+        FileHeader::new(DocId([3; 16]), false),
+    )
+    .unwrap();
+    let blob = RecordBuilder::new(RecordType::BLOB, ObjectId([4; 32]))
+        .segment(u32::MAX, 1, 3, Vec::new())
+        .build(&DocId([3; 16]), vec![1, 2, 3], None)
+        .unwrap();
+    writer.append(&blob).unwrap();
+    writer.commit(None).unwrap();
+    let path = dir.join("segments.imag");
+    std::fs::write(&path, writer.into_inner().into_inner()).unwrap();
+    let out = imag(&["inspect", s(&path)], None, &[]);
+    assert_eq!(out.code, 0, "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("segment 4294967296/1"),
+        "{}",
+        out.stdout
+    );
 }
 
 #[test]
