@@ -8,6 +8,7 @@ with the code, or point to the normative spec that replaces it.
 |---|---|---|
 | [`file-format.md`](file-format.md): `.imag` container, objects, CRDT schema, encryption | Accepted | M1 |
 | [`m1-dependencies.md`](m1-dependencies.md): crypto, protobuf and CRDT crate review for M1 | Accepted | M1 |
+| [`crdt-benchmark.md`](crdt-benchmark.md): Loro vs Yrs vs Automerge on our workloads (confirms ADR-0009) | Accepted | M1.5 |
 | [`sync-protocol.md`](sync-protocol.md): client ↔ Hub protocol, live frames, presence, snapshots/GC | Draft (normative in M8) | M1 → M8 |
 | `ui-toolkit.md`: widget tree, signals, frame scheduling, a11y | To be written | M2 |
 | `rendering.md`: scene building, tile cache, compositor, backends | To be written | M2 |
