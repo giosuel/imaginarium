@@ -834,3 +834,58 @@ fn a_failing_migration_opens_the_document_read_only() {
     );
     assert_eq!(doc.view().meta().schema_version(), Some(0));
 }
+
+fn plain(doc: &Document, id: NodeId) -> String {
+    doc.view()
+        .node(id)
+        .unwrap()
+        .text()
+        .map_or_else(String::new, |t| t.to_plain_string())
+}
+
+#[test]
+fn local_edits_keep_the_final_newline() {
+    // schema-v1.md §6: a non-empty text ends with `\n`.
+    let mut doc = board();
+    let id = doc
+        .transact(&Actor::User, |t| {
+            let id = t.create_node(Parent::Root, None, &NodeKind::Text)?;
+            t.insert_text(id, 0, "hello")?;
+            Ok(id)
+        })
+        .unwrap()
+        .0;
+    assert_eq!(plain(&doc, id), "hello\n");
+    // After the final newline: a new paragraph, terminated too.
+    doc.transact(&Actor::User, |t| t.insert_text(id, 6, "x"))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hello\nx\n");
+    // A range up to the end keeps the final newline...
+    doc.transact(&Actor::User, |t| t.delete_text(id, 3, 5))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hel\n");
+    doc.transact(&Actor::User, |t| t.delete_text(id, 3, 1))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "hel\n");
+    // ...unless the whole text goes.
+    doc.transact(&Actor::User, |t| t.delete_text(id, 0, 4))
+        .unwrap();
+    assert_eq!(plain(&doc, id), "");
+    assert_consistent(&doc);
+}
+
+#[test]
+fn a_failed_text_edit_writes_nothing() {
+    // insert_text used to create the `t` container before checking `pos`,
+    // so a command that ignored the error still committed it.
+    let mut doc = board();
+    let id = shape(&mut doc, Parent::Root, 0.0);
+    let (_, changes) = doc
+        .transact(&Actor::User, |t| {
+            assert!(t.insert_text(id, 5, "x").is_err());
+            Ok(())
+        })
+        .unwrap();
+    assert!(changes.is_empty(), "{changes:?}");
+    assert!(doc.view().node(id).unwrap().text().is_none());
+}

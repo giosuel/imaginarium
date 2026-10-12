@@ -463,8 +463,8 @@ impl<'d> Transaction<'d> {
     /// Inserts text at character `pos`. Inserting into an empty text also
     /// adds the final `\n` the schema requires (schema-v1.md §6).
     pub fn insert_text(&mut self, id: NodeId, pos: usize, text: &str) -> Result<()> {
-        let target = self.text(id, true)?.ok_or(ModelError::NoSuchNode(id))?;
-        let len = target.len_unicode();
+        // Check before creating the text container.
+        let len = self.text_len(id)?;
         if pos > len {
             return Err(ModelError::OutOfRange {
                 what: "text position",
@@ -475,14 +475,20 @@ impl<'d> Transaction<'d> {
         if text.is_empty() {
             return Ok(());
         }
+        let target = self.text(id, true)?.ok_or(ModelError::NoSuchNode(id))?;
         target.insert(pos, text)?;
-        if len == 0 && !text.ends_with('\n') {
-            target.insert(text.chars().count(), "\n")?;
+        // At the end (after the final newline, or into an empty text) the
+        // text starts a paragraph of its own, which needs its newline
+        // (schema-v1.md §6).
+        if pos == len && !text.ends_with('\n') {
+            target.insert(pos + text.chars().count(), "\n")?;
         }
         Ok(())
     }
 
-    /// Deletes `len` characters at `pos`.
+    /// Deletes `len` characters at `pos`. A range that ends with the
+    /// text's final newline keeps it, unless it covers the whole text
+    /// (schema-v1.md §6).
     pub fn delete_text(&mut self, id: NodeId, pos: usize, len: usize) -> Result<()> {
         let target = self
             .text(id, false)?
@@ -495,6 +501,9 @@ impl<'d> Transaction<'d> {
                 len: total,
             });
         }
+        let keeps_final_newline =
+            len > 0 && pos > 0 && pos + len == total && target.slice(total - 1, total)? == "\n";
+        let len = len - usize::from(keeps_final_newline);
         if len > 0 {
             target.delete(pos, len)?;
         }
@@ -556,9 +565,11 @@ impl<'d> Transaction<'d> {
                 len,
             });
         }
-        let newline = match find_newline(&target, pos)? {
-            Some(at) => at,
-            None => {
+        let newline = match (find_newline(&target, pos)?, &value) {
+            (Some(at), _) => at,
+            // An unterminated last paragraph has no mark to remove.
+            (None, Value::Null) => return Ok(()),
+            (None, _) => {
                 target.insert(len, "\n")?;
                 len
             }
