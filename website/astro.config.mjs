@@ -35,7 +35,10 @@ export default defineConfig({
             { label: 'Architecture', link: '/developers/architecture/' },
             { label: 'Contributing', link: '/developers/contributing/' },
             { label: 'Project plan', link: '/developers/reference/plan/' },
-            { label: '.imag file format', link: '/developers/reference/design/file-format/' },
+            {
+              label: 'Design documents',
+              items: [{ autogenerate: { directory: 'developers/reference/design' } }],
+            },
             {
               label: 'Architecture decisions',
               collapsed: true,

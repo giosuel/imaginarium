@@ -205,6 +205,13 @@ Workspace layout: product crates live in `crates/imaginarium-<name>/`,
 repo tooling in `xtask/`. Shared lints and profiles are in the root
 `Cargo.toml`. Every crate sets `[lints] workspace = true`.
 
+**Dependency versions** (Rust and npm): adopt a version only once it has
+been public for **at least 14 days**, transitive dependencies included
+(`npm install --before=<date>`; for Cargo, check `cargo tree` and pin with
+`cargo update -p <crate> --precise <version>` if needed). Exception:
+security fixes, documented in the commit. Rationale: freshly published
+releases are the usual window for compromised packages.
+
 **After adding or updating dependencies:** run `cargo xtask dev-profile
 --write` and commit `Cargo.toml` together with `Cargo.lock`. It regenerates
 the dev-profile overrides for compile-time-only crates (ADR-0017). `cargo
