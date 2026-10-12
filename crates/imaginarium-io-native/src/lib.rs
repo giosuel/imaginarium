@@ -36,8 +36,8 @@ use imaginarium_crypto::{
     Suite1Sealer, XWingKeyPair, keyring_record, wrap_password,
 };
 use imaginarium_format::{
-    DocId, Durable, FileHeader, ObjectId, OpenOptions, Reader, Record, RecordBuilder, RecordType,
-    Recovery, StreamKey, Writer, pb,
+    AtomicFile, DocId, Durable, FileHeader, ObjectId, OpenOptions, Reader, Record, RecordBuilder,
+    RecordType, Recovery, StreamKey, Writer, pb,
 };
 use imaginarium_model::{CODEC, Document};
 use prost::Message;
@@ -300,26 +300,17 @@ pub fn save_new<F: Read + Write + Seek + Durable>(
     Ok(writer.into_inner())
 }
 
-/// Saves a new file at `path`, replacing an existing one atomically: the
-/// file is written and synced under a temporary name, then renamed.
+/// Saves `document` as a new file at `path`, replacing an existing one
+/// atomically ([`AtomicFile`]: a temporary file, synced, renamed over it,
+/// keeping its permissions).
+///
+/// The file gets a new document id (spec §4.1), so this is for new files
+/// and "Save as", not for saving an opened file again: that appends to it
+/// (incremental saving, M2).
 pub fn save_new_path(path: &Path, document: &Document, options: &SaveOptions) -> Result<()> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let temporary = path.with_file_name(format!(".{name}.saving"));
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temporary)?;
-    let result = save_new(file, document, options).and_then(|file| Ok(file.sync_all()?));
-    if let Err(err) = result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(err);
-    }
-    std::fs::rename(&temporary, path)?;
+    let mut out = AtomicFile::create(path)?;
+    save_new(out.file(), document, options)?;
+    out.commit()?;
     Ok(())
 }
 

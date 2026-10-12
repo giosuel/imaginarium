@@ -440,19 +440,54 @@ fn compaction_can_replace_a_stream_and_veto_records() {
     );
 }
 
+/// A fresh directory under the workspace's `target/` (never `/tmp`, see
+/// MAINTAINERS.md).
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/test-scratch")
+        .join(format!("format-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn compact_file_replaces_the_file_atomically_on_disk() {
-    let dir =
-        std::env::temp_dir().join(format!("imaginarium-format-compact-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("compact");
     let path = dir.join("doc.imag");
     std::fs::write(&path, sample_file()).unwrap();
+    // Left over by a compaction that crashed: in the way of a fixed name.
+    std::fs::write(dir.join("doc.imag.compact.tmp"), b"stale").unwrap();
     let report = compact_file(&path, None, CompactionPlan::default(), None).unwrap();
     assert_eq!(report.kept, 5);
-    assert!(!dir.join("doc.imag.compact.tmp").exists());
+    assert_eq!(names_in(&dir), ["doc.imag", "doc.imag.compact.tmp"]);
     let reader = Reader::open(std::fs::File::open(&path).unwrap()).unwrap();
     assert!(reader.recovery().is_none());
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_file_keeps_the_file_permissions() {
+    // A private, unencrypted document must not become readable by others.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir("compact-mode");
+    let path = dir.join("doc.imag");
+    std::fs::write(&path, sample_file()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    compact_file(&path, None, CompactionPlan::default(), None).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 // --- Encryption plumbing (real crypto comes from imaginarium-crypto) -------

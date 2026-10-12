@@ -121,6 +121,40 @@ fn saving_to_a_path_replaces_the_file_atomically() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn saving_keeps_permissions_follows_links_and_ignores_planted_files() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = scratch_dir("save-unix");
+    let real = dir.join("real.imag");
+    std::fs::write(&real, b"old contents").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = dir.join("link.imag");
+    symlink(&real, &link).unwrap();
+    // Symlinks at the temporary names a save used to use, planted by
+    // someone else in a shared directory: they must not be followed.
+    let victim = dir.join("victim");
+    std::fs::write(&victim, b"keep me").unwrap();
+    for name in [".link.imag.saving", ".real.imag.saving"] {
+        symlink(&victim, dir.join(name)).unwrap();
+    }
+    let doc = sample();
+    save_new_path(&link, &doc, &options(Protection::None)).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays a link"
+    );
+    let opened = open_path(&real, Credentials::None).unwrap();
+    assert_eq!(opened.document.view(), doc.view());
+    let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "a private document stays private");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn files_without_a_document_fail_cleanly() {
     let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/format/test-vectors");

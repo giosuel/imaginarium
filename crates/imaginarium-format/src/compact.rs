@@ -4,8 +4,9 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::atomic::AtomicFile;
 use crate::header::FileHeader;
 use crate::index::StreamKey;
 use crate::payload::RecordSealer;
@@ -13,7 +14,7 @@ use crate::pb;
 use crate::reader::{KeyProvider, OpenOptions};
 use crate::record::{Record, RecordFlags, RecordType};
 use crate::writer::Durable;
-use crate::{FormatError, Reader, Result, Writer};
+use crate::{Reader, Result, Writer};
 
 /// Decides whether a record is kept during compaction.
 pub type KeepFn = Box<dyn Fn(&pb::IndexEntry) -> bool>;
@@ -141,48 +142,10 @@ pub fn compact_file(
 ) -> Result<CompactionReport> {
     let source = std::fs::File::open(path)?;
     let mut reader = Reader::open_with(source, OpenOptions::default(), keys)?;
-    let temp = temp_path(path)?;
-    let out = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    let result = compact(&mut reader, out, plan, index_sealer);
-    let (writer, report) = match result {
-        Ok(done) => done,
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            return Err(err);
-        }
-    };
+    let mut out = AtomicFile::create(path)?;
+    let (writer, report) = compact(&mut reader, out.file(), plan, index_sealer)?;
     drop(writer); // already synced by commit
     drop(reader);
-    std::fs::rename(&temp, path)?;
-    sync_parent_dir(path)?;
+    out.commit()?;
     Ok(report)
-}
-
-fn temp_path(path: &Path) -> Result<PathBuf> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| FormatError::Invalid(format!("{} has no file name", path.display())))?;
-    let mut temp_name = name.to_os_string();
-    temp_name.push(".compact.tmp");
-    Ok(path.with_file_name(temp_name))
-}
-
-/// Makes the rename durable. On Unix this fsyncs the directory. Other
-/// platforms don't support or need it.
-fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
