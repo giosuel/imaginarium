@@ -1,6 +1,7 @@
 # 0009. CRDT (Loro) as document source of truth + materialized view model
 
-- Status: Accepted
+- Status: Accepted. **Confirmed by the M1.5 benchmark** (2026-10-12,
+  [`docs/design/crdt-benchmark.md`](../design/crdt-benchmark.md)).
 - Date: 2026-10-12
 - Supersedes: 0004
 

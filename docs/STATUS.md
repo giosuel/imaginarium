@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.5 CRDT benchmark** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Next step:** **M1.6 `imaginarium-model`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 8 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -55,6 +55,19 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
     drive Playwright against `http://localhost:4329/imaginarium/`.
   - For the native app (later): run it under `xvfb-run` with Mesa
     lavapipe.
+- **The root disk can fill up without warning**: on 2026-10-12 at ~16:35
+  other users' activity left 250 MB free (the disk is 193 GB, ~13 GB of it
+  ours: `target/` ~8 GB, `~/.rustup` 3.4 GB, `~/.cargo` 1.7 GB). Writes
+  failed with `ENOSPC`. It recovered within minutes (91 GB free). If it
+  happens again, `target/debug/incremental` (~2 GB) is the safe thing of
+  ours to delete. Check `df -h /` before big builds.
+  **If it happens again, diagnose it in the background (owner request)**,
+  read-only: sample `df` every 10 s for ~10 min, list recently started
+  processes of all users (`ps -eo user,pid,etimes,args --sort=etimes`),
+  find large recent files in readable places (`find / -xdev -size +200M
+  -mmin -120`), and check our own deleted-but-open files (`lsof +L1`).
+  Then report when, how much, and the likely cause. Never touch other
+  users' files.
 - The linker is the default `rust-lld`. `clang` is present, `mold`/`sccache`
   are not.
 - **Baseline**: clean build of the planned heavy stack (Vello/wgpu, winit,
@@ -357,12 +370,40 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     state clone per ACL change (replay −26 % overall).
   - Profile: bench build (release, thin LTO) 57 s wall; build plus run
     331 CPU-s, peak 449 MB.
-- [ ] **M1.5 CRDT benchmark**: Loro vs Yrs vs Automerge on our workloads
-  (10k-shape board, 300-page document, concurrent edits; memory, encode
-  size, apply/merge time) using the `test-utils` fixtures. Confirm ADR-0009
-  or supersede it.
-- [ ] **M1.6 `imaginarium-model`**:
-  - schema (§3 of the design) on the chosen CRDT;
+- [x] **M1.5 CRDT benchmark** (done 2026-10-12, branch
+  `feat/m1.5-crdt-benchmark`, stacked on #14). **ADR-0009 is confirmed:
+  Loro.** Results and analysis are in
+  [`docs/design/crdt-benchmark.md`](design/crdt-benchmark.md), and the code
+  is in `benchmarks/crdt/` (a separate workspace, not in CI).
+  - Only Loro has the hard requirements. With a parent-pointer layer on
+    Yrs or Automerge, concurrent moves (A into B, B into A) leave a
+    cycle. History trimming: Loro only. Collaboration-aware undo: Loro and
+    Yrs (verified functionally); Automerge has none.
+  - Budgets: Loro applies remote updates in 18–24 µs (p99 ~55 µs), well
+    under 1 ms with crypto. It opens the 300-page document in 2.7 ms and
+    the 10k-shape board in 106 ms.
+  - Automerge is ruled out: 377 ms per remote keystroke at 911k
+    characters (the cost grows with document size), and 665 ms to open
+    the document.
+  - Loro's weak spots, with follow-ups for M1.6:
+    - snapshots ~3× larger than Yrs after zstd (1.5 MiB for the board),
+      because Loro already LZ4-compresses;
+    - 57 ms to merge a large offline session;
+    - 36 MiB right after building 10k shapes (14 MiB after reopening).
+  - Pitfall recorded: Yrs's catch-up encoding repeats the whole delete
+    set (~2 KB per "update"). Live edits must use the transaction's
+    update.
+  - Profile:
+    - benchmark build (3 CRDT libraries, release, thin LTO): 3 min 26 s
+      wall, 496 CPU-s, 1.35 GB peak;
+    - full run: 14 min 12 s, single-threaded, 849 CPU-s, 371 MB peak.
+      13 of the 14 minutes are Automerge's typing phase.
+- [ ] **M1.6 `imaginarium-model`** ← **next**:
+  - schema (§3 of the design) on Loro;
+  - the M1.5 follow-ups (`docs/design/crdt-benchmark.md` §5): remote updates
+    on the worker pool, batched per frame; memory after large imports;
+    shallow snapshots for compaction; snapshot sizes on realistic
+    documents; Loro workloads as criterion benches;
   - `imbl` view model, transactions, `ChangeSet`;
   - collaboration-aware undo;
   - migrations and `required_features`;
@@ -371,9 +412,12 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   `export-json`.
 - [ ] **M1.8 Wrap-up**:
   - code review, publish the test vectors, update the website docs;
-  - **automate the two-week rule** (an xtask check comparing new
-    `Cargo.lock` entries against crates.io publish dates; done by hand so
-    far);
+  - **automate the two-week rule**: an xtask check of **every** entry of
+    every committed `Cargo.lock` (main and `benchmarks/*`), not only new
+    ones (PR #15 found 15 too-new entries from M0). Use the crates.io
+    sparse index (`https://index.crates.io/<path>/<crate>`, field
+    `pubtime`): CDN-served, one request per crate, no API rate limit. The
+    API (`/api/v1/crates/…`) answered HTTP 429 after ~200 requests;
   - a **weekly CI fuzz job** (nightly, time-boxed);
   - tag `v0.0.2-m1`.
 

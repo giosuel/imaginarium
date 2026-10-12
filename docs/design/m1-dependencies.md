@@ -45,21 +45,22 @@
 All licenses are on the `deny.toml` allowlist (MIT, Apache-2.0, BSD-3-Clause,
 CC0-1.0).
 
-## 3. CRDT feature survey (benchmark follows in M1.5)
+## 3. CRDT feature survey (benchmarked in M1.5)
 
 | Need (format design §3) | Loro 1.16 | Yrs 0.28 | Automerge 0.12 |
 |---|---|---|---|
 | **Movable tree** (groups, pages, z-order; concurrent moves without cycles) | ✅ `LoroTree` with move | ❌ (move = delete + reinsert, which loses identity and concurrent edits) | ❌ |
 | Rich text with marks (Peritext semantics) | ✅ `mark` | ✅ formatting attributes | ✅ marks |
 | **History trimming** (shallow snapshots, 90-day default from ADR-0016) | ✅ `ExportMode::ShallowSnapshot` | partial (GC of deleted content, no history cutoff) | ❌ (history is always complete) |
-| Collaboration-aware undo | ✅ `UndoManager` | ✅ `UndoManager` | ⚠️ unclear from the API survey; verify in M1.5 |
+| Collaboration-aware undo | ✅ `UndoManager` (verified in M1.5) | ✅ `UndoManager` with tracked origins (verified in M1.5) | ❌ (verified in M1.5: 0.12 only rolls back uncommitted transactions) |
 | Compact encoding, stable since 1.0 | ✅ | ✅ | ✅ |
 | License | MIT | MIT | MIT |
 
 **Only Loro covers the movable tree and history trimming**, two hard
 requirements of the format design. Yrs remains the fallback, but would need
-a tree-move layer of our own. The M1.5 benchmark must confirm performance
-and memory on our fixtures before ADR-0009 is final.
+a tree-move layer of our own. The M1.5 benchmark
+([`crdt-benchmark.md`](crdt-benchmark.md)) confirmed Loro on performance
+and memory as well, and ADR-0009 is final.
 
 ## 4. Standardization status of the PQ parts
 

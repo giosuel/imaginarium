@@ -1,0 +1,29 @@
+# CRDT evaluation for M1.5: Loro vs Yrs vs Automerge on Imaginarium's
+# workloads (ADR-0009). Not part of the main workspace, so the product build
+# never compiles three CRDT libraries. Run it from this directory:
+#   cargo run --release -- --help
+[package]
+name = "imaginarium-crdt-bench"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Benchmark of Loro, Yrs and Automerge on Imaginarium's board, document and collaboration workloads."
+
+[dependencies]
+automerge = "=0.12.0"
+imaginarium-test-utils = { path = "../../crates/imaginarium-test-utils" }
+loro = "=1.16.2"
+peak_alloc = "=0.3.0"
+yrs = "=0.28.0"
+# Same version and level as the .imag format, for compressed sizes.
+zstd = { version = "=0.14.0", default-features = false }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+# Like the product's release profile.
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
