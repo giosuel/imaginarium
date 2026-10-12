@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.3 `imaginarium-format`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Next step:** **M1.4 `imaginarium-crypto`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -288,15 +288,29 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     extension record).
   - To define in M8: `.proto` messages, the signed retention policy
     format, key transparency.
-- [ ] **M1.3 `imaginarium-format`** ← **next**:
-  - container read/write, unencrypted path first;
-  - incremental append, index/trailer, recovery by backward scan,
-    compaction with atomic rename;
-  - `#![forbid(unsafe_code)]`;
-  - proptests (write → read round-trip), `cargo-fuzz` targets for the
-    parser;
-  - benchmarks: open time, append cost.
-- [ ] **M1.4 `imaginarium-crypto`**:
+- [x] **M1.3 `imaginarium-format`** (done 2026-10-12, PR #13, stacked on
+  #12). The unencrypted path is complete; encryption plugs in through
+  `RecordSealer`/`RecordOpener`/`KeyProvider`, implemented by M1.4.
+  - Writer (append, commit with fsync and truncation, resume), Reader
+    (trailer → index, `key_records` for encrypted documents, blobs), and
+    recovery (previous commit **plus adoption of complete records after
+    it**, or a forward scan).
+  - Compaction: default policy, `SAFE_TO_COPY` rules, atomic
+    `compact_file`.
+  - Header and signature bytes are kept **verbatim** (spec §6.3.1).
+    Allocations never follow claimed lengths (DoS hardening).
+  - Spec refinements found while implementing (spec §14, items 8–10):
+    verbatim header bytes, `key_records` in the `INDX` header, recovery
+    adopting records.
+  - Tests:
+    - 26 unit tests, 16 file-level tests, 5 vector tests, plus proptests;
+    - **test vectors 1–4** in `docs/format/test-vectors/`;
+    - fuzz targets: decode_record 19.1M, open_content 22.8M and open_file
+      1.8M executions, no crashes.
+  - Bench (10k updates): open 5.6 ms, autosave 3.3 ms, recovery scan 18 ms.
+  - Tooling installed on the dev VM: `nightly-2026-09-25` (minimal, fuzz
+    only) and `cargo-fuzz` 0.13.2.
+- [ ] **M1.4 `imaginarium-crypto`** ← **next**:
   - suite 1 wrappers;
   - key hierarchy (epoch keys, labels);
   - keyring (password via Argon2id, account and device keys via X-Wing);
@@ -317,8 +331,13 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   - proptests: convergence, undo inverse.
 - [ ] **M1.7 `imaginarium-cli` (`imag`)**: `inspect`, `verify`,
   `export-json`.
-- [ ] **M1.8 Wrap-up**: code review, publish the test vectors, update the
-  website docs, tag `v0.0.2-m1`.
+- [ ] **M1.8 Wrap-up**:
+  - code review, publish the test vectors, update the website docs;
+  - **automate the two-week rule** (an xtask check comparing new
+    `Cargo.lock` entries against crates.io publish dates; done by hand so
+    far);
+  - a **weekly CI fuzz job** (nightly, time-boxed);
+  - tag `v0.0.2-m1`.
 
 ## Open questions (owner)
 

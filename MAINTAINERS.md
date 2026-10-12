@@ -224,6 +224,15 @@ xtask check` and CI fail while they are stale.
 - Benchmarks: `cargo bench -p <crate>`, following the conventions in those
   docs.
 
+**Fuzzing** (parsers of untrusted input: the format and later the sync
+protocol): the targets live in `crates/<crate>/fuzz/`, a separate workspace
+that needs a nightly toolchain.
+- Run: `cd crates/imaginarium-format/fuzz && cargo +nightly-2026-09-25 fuzz
+  run open_file -- -max_total_time=120`.
+- Seed new targets with the test vectors.
+- A crash found by fuzzing becomes a regression test in the crate before
+  it is fixed.
+
 **Declaring a setting:** add a `static Setting<T>` next to the code that
 uses it. Title and description are required, and the key is dotted
 `snake_case` and stable forever. Add it to the crate's settings list, which
