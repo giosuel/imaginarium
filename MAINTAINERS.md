@@ -118,6 +118,12 @@ bypass would apply to agents too.
    with all cores at 100 %: more cores would help", or "the linker hits the
    RAM limit and swaps: more RAM is needed". Use `cargo build --timings` for
    per-crate build cost.
+   - Compare **CPU-seconds** (user + sys), not only wall time. The machine
+     may be shared, which skews wall time.
+   - Scratch builds and experiments use a subdirectory of the repo's
+     `target/` (e.g. `CARGO_TARGET_DIR=target/scratch-<name>`), **never
+     `/tmp`**. It may be a small RAM-backed tmpfs. Clean them up afterwards
+     (`cargo clean --target-dir …`).
 4. **Never commit generated artifacts:** screenshots, profiling outputs
    (timings HTML, tracy captures, flamegraphs, perf data, reports), or any
    agent or tool files. Keep them in the agent's scratch directory or in the
