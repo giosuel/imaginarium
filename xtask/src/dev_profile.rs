@@ -13,6 +13,7 @@
 //! derives were within noise.
 //!
 //! This task computes the build-time-only crates from the dependency graph
+//! (all platforms, all features)
 //! and keeps a generated block of `opt-level = 0` overrides in the root
 //! `Cargo.toml` in sync, like a lockfile. `cargo xtask check` fails when the
 //! block is stale (e.g. after a dependency update), and `--write` fixes it.

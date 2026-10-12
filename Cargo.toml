@@ -96,6 +96,8 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.quote]
 opt-level = 0
+[profile.dev.package.rustversion]
+opt-level = 0
 [profile.dev.package.serde_derive]
 opt-level = 0
 [profile.dev.package.shlex]
