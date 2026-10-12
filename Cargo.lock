@@ -208,6 +208,12 @@ version = "0.0.1"
 [[package]]
 name = "imaginarium-commands"
 version = "0.0.1"
+dependencies = [
+ "criterion",
+ "imaginarium-test-utils",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "imaginarium-profiling"
