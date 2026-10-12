@@ -470,7 +470,11 @@ If the trailer is invalid:
 
 1. Search backwards from the end for the trailer magic `IMGEND\0\0`. For
    each candidate whose CRC and index record verify, use that index (the
-   last good save).
+   last good save). Readers SHOULD then also adopt every complete,
+   CRC-valid record after that commit. For example, an autosave that
+   appended records but crashed before committing holds the user's newest
+   edits, and CRDT records are safe to apply even if they turn out to be
+   duplicates.
 2. If none is found, scan forward from offset 36. Parse records and verify
    each CRC, stopping at the first invalid record. Then rebuild the heads
    from the records found. For CRDT streams, applying all found `SNAP` and
@@ -586,6 +590,9 @@ These refine `../design/file-format.md` while writing the normative text:
    re-encoding a decoded header would silently drop unknown fields of
    newer versions, and break the AAD and signatures.
 9. *(Found while implementing M1.3)* **`key_records` in the `INDX`
-   header** of encrypted documents. Without it, a reader would need the
+   header** of encrypted documents.
+10. *(Found while implementing M1.3)* **Recovery adopts complete records
+    after the last good commit** (§9.5). Otherwise the most common crash
+    (autosave interrupted before its commit) would lose the newest edits. Without it, a reader would need the
    key to decrypt the index that tells it where the keys are, and would
    have to scan the whole file instead.
