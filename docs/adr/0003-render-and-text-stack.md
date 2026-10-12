@@ -10,13 +10,13 @@ caching, invalidation and priorities. No GUI framework's built-in canvas
 provides this.
 
 ## Decision
-- **`tafel-render`** owns a retained per-node display list, a tile cache
+- **`imaginarium-render`** owns a retained per-node display list, a tile cache
   (256² tiles per zoom bucket) and a compositor. It exposes a backend trait
   with two implementations:
   - `GpuBackend`: Vello on wgpu (the default).
   - `CpuBackend`: vello_cpu or tiny-skia. Used for fallback, headless
     export and deterministic golden-image tests.
-- **`tafel-text`** wraps Parley (layout), fontique (font discovery) and swash
+- **`imaginarium-text`** wraps Parley (layout), fontique (font discovery) and swash
   (shaping/rasterization) behind our own traits, with per-paragraph layout
   caches.
 - Background work uses a rayon pool with two priorities (urgent and

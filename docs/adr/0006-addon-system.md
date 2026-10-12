@@ -12,7 +12,7 @@ must stay stable while the internals evolve.
 - **Tier 1, packages (no code):** a zip with `package.toml` plus assets
   (SVG shapes with metadata, themes, styles, templates, brushes).
 - **Tier 2, add-ons (code):** WebAssembly components run in wasmtime, with a
-  versioned WIT world `tafel:addon@1`. Add-ons can register commands, tools,
+  versioned WIT world `imaginarium:addon@1`. Add-ons can register commands, tools,
   importers/exporters and declarative inspector panels, and can read the
   model and submit ops. Permissions are capability-based and declared in the
   manifest. Fuel and epoch limits prevent add-ons from hanging the app.

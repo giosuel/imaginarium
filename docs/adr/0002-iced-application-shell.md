@@ -21,7 +21,7 @@ Use **iced** (0.14+) for the shell:
   desktop) and is actively maintained.
 - It is MIT licensed.
 
-iced types are **confined to `tafel-shell`**. Lower crates never import iced.
+iced types are **confined to `imaginarium-shell`**. Lower crates never import iced.
 
 ## Consequences
 - We follow iced's release cadence and must upgrade iced, wgpu and Vello

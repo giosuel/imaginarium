@@ -1,4 +1,4 @@
-# Tafel: Project Plan
+# Imaginarium: Project Plan
 
 Status: **Draft v1** (2026-10-12). Decisions marked *(ADR-xxxx)* are recorded
 in [`docs/adr/`](adr/). Each one can be revisited, but changing one means
@@ -92,7 +92,7 @@ when the user asks for them.
 Why these were chosen, and the risks, are in the ADRs. The most important
 architectural point: **the GUI framework is only the shell.** The canvas,
 text engine and document model are our own crates and do not depend on
-iced. If iced stops being a good fit, only `tafel-shell` has to be replaced.
+iced. If iced stops being a good fit, only `imaginarium-shell` has to be replaced.
 
 ---
 
@@ -105,34 +105,34 @@ framework.
 
 ```
 crates/
-  tafel-app          # binary: wires everything together, CLI args, startup
-  tafel-shell        # iced UI: windows, palette, floating toolbars, inspector
-  tafel-canvas       # viewport, hit-testing, tools (select, pen, connector…), gestures
-  tafel-render       # scene → GPU (wgpu + vello), tile cache, raster compositing
-  tafel-text         # rich text model, shaping, line breaking, pagination
-  tafel-model        # document model: nodes, styles, ops, history, selection
-  tafel-commands     # command registry, keymaps, palette search index
-  tafel-layout       # page/flow layout for Document & Layout modes
-  tafel-diagram      # connectors, routing, snapping, shape geometry
-  tafel-paint        # raster layers, brushes, tiled pixel storage
-  tafel-io           # format traits + registry
-  tafel-io-native    # .tafel container
-  tafel-io-ooxml     # docx, pptx
-  tafel-io-odf       # odt, odp
-  tafel-io-export    # pdf, svg, png
-  tafel-addon-api    # stable public API types + WIT definitions
-  tafel-addon-host   # wasmtime host, sandboxing, permissions
-  tafel-packages     # template/shape-library packages (declarative)
-  tafel-test-utils   # fixtures, golden-image & round-trip harness
+  imaginarium-app          # binary: wires everything together, CLI args, startup
+  imaginarium-shell        # iced UI: windows, palette, floating toolbars, inspector
+  imaginarium-canvas       # viewport, hit-testing, tools (select, pen, connector…), gestures
+  imaginarium-render       # scene → GPU (wgpu + vello), tile cache, raster compositing
+  imaginarium-text         # rich text model, shaping, line breaking, pagination
+  imaginarium-model        # document model: nodes, styles, ops, history, selection
+  imaginarium-commands     # command registry, keymaps, palette search index
+  imaginarium-layout       # page/flow layout for Document & Layout modes
+  imaginarium-diagram      # connectors, routing, snapping, shape geometry
+  imaginarium-paint        # raster layers, brushes, tiled pixel storage
+  imaginarium-io           # format traits + registry
+  imaginarium-io-native    # .imag container
+  imaginarium-io-ooxml     # docx, pptx
+  imaginarium-io-odf       # odt, odp
+  imaginarium-io-export    # pdf, svg, png
+  imaginarium-addon-api    # stable public API types + WIT definitions
+  imaginarium-addon-host   # wasmtime host, sandboxing, permissions
+  imaginarium-packages     # template/shape-library packages (declarative)
+  imaginarium-test-utils   # fixtures, golden-image & round-trip harness
 addons/              # first-party add-ons built on the public API
   shapes-basic, shapes-uml, shapes-network, themes-default, …
 ```
 
 Rules (enforced in CI with `cargo deny` and a small layering check):
 
-- `tafel-model` has **no** dependencies on rendering, IO or UI.
-- Each `tafel-io-*` crate implements the `Importer`/`Exporter` traits from
-  `tafel-io` and is registered at startup, the same way add-ons are.
+- `imaginarium-model` has **no** dependencies on rendering, IO or UI.
+- Each `imaginarium-io-*` crate implements the `Importer`/`Exporter` traits from
+  `imaginarium-io` and is registered at startup, the same way add-ons are.
 - First-party features use the same command and extension points as
   third-party add-ons ("dogfood the API").
 
@@ -233,7 +233,7 @@ There are two tiers, so that simple things stay simple:
    from the brief.
 2. **Add-ons (code, WASM components):** written in any language that targets
    the WASM component model (Rust first). They use a versioned WIT world
-   (`tafel:addon@1.x`) and can:
+   (`imaginarium:addon@1.x`) and can:
    - register commands (and therefore appear in the palette and toolbars),
    - register tools (canvas interactions),
    - register importers and exporters,
@@ -250,7 +250,7 @@ ABI, and they would make the program crash-prone and insecure.
 
 ## 6. File formats *(ADR-0005)*
 
-### 6.1 Native `.tafel`
+### 6.1 Native `.imag`
 
 A zip container with `manifest.json`, `model.bin` (postcard-serialized model
 with a version header), `ops.log` (recent ops for recovery), `media/`,
@@ -264,9 +264,9 @@ has migrations; it is documented in `docs/format/`.
 | SVG/PNG/JPEG/WebP | ✓ | ✓ | `resvg`/`usvg`, `image`    | M2        |
 | PDF    | (later) | ✓  | `krilla` (or ooxmlsdk-pdf)    | M4        |
 | DOCX   | ✓    | ✓     | `ooxmlsdk` + mapping          | M4        |
-| ODT    | ✓    | ✓     | `tafel-io-odf`                | M4        |
+| ODT    | ✓    | ✓     | `imaginarium-io-odf`                | M4        |
 | PPTX   | ✓    | ✓     | `ooxmlsdk` + mapping          | M5        |
-| ODP    | ✓    | ✓     | `tafel-io-odf`                | M5        |
+| ODP    | ✓    | ✓     | `imaginarium-io-odf`                | M5        |
 | draw.io (`.drawio`) | ✓ | (later) | own, XML          | M2 stretch |
 | VSDX   | (later) | –  | `ooxmlsdk` (OPC)              | post-1.0  |
 
@@ -350,9 +350,9 @@ are relative, not calendar promises.
 
 | #  | Milestone                | Deliverable |
 |----|--------------------------|-------------|
-| M0 | **Foundations**          | Workspace, CI matrix (3 OS), lints, `tracing`, `tafel-model` (nodes, ops, undo, persistent versions), `tafel-commands` registry. No UI yet; fully unit-tested. |
+| M0 | **Foundations**          | Workspace, CI matrix (3 OS), lints, `tracing`, `imaginarium-model` (nodes, ops, undo, persistent versions), `imaginarium-commands` registry. No UI yet; fully unit-tested. |
 | M1 | **Shell + canvas**       | iced window, infinite board, pan/zoom, tile renderer with Vello, rectangles/ellipses/lines, selection and transform handles, command palette, floating toolbar, hidden inspector, light/dark theme. Frame-time HUD. |
-| M2 | **Diagramming**          | Connectors with orthogonal/curved routing, connection points, snapping and guides, groups, z-order, alignment and distribution, the declarative **package format** with basic, flowchart, UML and network shape libraries, `.tafel` save/load, autosave and recovery, SVG/PNG export. Stretch goal: `.drawio` import. |
+| M2 | **Diagramming**          | Connectors with orthogonal/curved routing, connection points, snapping and guides, groups, z-order, alignment and distribution, the declarative **package format** with basic, flowchart, UML and network shape libraries, `.imag` save/load, autosave and recovery, SVG/PNG export. Stretch goal: `.drawio` import. |
 | M3 | **Text engine**          | Rich text (runs, paragraphs, lists), Parley shaping, IME, bidi, text inside shapes, find/replace, spell-check hook. |
 | M4 | **Document mode**        | Paginated flow layout (incremental and background), styles, headers/footers, tables, images, footnotes (basic), TOC. DOCX and ODT import/export, PDF export. Round-trip corpus in CI. |
 | M5 | **Presentation mode**    | Slides as frames, masters and layouts, themes, presenter view (2nd window), transitions (basic), PPTX and ODP import/export. |
@@ -366,9 +366,9 @@ are relative, not calendar promises.
 
 1. Workspace skeleton with empty crates, crate docs and layering rules. *(commit)*
 2. CI: fmt, clippy, test, deny on 3 OSes. *(commit)*
-3. `tafel-model`: ids, node arena, persistent maps. *(commit)*
-4. `tafel-model`: ops and transactions, undo/redo, plus proptests. *(commit)*
-5. `tafel-commands`: registry, availability, fuzzy search index. *(commit)*
+3. `imaginarium-model`: ids, node arena, persistent maps. *(commit)*
+4. `imaginarium-model`: ops and transactions, undo/redo, plus proptests. *(commit)*
+5. `imaginarium-commands`: registry, availability, fuzzy search index. *(commit)*
 6. `tracing` setup and bench harness. *(commit)*
 7. `CLAUDE.md` + `CONTRIBUTING.md`. *(commit)*
 
@@ -378,7 +378,7 @@ are relative, not calendar promises.
 
 | Risk | Mitigation |
 |------|------------|
-| Vello is still pre-1.0. GPU features (some blend modes, masks) are incomplete. | Hide it behind the `tafel-render` trait. Keep a CPU backend (vello_cpu/tiny-skia) that is always working. Pin versions. |
+| Vello is still pre-1.0. GPU features (some blend modes, masks) are incomplete. | Hide it behind the `imaginarium-render` trait. Keep a CPU backend (vello_cpu/tiny-skia) that is always working. Pin versions. |
 | iced's API changes between releases, and its wgpu version may not match Vello's. | Upgrade both in lock-step. The canvas is rendered by our own pipeline into a texture that iced only composites. Shell code is kept thin. |
 | Rich-text editing (IME, bidi, complex scripts) is hard. | Use Parley (made for editors) and cosmic-text as a fallback, and write extensive tests with CJK, Arabic and emoji. |
 | DOCX/PPTX fidelity is a bottomless pit. | Preserve unknown XML, test against a corpus, and prioritize features by how often they appear in real files. |
@@ -389,7 +389,7 @@ are relative, not calendar promises.
 
 ## 11. Open questions for you
 
-1. **Name.** Keep "Tafel" or choose another? (Crates are prefixed, so it's
+1. **Name.** Keep "Imaginarium" or choose another? (Crates are prefixed, so it's
    best to decide before M0 step 1.)
 2. **License.** For example MIT/Apache-2.0 (permissive), GPL-3.0, or MPL-2.0.
    This also affects which add-on ecosystem we encourage.

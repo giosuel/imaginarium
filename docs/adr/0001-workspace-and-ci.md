@@ -9,7 +9,7 @@ Compile times, clear boundaries and reproducible builds on three OSes all
 matter.
 
 ## Decision
-- Use one Cargo workspace with many small crates (`crates/tafel-*`) and a
+- Use one Cargo workspace with many small crates (`crates/imaginarium-*`) and a
   shared `[workspace.dependencies]` table.
 - Use the stable toolchain, pinned via `rust-toolchain.toml`. The MSRV is
   bumped deliberately.
