@@ -1,4 +1,14 @@
 # Crate versions allowed although they are younger than 14 days
-# (`cargo xtask dep-age`). Only security fixes, each with its reason:
+# (`cargo xtask dep-age`). Security fixes, each with its reason, and
+# explicit owner exceptions:
 #
-#   name version  # reason (advisory id)
+#   name version  # reason (advisory id, or owner decision and date)
+
+# M2 UI prototype (owner exception, 2026-10-12): Vello 0.3, Parley 0.12 and
+# Taffy 0.15 before they are 14 days old, plus what they require that has
+# no older compatible version. Drop these lines once they are old enough.
+vello_common 0.3.0       # owner exception 2026-10-12 (M2), eligible 2026-10-16
+vello_cpu 0.3.0          # owner exception 2026-10-12 (M2), eligible 2026-10-16
+vello_gpu 0.3.0          # owner exception 2026-10-12 (M2), eligible 2026-10-16
+vello_gpu_shaders 0.3.0  # owner exception 2026-10-12 (M2), required by vello_gpu 0.3.0
+glifo 0.4.0              # owner exception 2026-10-12 (M2), required by vello_cpu 0.3.0 (glyphs)
