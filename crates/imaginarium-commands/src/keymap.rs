@@ -86,6 +86,9 @@ pub struct Modifiers {
     /// The *physical* Ctrl key as a separate modifier. Only meaningful on
     /// macOS. On other platforms Ctrl is `primary`.
     pub ctrl: bool,
+    /// The Super/Windows key as a separate modifier. Only meaningful on
+    /// Linux and Windows. On macOS that key is ⌘, which is `primary`.
+    pub meta: bool,
 }
 
 /// A keyboard shortcut: modifiers plus one key.
@@ -97,9 +100,10 @@ pub struct Shortcut {
     pub key: Key,
 }
 
-/// Parses `"Mod+Shift+K"`, `"Alt+Enter"`, `"F2"`, `"Ctrl+Tab"`, … Names are
-/// case-insensitive. `Cmd`/`Command`/`Super` are aliases for `Mod`, and
-/// `Option` for `Alt`.
+/// Parses `"Mod+Shift+K"`, `"Alt+Enter"`, `"F2"`, `"Ctrl+Tab"`, `"Mod++"`, …
+/// Names are case-insensitive. `Cmd`/`Command` are aliases for `Mod`,
+/// `Win`/`Windows`/`Meta` for `Super`, and `Option` for `Alt`. A trailing
+/// `++` means the `+` key.
 impl FromStr for Shortcut {
     type Err = CommandError;
 
@@ -108,14 +112,26 @@ impl FromStr for Shortcut {
             shortcut: text.to_owned(),
             reason: reason.to_owned(),
         };
-        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
-        let Some((key_part, mod_parts)) = parts.split_last() else {
-            return Err(invalid("empty"));
+        let trimmed = text.trim();
+        // `+` separates modifiers, so the `+` key needs special handling:
+        // "+" alone, or "…++" at the end.
+        let (mod_text, key_part) = if trimmed == "+" {
+            ("", "+")
+        } else if let Some(prefix) = trimmed.strip_suffix("++") {
+            (prefix, "+")
+        } else {
+            trimmed.rsplit_once('+').unwrap_or(("", trimmed))
+        };
+        let mod_parts: Vec<&str> = if mod_text.is_empty() {
+            Vec::new()
+        } else {
+            mod_text.split('+').map(str::trim).collect()
         };
         let mut mods = Modifiers::default();
         for part in mod_parts {
             let flag = match part.to_ascii_lowercase().as_str() {
-                "mod" | "cmd" | "command" | "super" => &mut mods.primary,
+                "mod" | "cmd" | "command" => &mut mods.primary,
+                "super" | "win" | "windows" | "meta" => &mut mods.meta,
                 "shift" => &mut mods.shift,
                 "alt" | "option" => &mut mods.alt,
                 "ctrl" | "control" => &mut mods.ctrl,
@@ -126,7 +142,7 @@ impl FromStr for Shortcut {
             }
             *flag = true;
         }
-        let key = parse_key(key_part).ok_or_else(|| invalid("unknown key"))?;
+        let key = parse_key(key_part.trim()).ok_or_else(|| invalid("unknown key"))?;
         Ok(Shortcut { mods, key })
     }
 }
@@ -164,9 +180,15 @@ fn parse_key(name: &str) -> Option<Key> {
 
 impl Shortcut {
     /// Normalizes for a platform. Outside macOS, Ctrl *is* `Mod`, so
-    /// `Ctrl+K` and `Mod+K` are the same shortcut there.
+    /// `Ctrl+K` and `Mod+K` are the same shortcut there. On macOS, Super is ⌘,
+    /// so `Super+K` and `Mod+K` are the same.
     pub fn normalized(mut self, platform: Platform) -> Self {
-        if platform != Platform::MacOs && self.mods.ctrl {
+        if platform == Platform::MacOs {
+            if self.mods.meta {
+                self.mods.meta = false;
+                self.mods.primary = true;
+            }
+        } else if self.mods.ctrl {
             self.mods.ctrl = false;
             self.mods.primary = true;
         }
@@ -192,8 +214,14 @@ impl Shortcut {
             }
             out.push_str(&key);
         } else {
+            let super_name = if platform == Platform::Windows {
+                "Win"
+            } else {
+                "Super"
+            };
             for (on, name) in [
                 (s.mods.primary, "Ctrl"),
+                (s.mods.meta, super_name),
                 (s.mods.alt, "Alt"),
                 (s.mods.shift, "Shift"),
             ] {
@@ -247,9 +275,11 @@ pub struct KeyPress {
 impl KeyPress {
     /// Converts physical modifiers to a platform-neutral shortcut.
     pub fn to_shortcut(self, platform: Platform) -> Shortcut {
-        let (primary, ctrl) = match platform {
-            Platform::MacOs => (self.meta, self.ctrl),
-            Platform::Windows | Platform::Linux => (self.ctrl, false),
+        // Every physical modifier is kept, so e.g. Super+R never matches a
+        // plain `R` binding.
+        let (primary, ctrl, meta) = match platform {
+            Platform::MacOs => (self.meta, self.ctrl, false),
+            Platform::Windows | Platform::Linux => (self.ctrl, false, self.meta),
         };
         Shortcut {
             mods: Modifiers {
@@ -257,6 +287,7 @@ impl KeyPress {
                 shift: self.shift,
                 alt: self.alt,
                 ctrl,
+                meta,
             },
             key: match self.key {
                 Key::Char(c) => Key::Char(c.to_lowercase().next().unwrap_or(c)),
@@ -449,6 +480,60 @@ mod tests {
             keymap.command_for_press(press(Key::Char('K'), true, false, true)),
             Some(BOLD)
         );
+    }
+
+    #[test]
+    fn super_key_is_a_separate_modifier_off_mac() {
+        const RECTANGLE: CommandId = CommandId::new("board.rectangle_tool");
+        const LOCK: CommandId = CommandId::new("app.lock");
+        let super_press = |c| KeyPress {
+            key: Key::Char(c),
+            ctrl: false,
+            meta: true,
+            shift: false,
+            alt: false,
+        };
+        let mut linux = Keymap::new(Platform::Linux);
+        linux.bind("R", RECTANGLE).unwrap();
+        linux.bind("Mod+B", BOLD).unwrap();
+        assert_eq!(
+            linux.command_for_press(super_press('r')),
+            None,
+            "Super+R is not R"
+        );
+        let ctrl_super_b = KeyPress {
+            ctrl: true,
+            ..super_press('b')
+        };
+        assert_eq!(
+            linux.command_for_press(ctrl_super_b),
+            None,
+            "Ctrl+Super+B is not Mod+B"
+        );
+        linux.bind("Super+L", LOCK).unwrap();
+        assert_eq!(linux.command_for_press(super_press('l')), Some(LOCK));
+        let s: Shortcut = "Super+L".parse().unwrap();
+        assert_eq!(s.display(Platform::Linux), "Super+L");
+        assert_eq!(s.display(Platform::Windows), "Win+L");
+
+        // On macOS, Super/Meta is ⌘, which is `Mod`.
+        let mut mac = Keymap::new(Platform::MacOs);
+        mac.bind("Super+K", BOLD).unwrap();
+        assert_eq!(mac.command_for_press(super_press('k')), Some(BOLD));
+        assert!(mac.bind("Mod+K", ITALIC).is_err(), "same shortcut on macOS");
+    }
+
+    #[test]
+    fn the_plus_key_can_be_bound() {
+        let plus: Shortcut = "Mod++".parse().unwrap();
+        assert!(plus.mods.primary);
+        assert_eq!(plus.key, Key::Char('+'));
+        let shifted: Shortcut = "Mod+Shift++".parse().unwrap();
+        assert!(shifted.mods.primary && shifted.mods.shift);
+        assert_eq!("+".parse::<Shortcut>().unwrap().key, Key::Char('+'));
+        assert_eq!(plus.display(Platform::Linux), "Ctrl++");
+        assert_eq!(plus.display(Platform::MacOs), "⌘+");
+        assert!("Mod+".parse::<Shortcut>().is_err());
     }
 
     #[test]
