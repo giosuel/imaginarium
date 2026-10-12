@@ -1,6 +1,6 @@
 # Status: hand-off log
 
-> **Fresh session?** Read [`CLAUDE.md`](../CLAUDE.md) first, then this file.
+> **Fresh session?** Read [`MAINTAINERS.md`](../MAINTAINERS.md) first, then this file.
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
@@ -21,7 +21,7 @@ Last updated: 2026-10-12
 
 - [x] Plan v2 (`docs/PLAN.md`), ADRs 0001–0016, file-format design (accepted)
 - [x] Project name **Imaginarium**, license **AGPL-3.0-or-later**, **DCO**
-- [x] `CLAUDE.md`, `CONTRIBUTING.md`, this status file
+- [x] `MAINTAINERS.md`, `CONTRIBUTING.md`, this status file (agent files are git-ignored)
 
 ## M0: Foundations and profiling (checklist)
 
@@ -96,7 +96,7 @@ Commit after each item. Each item lists its acceptance criteria (AC).
   - CI build job.
   - AC: `npm run build` succeeds locally.
 - [ ] **M0.8 Wrap-up**
-  - Fill in the build commands in `CLAUDE.md`.
+  - Fill in the build commands in `MAINTAINERS.md`.
   - Code review of M0.
   - Update this file, then tag `v0.0.1-m0`.
 

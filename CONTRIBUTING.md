@@ -44,7 +44,7 @@ packages may use content licenses such as CC-BY, declared in their
 
 ## Code guidelines
 
-The full list is in [`CLAUDE.md`](CLAUDE.md#architecture-invariants-do-not-break).
+The full list is in [`MAINTAINERS.md`](MAINTAINERS.md#architecture-invariants-do-not-break).
 It applies to humans too. The most important rules:
 
 - Respect crate layering, and never mutate documents outside the

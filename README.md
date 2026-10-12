@@ -22,7 +22,7 @@ Planning complete, starting milestone M0. Useful starting points:
 - [`docs/PLAN.md`](docs/PLAN.md): vision, architecture, roadmap
 - [`docs/README.md`](docs/README.md): index of all documentation
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): how to contribute (DCO)
-- [`CLAUDE.md`](CLAUDE.md): conventions for AI agents and maintainers
+- [`MAINTAINERS.md`](MAINTAINERS.md): conventions for maintainers and AI agents
 
 ## License
 

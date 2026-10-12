@@ -1,0 +1,132 @@
+# Maintainer guide
+
+Rules and conventions for everyone who works on Imaginarium: human
+maintainers and AI coding agents alike. Agent tooling files (`CLAUDE.md`,
+`AGENTS.md`, `.claude/`, …) are **never committed**. They are git-ignored
+and at most contain a local pointer to this file.
+
+Imaginarium is a cross-platform (Linux, Windows, macOS) office suite in Rust.
+It covers boards/diagrams, documents, presentations, page layout and paint
+on one whiteboard-like surface, with built-in generative AI and end-to-end
+encrypted real-time collaboration through a self-hostable server ("Hub").
+License: AGPL-3.0-or-later.
+
+## Start here (every session)
+
+Read these in order before doing anything:
+
+1. **[`docs/STATUS.md`](docs/STATUS.md)**: where we are and the **next
+   concrete step**. This is the hand-off point between sessions.
+2. **[`docs/PLAN.md`](docs/PLAN.md)**: vision, architecture, roadmap,
+   decisions log.
+3. **[`docs/adr/README.md`](docs/adr/README.md)**: index of architecture
+   decisions. Read the ADRs relevant to your task.
+4. **[`docs/design/`](docs/design/)**: detailed designs (start with
+   `file-format.md` for anything touching model, format, crypto or sync).
+5. This file's rules (below), and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+**At the end of every work step**, update `docs/STATUS.md`: tick what's
+done, write down the next step and any open problems, then commit. A fresh
+session must be able to continue from `STATUS.md` alone.
+
+## Working with the owner
+
+- The owner (Giosuel) decides product and architecture questions. **Answer
+  questions before starting work** when they ask something. Give a clear
+  recommendation with trade-offs, not an exhaustive survey.
+- Don't silently reverse a decision recorded in an ADR. Propose a
+  superseding ADR and ask.
+- Ask when a decision is genuinely the owner's (naming, licensing, product
+  scope). Otherwise choose sensible defaults and mention them.
+
+## Git policy (mandatory)
+
+- Repo-local identity: `user.name = Giosuel`, `user.email = me@giosuel.ch`.
+  Check this with `git config user.name` before committing. If it is
+  missing, set it locally (never globally).
+- **Commit after every module, refactor and decision.** Small, focused
+  commits. Don't batch unrelated work.
+- **Conventional Commits**: `feat(model): …`, `fix(format): …`,
+  `docs(adr): …`, `refactor(ui): …`, `chore: …`, `test: …`, `perf: …`,
+  `ci: …`.
+- Always commit with **`-s`** (DCO `Signed-off-by`, see `CONTRIBUTING.md`).
+- AI agents keep their co-author trailer (`Co-Authored-By: Claude …`), plus
+  any session attribution line provided by the harness.
+- **Never commit agent or tool files.** This includes `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, `.claude/`, `.cursor/` and the other tool
+  directories listed in `.gitignore`. Check `git status` before every commit.
+- Branch: `main` (no remote yet; the owner adds it later). Never force-push
+  or rewrite published history.
+
+## Architecture invariants (do not break)
+
+1. **Layering:** dependencies point downwards only
+   (apps → product → features → services → toolkit → core → support; see
+   PLAN §4.1). Core crates (`model`, `format`, `crypto`, `commands`,
+   `protocol`) must never depend on UI, networking, async runtimes or AI.
+2. **One mutation path:** every document change is a **command → CRDT
+   transaction**. This applies to the user, AI agent, add-ons and remote
+   peers alike. There is no other way to mutate the model.
+3. **Never block the UI thread:** IO, crypto, compression, parsing, layout
+   of off-screen content, AI and network calls run in the worker pool or
+   async runtime.
+4. **Every setting is registered** in the typed settings registry with UI
+   metadata (ADR-0014). There are no config-file-only settings.
+5. **Every feature is a command** with metadata and an argument schema. That
+   makes it searchable in the palette and usable as an AI tool.
+6. **File format compatibility** (`docs/design/file-format.md` §3.4, §8):
+   additive changes only, unknown data preserved, no reused protobuf field
+   numbers, record type ids never reused.
+7. **Crypto:** never implement primitives yourself, and use only the crates
+   named in the format design. Never log keys, plaintext or secrets.
+   Crypto-related changes need tests against test vectors.
+8. **Performance budgets** (PLAN §10) are requirements. Add or extend a
+   benchmark when you touch a hot path.
+
+## Code conventions
+
+- Rust edition 2024, stable toolchain pinned in `rust-toolchain.toml`.
+- Each file starts with `// SPDX-License-Identifier: AGPL-3.0-or-later`.
+- Each crate has a crate-level `//!` doc stating its responsibility, its
+  boundaries ("does NOT do …") and its key types. `#![warn(missing_docs)]`.
+- Errors: `thiserror` in libraries, `anyhow` only in binaries. No
+  `unwrap()`/`expect()` outside tests (clippy-enforced). `unsafe` is
+  forbidden unless an ADR justifies it.
+- Tests live next to the code. Add proptests for invariants (CRDT
+  convergence, undo, format round-trip) and fuzz targets for parsers.
+- Comments explain *why*, not *what*. Public APIs have doc examples.
+- Crate naming: `imaginarium-<name>` (directory `crates/imaginarium-<name>`).
+- New crates only when a milestone needs them. Register each new crate in
+  the PLAN crate map if it isn't already listed.
+
+## Build and check commands
+
+The workspace is created in M0 step 1; update this section when it exists.
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo deny check            # licenses (AGPL-compatible) + advisories
+cargo xtask check-layers    # layering + SPDX header check (added in M0)
+```
+
+## Decisions and docs
+
+- New significant decision → new ADR (`docs/adr/NNNN-title.md`, from the
+  template) + index row in `docs/adr/README.md` + a commit of its own.
+- **Docs are part of done:** a milestone is not finished until its user and
+  developer docs exist (website lives in `website/`, from M0).
+- Owner decisions are logged in PLAN §14.
+
+## AI agent usage (for the orchestrating session)
+
+- One main session acts as architect and integrator. Subagents handle
+  bounded tasks: research, codebase exploration, independent crates in
+  separate worktrees, and reviews.
+- Don't have several agents edit the same crate concurrently.
+- Suggested effort: **xhigh or max** for format, crypto, CRDT model, ACL and
+  UI-toolkit core; **high** for feature milestones; **medium** for docs,
+  CI and mechanical work.
+- Run a code review (`/code-review`) after each module before moving on.

@@ -303,7 +303,7 @@ are built in M0, before any feature work.
 - Each crate has a crate-level doc describing its responsibility and
   boundaries. `#![warn(missing_docs)]` is on, and examples are written as
   doctests.
-- `CLAUDE.md` and `CONTRIBUTING.md` describe conventions, the crate map, and
+- `MAINTAINERS.md` and `CONTRIBUTING.md` describe conventions, the crate map, and
   "how to add a command, setting, format, AI provider or add-on".
 - Lints and checks: clippy `-D warnings`, rustfmt, `cargo deny` (AGPL-compatible
   license allowlist and advisories), `cargo machete`, and a layering check.
@@ -327,7 +327,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 
 | # | Milestone | Content |
 |---|---|---|
-| M0 | **Foundations and profiling** | Workspace, CI on 3 OSes, `cargo deny`, `imaginarium-profiling` + benchmark fixtures, `settings` registry, `commands` registry, website skeleton, `CLAUDE.md`/`CONTRIBUTING.md` |
+| M0 | **Foundations and profiling** | Workspace, CI on 3 OSes, `cargo deny`, `imaginarium-profiling` + benchmark fixtures, `settings` registry, `commands` registry, website skeleton, `MAINTAINERS.md`/`CONTRIBUTING.md` |
 | M1 | **Format, crypto, model** | `format` (records, index, append, compaction, recovery) + spec v1 + test vectors + fuzzing; `crypto` (suite 1, keyring, ACL chain); `model` on Loro (schema, view model, undo, migrations) with a Loro/Yrs/Automerge benchmark; sync-protocol design doc; `imag` CLI |
 | M2 | **UI prototype gate** | `reactive` + minimal `ui` + tile renderer, a stress-test app, and the 6 pass criteria of ADR-0007 (GPUI fallback if it fails) |
 
