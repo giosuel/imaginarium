@@ -542,9 +542,11 @@ Effort: **xhigh** for `reactive`, the `ui` core and `render`, **high** for
 Screenshots go to the owner from M2.4 on (Xvfb + Mesa lavapipe).
 
 **This VM has no GPU** (and neither do the CI runners). Functional checks
-run here with lavapipe and the CPU backend. The frame-time criteria need
-real hardware (open question below). Until that's settled: measure
-everything we can here, and stop early if a criterion looks unfixable.
+run here with lavapipe and the CPU backend. The real numbers come from the
+owner's Linux machine: a prebuilt gate binary writes a report (owner
+decision 2026-10-12, ADR-0007 "Procedure"). Windows and macOS are checked
+later, when hardware is available. There is no time box, but one decision
+point: after M2.5, one focused fix round for failed criteria, then decide.
 
 - [ ] **M2.0 Stack research** ← **next**, written up in
   `docs/design/m2-ui-stack.md` (like `m1-dependencies.md`):
@@ -586,9 +588,11 @@ everything we can here, and stop early if a criterion looks unfixable.
   - the 10k-shape board from the fixtures, with pan, zoom and drag;
   - the command palette over 2,000 commands, and a text field;
   - the frame-time HUD (`F12`), and tracy zones that show dirty tiles.
-- [ ] **M2.6 Gate run**: the six criteria on the three OSes, results in
-  `docs/design/m2-gate.md`. Pass: ADR-0007 notes the passed gate. Fail on
-  a criterion we can't fix: a new ADR, fallback to GPUI.
+- [ ] **M2.6 Gate run**: the owner runs the prebuilt binary on Linux and
+  sends the report and the checklist. Results in `docs/design/m2-gate.md`.
+  Failed criteria get one focused fix round. Pass: ADR-0007 notes the
+  passed gate (Windows and macOS still open). Fail: a new ADR, fallback to
+  GPUI.
 - [ ] **M2.7 Wrap-up**: code review (separate reviewer agents, medium
   effort), developer docs on the website (`reactive`, `ui`, `render`),
   STATUS, tag `v0.0.3-m2`.
@@ -596,13 +600,8 @@ everything we can here, and stop early if a criterion looks unfixable.
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
-- **Which machines run the M2 gate?** It needs Linux, Windows and macOS
-  with integrated GPUs (ADR-0007). This VM has no GPU, and the CI runners
-  don't either. Options: the owner runs a prebuilt gate binary on their
-  machines and sends the report it writes, or a self-hosted runner.
-- **The M2 time box:** ADR-0007 asks for a time-boxed prototype but sets no
-  box. Default until decided: decide the gate after M2.5 at the latest, and
-  raise it early if a criterion looks unfixable.
+- **The owner's Linux machine for the M2 gate:** distro and version (the
+  prebuilt binary must not need a newer glibc), GPU, and Wayland or X11.
 
 ## Known issues and notes
 

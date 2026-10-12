@@ -1,7 +1,7 @@
 # 0007. Own UI toolkit on the Linebender stack
 
 - Status: Accepted (subject to the M2 prototype gate)
-- Date: 2026-10-12
+- Date: 2026-10-12 (gate procedure amended the same day, owner decision)
 - Supersedes: 0002
 
 ## Context
@@ -24,7 +24,7 @@ renderers (GPUI) or rebuilding the whole view tree after every change (iced).
   scheduler and one text stack.
 
 ## Gate
-Time-boxed prototype in M2 with these pass criteria (all 3 OSes, integrated GPU):
+A prototype in M2 with these pass criteria (integrated GPU):
 1. 10,000 shapes pan and zoom at 60 fps or more, with p99 frame time under 16 ms.
 2. Dragging re-renders only dirty tiles. Verified with tracy.
 3. The palette searches 2,000 commands in under 1 ms per keystroke.
@@ -32,6 +32,20 @@ Time-boxed prototype in M2 with these pass criteria (all 3 OSes, integrated GPU)
    (Orca, NVDA, VoiceOver).
 5. HiDPI and mixed-DPI multi-monitor setups are correct.
 6. Idle CPU is about 0 %, and cold start is under 400 ms.
+
+**Procedure** (owner decision, 2026-10-12):
+- **No calendar time box, one decision point.** When the gate app runs
+  (end of M2.5), the owner runs a prebuilt binary that measures the
+  criteria and writes a report, plus a short manual checklist (IME, screen
+  reader). If a criterion fails, there is **one focused fix round** for it.
+  Then we decide: keep our toolkit, or fall back. There is no open-ended
+  "one more fix" iteration, because everything built on the toolkit
+  meanwhile makes the fallback costlier.
+- **Linux only for now**, because that's the hardware available. Windows
+  and macOS stay open and are checked when hardware is available, before
+  those platforms ship. Known risks there (from the M2 research, see
+  `docs/design/m2-ui-stack.md`): winit's open mixed-DPI bugs on Windows 11,
+  IMM32-only IME on Windows, and macOS Zhuyin composition.
 
 If the prototype fails criteria we cannot fix, we write a new ADR and fall
 back to **GPUI** for the shell.

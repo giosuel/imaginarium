@@ -386,6 +386,12 @@ Decided (2026-10-12):
   introduced before external contributions grow. Earlier contributions
   would then need their authors' consent.
 
+- **The M2 gate** (ADR-0007) has no calendar time box but one decision
+  point: after the gate app runs (end of M2.5), one focused fix round for
+  failed criteria, then keep our toolkit or fall back to GPUI. The owner
+  runs a prebuilt gate binary that writes a report. It is checked on
+  Linux only for now; Windows and macOS follow when hardware is available.
+
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
 
