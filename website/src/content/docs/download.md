@@ -19,7 +19,7 @@ When the first preview ships, builds will be available for:
 
 All builds will be x86_64 and arm64 where the platform supports it, with
 optional signed auto-updates. The plan is in
-[ADR-0015](/imaginarium/developers/reference/adr/0015-distribution-and-docs/).
+[ADR-0015](/developers/reference/adr/0015-distribution-and-docs/).
 
 ## Building from source
 

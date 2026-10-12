@@ -7,7 +7,7 @@ sidebar:
 
 **Imaginarium Hub** is the small server for sharing and real-time
 collaboration. It is planned for milestone M8 (see the
-[roadmap](/imaginarium/developers/reference/plan/#12-roadmap)).
+[roadmap](/developers/reference/plan/#12-roadmap)).
 
 What it will be:
 
@@ -23,5 +23,5 @@ What it will be:
   teams or links, roles (owner, admin, editor, commenter, viewer), comments,
   version history.
 
-Details: [ADR-0012](/imaginarium/developers/reference/adr/0012-collaboration-server/)
-and the [security model](/imaginarium/developers/reference/adr/0011-e2ee-security-model/).
+Details: [ADR-0012](/developers/reference/adr/0012-collaboration-server/)
+and the [security model](/developers/reference/adr/0011-e2ee-security-model/).

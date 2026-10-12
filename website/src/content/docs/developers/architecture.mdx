@@ -7,8 +7,8 @@ import LayerDiagram from '../../../components/LayerDiagram.astro';
 
 Imaginarium is a Cargo workspace of small crates (`crates/imaginarium-*`),
 arranged in layers. The full rationale is in the
-[project plan](/imaginarium/developers/reference/plan/#4-architecture) and
-the [decision records](/imaginarium/developers/reference/adr/0001-workspace-and-ci/).
+[project plan](/developers/reference/plan/#4-architecture) and
+the [decision records](/developers/reference/adr/0001-workspace-and-ci/).
 
 ## Layers
 
@@ -36,12 +36,12 @@ input ─► command ─► CRDT transaction ─► Loro document ─► diff ev
 - **Commands** ([`imaginarium-commands`](https://github.com/giosuel/imaginarium/tree/main/crates/imaginarium-commands)):
   everything a user can do is a registered command. The palette, shortcuts,
   toolbars, add-ons and AI tools all run through `Registry::execute`.
-- **Documents are CRDTs** ([ADR-0009](/imaginarium/developers/reference/adr/0009-crdt-document-model/)),
+- **Documents are CRDTs** ([ADR-0009](/developers/reference/adr/0009-crdt-document-model/)),
   so real-time collaboration through a server that can't read them works
   without conflicts.
 - **Rendering redraws only what changed**: signals instead of a virtual
   DOM, a tile cache, and nothing drawn while idle
-  ([ADR-0007](/imaginarium/developers/reference/adr/0007-own-ui-toolkit/)).
+  ([ADR-0007](/developers/reference/adr/0007-own-ui-toolkit/)).
 
 ## What exists today
 
@@ -55,4 +55,4 @@ input ─► command ─► CRDT transaction ─► Loro document ─► diff ev
 | `imaginarium-app` | Stub binary |
 
 The rest of the layer map is planned; see the
-[roadmap](/imaginarium/developers/reference/plan/#12-roadmap).
+[roadmap](/developers/reference/plan/#12-roadmap).

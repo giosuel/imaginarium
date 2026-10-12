@@ -2,11 +2,16 @@
 // Imaginarium website (Astro + Starlight). See README.md in this directory.
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { remarkBaseLinks } from './plugins/remark-base-links.mjs';
+import { BASE, SITE } from './site.config.mjs';
 
 export default defineConfig({
-  // Updated when the site is deployed (GitHub Pages or a custom domain).
-  site: 'https://giosuel.github.io',
-  base: '/imaginarium',
+  // Set in site.config.mjs (the only place that knows the base path).
+  site: SITE,
+  base: BASE,
+  markdown: {
+    remarkPlugins: [remarkBaseLinks(BASE)],
+  },
   integrations: [
     starlight({
       title: 'Imaginarium',

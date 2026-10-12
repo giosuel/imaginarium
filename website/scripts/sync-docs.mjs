@@ -18,7 +18,6 @@ import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = 'https://github.com/giosuel/imaginarium';
-const BASE = '/imaginarium';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 const outRoot = resolve(here, '..', 'src', 'content', 'docs', 'developers', 'reference');
@@ -44,7 +43,8 @@ function rewriteLinks(body, source) {
     const [path, anchor] = target.split('#');
     const resolved = posix.normalize(posix.join(posix.dirname(source), path));
     const suffix = anchor ? `#${anchor}` : '';
-    if (sources.has(resolved)) return `](${BASE}/${sources.get(resolved)}/${suffix})`;
+    // Root-relative: plugins/remark-base-links.mjs adds the base path.
+    if (sources.has(resolved)) return `](/${sources.get(resolved)}/${suffix})`;
     const kind = resolved.endsWith('/') || !posix.extname(resolved) ? 'tree' : 'blob';
     return `](${REPO}/${kind}/main/${resolved.replace(/\/$/, '')}${suffix})`;
   });

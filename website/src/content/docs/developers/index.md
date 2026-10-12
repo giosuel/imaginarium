@@ -9,15 +9,15 @@ Imaginarium is a Rust workspace (AGPL-3.0-or-later). These pages explain
 
 ## Start here
 
-1. [Architecture](/imaginarium/developers/architecture/): the crate layers,
+1. [Architecture](/developers/architecture/): the crate layers,
    data flow and key mechanisms.
-2. [Project plan](/imaginarium/developers/reference/plan/): vision, UX
+2. [Project plan](/developers/reference/plan/): vision, UX
    principles, roadmap.
-3. [Architecture decisions](/imaginarium/developers/reference/adr/0001-workspace-and-ci/):
+3. [Architecture decisions](/developers/reference/adr/0001-workspace-and-ci/):
    one short record per significant decision, superseded rather than edited.
-4. [`.imag` file format](/imaginarium/developers/reference/design/file-format/):
+4. [`.imag` file format](/developers/reference/design/file-format/):
    the encrypted, CRDT-based document format.
-5. [Contributing](/imaginarium/developers/contributing/): workflow, DCO,
+5. [Contributing](/developers/contributing/): workflow, DCO,
    checks.
 
 ## Building and checking

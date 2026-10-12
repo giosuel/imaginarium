@@ -137,6 +137,9 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: website
+      - name: Check internal links
+        run: npm run check-links
+        working-directory: website
 
   ci-result:
     name: CI result
