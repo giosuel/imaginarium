@@ -634,6 +634,12 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
   effort), developer docs on the website (`reactive`, `ui`, `render`),
   STATUS, tag `v0.0.3-m2`.
 
+**Wasm (browser) build: not a goal now** (owner, 2026-10-12: focus on the
+native build, keep the browser build in mind). Core and toolkit crates stay
+wasm-friendly where that is free: no `SystemTime::now()` or threads in core
+paths, pure-Rust dependencies when the choice is otherwise equal. A web
+viewer is in PLAN §12 "Later".
+
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).

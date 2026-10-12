@@ -12,7 +12,7 @@ with the code, or point to the normative spec that replaces it.
 | [`sync-protocol.md`](sync-protocol.md): client ↔ Hub protocol, live frames, presence, snapshots/GC | Draft (normative in M8) | M1 → M8 |
 | [`m2-ui-stack.md`](m2-ui-stack.md): UI and render crate versions, Masonry and Vello choices, how the M2 gate is measured | Accepted | M2.0 |
 | `ui-toolkit.md`: widget tree, signals, frame scheduling, a11y | To be written | M2 |
-| `rendering.md`: scene building, tile cache, compositor, backends | To be written | M2 |
+| [`rendering.md`](rendering.md): display lists, tiles and levels, invalidation, compositor, backends | Draft (accepted with the M2 gate) | M2.2 |
 | `text-engine.md`: rich text, editing, IME, pagination | To be written | M5 |
 | `ai.md`: capabilities, providers, tool bridge, jobs, privacy | To be written | M6 |
 | `hub.md`: accounts, OPAQUE, roles, storage, admin | To be written | M8 |
