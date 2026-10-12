@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.2 Sync protocol design** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Next step:** **M1.3 `imaginarium-format`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -272,10 +272,23 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     - ~100 B overhead per encrypted record.
   - Still open for later minors: the logical schema (`schema-v1.md`,
     M1.6), and the Hub-side ACL rules (sync protocol, M1.2).
-- [ ] **M1.2 Sync protocol design** ← **next**: `docs/design/sync-protocol.md`
-  (object exchange, live update frames, presence, server sequence
-  numbers, snapshot GC without plaintext).
-- [ ] **M1.3 `imaginarium-format`**:
+- [x] **M1.2 Sync protocol design** (done 2026-10-12, PR #12, Draft).
+  [`docs/design/sync-protocol.md`](design/sync-protocol.md). It becomes
+  normative with the Hub in M8.
+  - The Hub moves **the same spec-v1 record bytes**. It validates framing,
+    encryption rules, signatures and roles from plaintext framing plus
+    `ACLC`/`KEYR`, and never decrypts.
+  - Per-document server `seq` for catch-up. Pushes are idempotent by
+    `object_id` and acknowledged only after durable storage.
+  - Clients create snapshots (`covers_through_seq`). GC follows only an
+    admin-signed retention policy plus a 30-day grace period. Clients
+    cross-check snapshots against covered updates.
+  - Presence: encrypted with `K_presence`, padded, relayed and never stored.
+  - The local cache *is* an `.imag` file (`org.imaginarium.sync-state`
+    extension record).
+  - To define in M8: `.proto` messages, the signed retention policy
+    format, key transparency.
+- [ ] **M1.3 `imaginarium-format`** ← **next**:
   - container read/write, unencrypted path first;
   - incremental append, index/trailer, recovery by backward scan,
     compaction with atomic rename;
