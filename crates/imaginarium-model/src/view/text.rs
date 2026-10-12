@@ -3,11 +3,16 @@
 //! A text container as paragraphs of marked runs (schema-v1.md §6),
 //! updated incrementally from Loro text deltas.
 //!
-//! An edit touches only the paragraphs it overlaps: they are flattened to
-//! characters, edited and split again at `\n`. Paragraphs are shared
-//! (`Arc`) between view versions, so a keystroke copies one paragraph,
-//! not the text. Very long paragraphs (no `\n` for many thousands of
-//! characters) are therefore slower to edit than short ones.
+//! Paragraphs are stored in **chunks** of up to [`MAX_CHUNK`] in a
+//! persistent vector, so finding a position scans chunk totals, then one
+//! chunk, and an edit replaces one chunk. Versions share every chunk and
+//! paragraph they didn't change.
+//!
+//! - **Keystrokes** (an insert without `\n`, a delete inside one paragraph)
+//!   edit the affected run of one paragraph directly.
+//! - **Everything else** (paragraph splits and joins, formatting) flattens
+//!   the paragraphs it touches to characters, edits them and splits the
+//!   result at `\n` again.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,6 +22,11 @@ use loro::{LoroValue, TextDelta};
 use crate::value::Value;
 
 type Attributes<S> = std::collections::HashMap<String, LoroValue, S>;
+
+/// Paragraphs per chunk when chunks are (re)built.
+const CHUNK: usize = 64;
+/// A chunk that grows beyond this is split.
+const MAX_CHUNK: usize = 2 * CHUNK;
 
 /// The marks on a run: key → value, sorted. Usually empty.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -102,6 +112,42 @@ impl Run {
     pub fn chars(&self) -> usize {
         self.chars
     }
+
+    fn new(text: String, chars: usize, marks: Marks) -> Self {
+        Self {
+            text: Arc::from(text),
+            marks,
+            chars,
+        }
+    }
+
+    /// The byte offset of character `index`.
+    fn byte(&self, index: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(index)
+            .map_or(self.text.len(), |(b, _)| b)
+    }
+}
+
+/// Merges neighbouring runs with equal marks.
+fn normalize(runs: Vec<Run>) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.chars == 0 {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.marks == run.marks => {
+                let mut text = String::with_capacity(last.text.len() + run.text.len());
+                text.push_str(&last.text);
+                text.push_str(&run.text);
+                *last = Run::new(text, last.chars + run.chars, run.marks);
+            }
+            _ => out.push(run),
+        }
+    }
+    out
 }
 
 /// A paragraph: runs, and the marks of its terminating `\n`.
@@ -158,6 +204,83 @@ impl Paragraph {
             });
         }
     }
+
+    /// This paragraph with `text` (no `\n`, `chars` long) inserted at
+    /// character `offset` (≤ `self.chars`).
+    fn with_insert(&self, offset: usize, text: &str, chars: usize, marks: &Marks) -> Paragraph {
+        let mut runs = Vec::with_capacity(self.runs.len() + 2);
+        let mut start = 0;
+        let mut inserted = false;
+        for run in &self.runs {
+            let end = start + run.chars;
+            if !inserted && offset <= end {
+                let local = offset - start;
+                let at = run.byte(local);
+                if &run.marks == marks {
+                    let mut joined = String::with_capacity(run.text.len() + text.len());
+                    joined.push_str(&run.text[..at]);
+                    joined.push_str(text);
+                    joined.push_str(&run.text[at..]);
+                    runs.push(Run::new(joined, run.chars + chars, run.marks.clone()));
+                } else {
+                    runs.push(Run::new(
+                        run.text[..at].to_owned(),
+                        local,
+                        run.marks.clone(),
+                    ));
+                    runs.push(Run::new(text.to_owned(), chars, marks.clone()));
+                    runs.push(Run::new(
+                        run.text[at..].to_owned(),
+                        run.chars - local,
+                        run.marks.clone(),
+                    ));
+                }
+                inserted = true;
+            } else {
+                runs.push(run.clone());
+            }
+            start = end;
+        }
+        if !inserted {
+            runs.push(Run::new(text.to_owned(), chars, marks.clone()));
+        }
+        Paragraph {
+            runs: normalize(runs),
+            end: self.end.clone(),
+            chars: self.chars + chars,
+        }
+    }
+
+    /// This paragraph without characters `offset .. offset + len` (within
+    /// the paragraph, not its `\n`).
+    fn with_delete(&self, offset: usize, len: usize) -> Paragraph {
+        let cut_end = offset + len;
+        let mut runs = Vec::with_capacity(self.runs.len());
+        let mut start = 0;
+        for run in &self.runs {
+            let end = start + run.chars;
+            if end <= offset || start >= cut_end {
+                runs.push(run.clone());
+            } else {
+                let keep_left = offset.saturating_sub(start);
+                let keep_right = cut_end.min(end) - start;
+                let mut text = String::new();
+                text.push_str(&run.text[..run.byte(keep_left)]);
+                text.push_str(&run.text[run.byte(keep_right)..]);
+                runs.push(Run::new(
+                    text,
+                    keep_left + (run.chars - keep_right),
+                    run.marks.clone(),
+                ));
+            }
+            start = end;
+        }
+        Paragraph {
+            runs: normalize(runs),
+            end: self.end.clone(),
+            chars: self.chars - len,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -166,11 +289,59 @@ struct Cell {
     marks: Marks,
 }
 
-/// The text of a node, as paragraphs.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct TextView {
-    paragraphs: imbl::Vector<Arc<Paragraph>>,
+#[derive(Clone, Debug)]
+struct Chunk {
+    paragraphs: Vec<Arc<Paragraph>>,
     chars: usize,
+}
+
+impl Chunk {
+    fn new(paragraphs: Vec<Arc<Paragraph>>) -> Self {
+        let chars = paragraphs.iter().map(|p| p.span()).sum();
+        Self { paragraphs, chars }
+    }
+}
+
+/// Splits paragraphs into chunks.
+fn chunk_up(paragraphs: Vec<Arc<Paragraph>>) -> Vec<Arc<Chunk>> {
+    if paragraphs.is_empty() {
+        return Vec::new();
+    }
+    if paragraphs.len() <= MAX_CHUNK {
+        return vec![Arc::new(Chunk::new(paragraphs))];
+    }
+    paragraphs
+        .chunks(CHUNK)
+        .map(|c| Arc::new(Chunk::new(c.to_vec())))
+        .collect()
+}
+
+/// Where a paragraph is.
+#[derive(Clone, Copy)]
+struct Location {
+    chunk: usize,
+    in_chunk: usize,
+    /// Index among all paragraphs.
+    index: usize,
+    /// Character offset of the paragraph's start.
+    start: usize,
+}
+
+/// The text of a node, as paragraphs.
+#[derive(Clone, Debug, Default)]
+pub struct TextView {
+    chunks: imbl::Vector<Arc<Chunk>>,
+    chars: usize,
+    count: usize,
+}
+
+/// Texts are equal if their paragraphs are, however they are chunked.
+impl PartialEq for TextView {
+    fn eq(&self, other: &Self) -> bool {
+        self.chars == other.chars
+            && self.count == other.count
+            && self.paragraphs().eq(other.paragraphs())
+    }
 }
 
 impl TextView {
@@ -182,7 +353,17 @@ impl TextView {
                 builder.push_str(insert, &Marks::from_attributes(attributes.as_ref()));
             }
         }
-        builder.finish()
+        Self::from_paragraphs(builder.finish())
+    }
+
+    fn from_paragraphs(paragraphs: Vec<Arc<Paragraph>>) -> Self {
+        let chars = paragraphs.iter().map(|p| p.span()).sum();
+        let count = paragraphs.len();
+        Self {
+            chunks: chunk_up(paragraphs).into_iter().collect(),
+            chars,
+            count,
+        }
     }
 
     /// Length in characters, including every `\n`.
@@ -197,18 +378,20 @@ impl TextView {
 
     /// The paragraphs.
     pub fn paragraphs(&self) -> impl Iterator<Item = &Paragraph> {
-        self.paragraphs.iter().map(|p| &**p)
+        self.chunks
+            .iter()
+            .flat_map(|c| c.paragraphs.iter().map(|p| &**p))
     }
 
     /// Number of paragraphs.
     pub fn paragraph_count(&self) -> usize {
-        self.paragraphs.len()
+        self.count
     }
 
     /// The plain text, with `\n` between paragraphs.
     pub fn to_plain_string(&self) -> String {
         let mut out = String::with_capacity(self.chars);
-        for paragraph in &self.paragraphs {
+        for paragraph in self.paragraphs() {
             for run in &paragraph.runs {
                 out.push_str(&run.text);
             }
@@ -237,92 +420,226 @@ impl TextView {
                 }
                 TextDelta::Insert { insert, attributes } => {
                     let marks = Marks::from_attributes(attributes.as_ref());
-                    self.edit(pos, 0, |cells, start| {
-                        cells.splice(
-                            start..start,
-                            insert.chars().map(|ch| Cell {
-                                ch,
-                                marks: marks.clone(),
-                            }),
-                        );
-                    });
-                    pos += insert.chars().count();
+                    let chars = insert.chars().count();
+                    if !self.insert_fast(pos, insert, chars, &marks) {
+                        self.edit(pos, 0, |cells, start| {
+                            cells.splice(
+                                start..start,
+                                insert.chars().map(|ch| Cell {
+                                    ch,
+                                    marks: marks.clone(),
+                                }),
+                            );
+                        });
+                    }
+                    pos += chars;
                 }
                 TextDelta::Delete { delete } => {
                     let len = *delete;
-                    self.edit(pos, len, |cells, start| {
-                        cells.drain(start..start + len);
-                    });
+                    if !self.delete_fast(pos, len) {
+                        self.edit(pos, len, |cells, start| {
+                            cells.drain(start..start + len);
+                        });
+                    }
                 }
             }
         }
     }
 
-    /// The paragraph containing character `pos`, and where it starts.
-    /// `(paragraph count, len)` for the end of the text.
-    fn locate(&self, pos: usize) -> (usize, usize) {
-        let mut start = 0;
-        for (index, paragraph) in self.paragraphs.iter().enumerate() {
-            let span = paragraph.span();
-            if pos < start + span {
-                return (index, start);
+    /// The paragraph containing character `pos`, or `None` at the end.
+    fn locate(&self, pos: usize) -> Option<Location> {
+        let (mut start, mut index) = (0, 0);
+        for (chunk_index, chunk) in self.chunks.iter().enumerate() {
+            if pos < start + chunk.chars {
+                for (in_chunk, paragraph) in chunk.paragraphs.iter().enumerate() {
+                    let span = paragraph.span();
+                    if pos < start + span {
+                        return Some(Location {
+                            chunk: chunk_index,
+                            in_chunk,
+                            index,
+                            start,
+                        });
+                    }
+                    start += span;
+                    index += 1;
+                }
+                return None; // unreachable while chunk totals are right
             }
-            start += span;
+            start += chunk.chars;
+            index += chunk.paragraphs.len();
         }
-        (self.paragraphs.len(), start)
+        None
     }
 
-    /// Edits characters `pos .. pos + len` (an empty range for inserts):
-    /// flattens the paragraphs it overlaps, lets `edit` change them, and
-    /// splits the result into paragraphs again.
-    fn edit(&mut self, pos: usize, len: usize, edit: impl FnOnce(&mut Vec<Cell>, usize)) {
-        let count = self.paragraphs.len();
-        let (mut first, mut first_start) = self.locate(pos);
-        if first == count && count > 0 && self.paragraphs[count - 1].end.is_none() {
-            // Appending to an unterminated last paragraph.
-            first = count - 1;
-            first_start -= self.paragraphs[first].chars;
+    /// The last paragraph, if it has no `\n` (text typed at the very end
+    /// belongs to it).
+    fn open_last(&self) -> Option<Location> {
+        let chunk = self.chunks.len().checked_sub(1)?;
+        let paragraphs = &self.chunks[chunk].paragraphs;
+        let last = paragraphs.last()?;
+        last.end.is_none().then(|| Location {
+            chunk,
+            in_chunk: paragraphs.len() - 1,
+            index: self.count - 1,
+            start: self.chars - last.chars,
+        })
+    }
+
+    /// Replaces one paragraph in place.
+    fn replace_one(&mut self, at: Location, paragraph: Paragraph) {
+        if let Some(slot) = self.chunks.get_mut(at.chunk) {
+            let chunk = Arc::make_mut(slot);
+            let old = chunk.paragraphs[at.in_chunk].span();
+            let new = paragraph.span();
+            chunk.paragraphs[at.in_chunk] = Arc::new(paragraph);
+            chunk.chars = chunk.chars - old + new;
+            self.chars = self.chars - old + new;
         }
-        let mut last = if len == 0 {
-            first
+    }
+
+    /// An insert without `\n` into one paragraph.
+    fn insert_fast(&mut self, pos: usize, text: &str, chars: usize, marks: &Marks) -> bool {
+        if text.is_empty() || text.contains('\n') {
+            return false;
+        }
+        let Some(at) = self.locate(pos).or_else(|| self.open_last()) else {
+            return false;
+        };
+        let paragraph = &self.chunks[at.chunk].paragraphs[at.in_chunk];
+        let offset = pos - at.start;
+        if offset > paragraph.chars {
+            return false;
+        }
+        let edited = paragraph.with_insert(offset, text, chars, marks);
+        self.replace_one(at, edited);
+        true
+    }
+
+    /// A delete inside one paragraph (not its `\n`).
+    fn delete_fast(&mut self, pos: usize, len: usize) -> bool {
+        let Some(at) = self.locate(pos) else {
+            return false;
+        };
+        let paragraph = &self.chunks[at.chunk].paragraphs[at.in_chunk];
+        let offset = pos - at.start;
+        // Emptying an unterminated last paragraph removes it: general path.
+        if len == 0
+            || offset + len > paragraph.chars
+            || (paragraph.end.is_none() && len == paragraph.chars)
+        {
+            return false;
+        }
+        let edited = paragraph.with_delete(offset, len);
+        self.replace_one(at, edited);
+        true
+    }
+
+    /// The general edit of characters `pos .. pos + len` (an empty range
+    /// for inserts): flattens the paragraphs it overlaps, lets `edit`
+    /// change them, and splits the result into paragraphs again.
+    fn edit(&mut self, pos: usize, len: usize, edit: impl FnOnce(&mut Vec<Cell>, usize)) {
+        let (mut first, mut first_start) = match self.locate(pos) {
+            Some(at) => (at.index, at.start),
+            None => (self.count, self.chars),
+        };
+        if let (true, Some(open)) = (first == self.count, self.open_last()) {
+            first = open.index;
+            first_start = open.start;
+        }
+        let mut end = if len == 0 {
+            (first + 1).min(self.count)
         } else {
-            self.locate(pos + len - 1).0
+            self.locate(pos + len - 1)
+                .map_or(self.count, |at| at.index + 1)
         };
         let mut cells = Vec::new();
-        for index in first..(last + 1).min(count) {
-            self.paragraphs[index].cells(&mut cells);
+        for paragraph in self.range(first, end) {
+            paragraph.cells(&mut cells);
         }
         edit(&mut cells, pos - first_start);
-        // A deleted `\n` merges the edited paragraphs with the next one.
-        while last + 1 < count && cells.last().is_some_and(|c| c.ch != '\n') {
-            last += 1;
-            self.paragraphs[last].cells(&mut cells);
+        // A deleted `\n` joins the edited paragraphs with the next one.
+        while end < self.count && cells.last().is_some_and(|c| c.ch != '\n') {
+            if let Some(next) = self.range(end, end + 1).next() {
+                next.cells(&mut cells);
+            }
+            end += 1;
         }
         let mut builder = Builder::default();
-        builder.push_cells(&cells);
-        let replacement = builder.finish();
-        let removed: usize = (first..(last + 1).min(count))
-            .map(|i| self.paragraphs[i].span())
+        for cell in &cells {
+            builder.push_char(cell.ch, &cell.marks);
+        }
+        self.splice(first, end, builder.finish());
+    }
+
+    /// Paragraphs `first .. end`.
+    fn range(&self, first: usize, end: usize) -> impl Iterator<Item = &Arc<Paragraph>> {
+        self.chunks
+            .iter()
+            .flat_map(|c| c.paragraphs.iter())
+            .skip(first)
+            .take(end.saturating_sub(first))
+    }
+
+    /// The chunk holding paragraph `index`, and the index of its first
+    /// paragraph. The last chunk for `index == count`.
+    fn chunk_of(&self, index: usize) -> (usize, usize) {
+        let mut first = 0;
+        for (chunk_index, chunk) in self.chunks.iter().enumerate() {
+            let len = chunk.paragraphs.len();
+            if index < first + len || chunk_index + 1 == self.chunks.len() {
+                return (chunk_index, first);
+            }
+            first += len;
+        }
+        (0, 0)
+    }
+
+    /// Replaces paragraphs `first .. end` with `new`.
+    fn splice(&mut self, first: usize, end: usize, new: Vec<Arc<Paragraph>>) {
+        if self.chunks.is_empty() {
+            *self = Self::from_paragraphs(new);
+            return;
+        }
+        let (first_chunk, first_base) = self.chunk_of(first);
+        let (last_chunk, last_base) = if end > first {
+            self.chunk_of(end - 1)
+        } else {
+            (first_chunk, first_base)
+        };
+        let suffix_from = if end > first {
+            end - last_base
+        } else {
+            first - first_base
+        };
+        let new_count = new.len();
+        let mut combined: Vec<Arc<Paragraph>> =
+            self.chunks[first_chunk].paragraphs[..first - first_base].to_vec();
+        combined.extend(new);
+        combined.extend_from_slice(&self.chunks[last_chunk].paragraphs[suffix_from..]);
+        let removed_chars: usize = (first_chunk..=last_chunk)
+            .map(|c| self.chunks[c].chars)
             .sum();
-        let end = (last + 1).min(count);
-        let tail = self.paragraphs.split_off(end);
-        self.paragraphs.truncate(first);
-        self.paragraphs.append(replacement.paragraphs);
-        self.paragraphs.append(tail);
-        self.chars = self.chars - removed + replacement.chars;
+        let rebuilt = chunk_up(combined);
+        let added_chars: usize = rebuilt.iter().map(|c| c.chars).sum();
+        let tail = self.chunks.split_off(last_chunk + 1);
+        self.chunks.truncate(first_chunk);
+        self.chunks.extend(rebuilt);
+        self.chunks.append(tail);
+        self.chars = self.chars - removed_chars + added_chars;
+        self.count = self.count - (end - first) + new_count;
     }
 }
 
 /// Builds paragraphs from text pieces, merging neighbouring equal marks.
 #[derive(Default)]
 struct Builder {
-    paragraphs: imbl::Vector<Arc<Paragraph>>,
+    paragraphs: Vec<Arc<Paragraph>>,
     runs: Vec<Run>,
     text: String,
     marks: Marks,
     run_chars: usize,
     paragraph_chars: usize,
-    total: usize,
 }
 
 impl Builder {
@@ -331,25 +648,45 @@ impl Builder {
             self.end_paragraph(Some(marks.clone()));
             return;
         }
+        self.start_run(marks);
+        self.text.push(ch);
+        self.run_chars += 1;
+    }
+
+    /// Whole segments between newlines at a time: much faster than
+    /// characters for large texts.
+    fn push_str(&mut self, text: &str, marks: &Marks) {
+        let mut rest = text;
+        while !rest.is_empty() {
+            match rest.find('\n') {
+                Some(at) => {
+                    self.push_segment(&rest[..at], marks);
+                    self.end_paragraph(Some(marks.clone()));
+                    rest = &rest[at + 1..];
+                }
+                None => {
+                    self.push_segment(rest, marks);
+                    rest = "";
+                }
+            }
+        }
+    }
+
+    fn push_segment(&mut self, segment: &str, marks: &Marks) {
+        if segment.is_empty() {
+            return;
+        }
+        self.start_run(marks);
+        self.text.push_str(segment);
+        self.run_chars += segment.chars().count();
+    }
+
+    fn start_run(&mut self, marks: &Marks) {
         if self.run_chars > 0 && &self.marks != marks {
             self.end_run();
         }
         if self.run_chars == 0 {
             self.marks = marks.clone();
-        }
-        self.text.push(ch);
-        self.run_chars += 1;
-    }
-
-    fn push_str(&mut self, text: &str, marks: &Marks) {
-        for ch in text.chars() {
-            self.push_char(ch, marks);
-        }
-    }
-
-    fn push_cells(&mut self, cells: &[Cell]) {
-        for cell in cells {
-            self.push_char(cell.ch, &cell.marks);
         }
     }
 
@@ -371,22 +708,17 @@ impl Builder {
         if end.is_none() && self.runs.is_empty() {
             return;
         }
-        let paragraph = Paragraph {
+        self.paragraphs.push(Arc::new(Paragraph {
             runs: std::mem::take(&mut self.runs),
             chars: self.paragraph_chars,
             end,
-        };
-        self.total += paragraph.span();
+        }));
         self.paragraph_chars = 0;
-        self.paragraphs.push_back(Arc::new(paragraph));
     }
 
-    fn finish(mut self) -> TextView {
+    fn finish(mut self) -> Vec<Arc<Paragraph>> {
         self.end_paragraph(None);
-        TextView {
-            paragraphs: self.paragraphs,
-            chars: self.total,
-        }
+        self.paragraphs
     }
 }
 
@@ -395,9 +727,9 @@ mod tests {
     use super::*;
     use loro::{ExpandType, LoroDoc, StyleConfig, StyleConfigMap};
 
-    /// Applies `edit` to a Loro text and checks that the incrementally
-    /// updated view equals a view built from scratch.
-    fn check(edits: impl FnOnce(&loro::LoroText)) {
+    /// Applies `edits` to a Loro text holding `initial` and checks that the
+    /// incrementally updated view equals a view built from scratch.
+    fn check_with(initial: &str, edits: impl FnOnce(&loro::LoroText)) {
         let doc = LoroDoc::new();
         let mut styles = StyleConfigMap::new();
         styles.insert(
@@ -423,7 +755,7 @@ mod tests {
             }
         }));
         let text = doc.get_text("t");
-        text.insert(0, "first line\nsecond\nthird").unwrap();
+        text.insert(0, initial).unwrap();
         doc.commit();
         let mut view = TextView::from_delta(&text.to_delta());
         deltas.lock().unwrap().clear();
@@ -435,6 +767,11 @@ mod tests {
         assert_eq!(view, TextView::from_delta(&text.to_delta()));
         assert_eq!(view.to_plain_string(), text.to_string());
         assert_eq!(view.len(), text.len_unicode());
+        assert_eq!(view.paragraph_count(), view.paragraphs().count());
+    }
+
+    fn check(edits: impl FnOnce(&loro::LoroText)) {
+        check_with("first line\nsecond\nthird", edits);
     }
 
     #[test]
@@ -466,19 +803,49 @@ mod tests {
         check(|t| t.insert(3, "XY").unwrap());
         check(|t| t.insert(0, "start ").unwrap());
         check(|t| t.insert(t.len_unicode(), " end\n").unwrap());
+        check(|t| t.insert(t.len_unicode(), " end").unwrap());
         check(|t| t.insert(5, "a\nb\nc").unwrap());
+        check(|t| t.insert(10, "é😀").unwrap()); // just before the first \n
         check(|t| t.delete(10, 1).unwrap()); // the first \n: paragraphs merge
         check(|t| t.delete(2, 15).unwrap());
+        check(|t| t.delete(2, 3).unwrap());
         check(|t| t.delete(0, t.len_unicode()).unwrap());
         check(|t| t.mark(2..14, "b", true).unwrap());
         check(|t| {
             t.mark(0..5, "b", true).unwrap();
             t.unmark(1..3, "b").unwrap();
         });
+        check(|t| {
+            t.mark(0..5, "b", true).unwrap();
+            t.insert(5, "!").unwrap(); // expands the bold run
+            t.insert(2, "-").unwrap();
+            t.delete(1, 3).unwrap();
+        });
         check(|t| t.mark(10..11, "h", 2).unwrap()); // a paragraph mark
         check(|t| {
             t.insert(t.len_unicode(), "\n").unwrap();
             t.delete(t.len_unicode() - 1, 1).unwrap();
+        });
+        check_with("", |t| t.insert(0, "x").unwrap());
+        check_with("x", |t| t.delete(0, 1).unwrap());
+    }
+
+    #[test]
+    fn many_paragraphs_are_chunked_and_still_match() {
+        let many: String = (0..300).map(|i| format!("paragraph {i}\n")).collect();
+        let view = TextView::from_delta(&[TextDelta::Insert {
+            insert: many.clone(),
+            attributes: None,
+        }]);
+        assert!(view.chunks.len() > 1, "300 paragraphs need several chunks");
+        check_with(&many, |t| t.insert(2000, "typed").unwrap());
+        check_with(&many, |t| t.insert(2000, "split\nhere").unwrap());
+        check_with(&many, |t| t.delete(100, 3000).unwrap()); // across chunks
+        check_with(&many, |t| t.mark(50..2500, "b", true).unwrap());
+        check_with(&many, |t| {
+            for i in 0..200 {
+                t.insert(10 + i * 3, "\n").unwrap(); // grows one chunk past MAX_CHUNK
+            }
         });
     }
 }
