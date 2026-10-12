@@ -211,6 +211,13 @@ been public for **at least 14 days**, transitive dependencies included
 `cargo update -p <crate> --precise <version>` if needed). Exception:
 security fixes, documented in the commit. Rationale: freshly published
 releases are the usual window for compromised packages.
+- Check the **whole lockfile** against publish dates, not only the entries
+  your change adds. Any `cargo update` or new dependency can move existing
+  transitive versions, and entries from before a check existed are not
+  vetted. This applies to every lockfile, including the separate
+  workspaces under `benchmarks/` and `crates/*/fuzz/`.
+- When a requirement in `Cargo.toml` names a too-new minimum (e.g.
+  `serde_json = "1.0.154"`), lower it to the version you pin.
 
 **After adding or updating dependencies:** run `cargo xtask dev-profile
 --write` and commit `Cargo.toml` together with `Cargo.lock`. It regenerates
