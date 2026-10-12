@@ -10,12 +10,14 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hpke::kem::XWing;
 use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
 use imaginarium_format::{
-    DocId, FileHeader, KeyProvider, ObjectId, Record, RecordBuilder, RecordOpener, RecordType, pb,
+    DocId, FileHeader, KeyProvider, Limits, ObjectId, Record, RecordBuilder, RecordFlags,
+    RecordOpener, RecordType, pb,
 };
 use prost::Message;
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
+use crate::acl::AclState;
 use crate::error::{CryptoError, Result};
 use crate::keys::{EpochKey, EpochKeys, KeyId};
 use crate::record::Suite1Opener;
@@ -342,12 +344,34 @@ pub fn keyring_record(
 }
 
 /// Decodes the keyrings in a document's key records (`KEYR` only).
-pub fn keyrings(key_records: &[Record]) -> Result<Vec<pb::Keyring>> {
+///
+/// If the records include an ACL chain (`ACLC`), the chain is replayed and
+/// every keyring must be signed by an owner or admin of its epoch (spec
+/// §6.4, §7.3). Otherwise whoever can append to the file (a Hub, say) could
+/// slip in a key it knows for a new epoch.
+pub fn keyrings(doc_id: &DocId, key_records: &[Record]) -> Result<Vec<pb::Keyring>> {
+    let has_acl = key_records
+        .iter()
+        .any(|record| record.rtype() == RecordType::ACLC);
+    let acl = has_acl
+        .then(|| AclState::replay(doc_id, key_records))
+        .transpose()?;
     key_records
         .iter()
         .filter(|record| record.rtype() == RecordType::KEYR)
         .map(|record| {
-            pb::Keyring::decode(record.payload())
+            if let Some(acl) = &acl {
+                acl.verify_keyring(record)?;
+            }
+            if record.flags().contains(RecordFlags::ENCRYPTED) {
+                return Err(CryptoError::InvalidInput(
+                    "KEYR records must not be encrypted".into(),
+                ));
+            }
+            let content = record
+                .open_content(doc_id, None, &Limits::default())
+                .map_err(|err| CryptoError::InvalidInput(err.to_string()))?;
+            pb::Keyring::decode(content.as_slice())
                 .map_err(|err| CryptoError::InvalidInput(format!("keyring: {err}")))
         })
         .collect()
@@ -411,13 +435,13 @@ impl KeyProvider for RecipientKeys {
 /// least one. Wraps the credential doesn't address return `None`. Failures
 /// of addressed wraps (wrong password) are errors.
 fn unlock(
-    _header: &FileHeader,
+    header: &FileHeader,
     key_records: &[Record],
     mut try_unwrap: impl FnMut(u32, &pb::KeyWrap) -> Option<Result<EpochKey>>,
 ) -> imaginarium_format::Result<Box<dyn RecordOpener>> {
     let mut keys = EpochKeys::new();
     let mut last_error = None;
-    for keyring in keyrings(key_records)? {
+    for keyring in keyrings(&header.doc_id, key_records)? {
         for epoch in &keyring.epochs {
             for wrap in &epoch.wraps {
                 match try_unwrap(epoch.epoch, wrap) {

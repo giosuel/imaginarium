@@ -39,6 +39,10 @@ pub enum CryptoError {
     /// The access-control chain is invalid (spec §8).
     #[error("ACL chain invalid: {0}")]
     Acl(String),
+    /// Two different ACL changes claim the same index: the chain was forked,
+    /// which means tampering (spec §8.2). Stop accepting changes from the source.
+    #[error("ACL chain forked at index {0} (tampering)")]
+    AclFork(u64),
 }
 
 impl From<CryptoError> for imaginarium_format::FormatError {
