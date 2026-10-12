@@ -61,6 +61,13 @@ MAINTAINERS.md, "Reporting to the owner"). Known facts:
   failed with `ENOSPC`. It recovered within minutes (91 GB free). If it
   happens again, `target/debug/incremental` (~2 GB) is the safe thing of
   ours to delete. Check `df -h /` before big builds.
+  **If it happens again, diagnose it in the background (owner request)**,
+  read-only: sample `df` every 10 s for ~10 min, list recently started
+  processes of all users (`ps -eo user,pid,etimes,args --sort=etimes`),
+  find large recent files in readable places (`find / -xdev -size +200M
+  -mmin -120`), and check our own deleted-but-open files (`lsof +L1`).
+  Then report when, how much, and the likely cause. Never touch other
+  users' files.
 - The linker is the default `rust-lld`. `clang` is present, `mold`/`sccache`
   are not.
 - **Baseline**: clean build of the planned heavy stack (Vello/wgpu, winit,
