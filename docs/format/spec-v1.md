@@ -277,7 +277,13 @@ signature profile.
   The ciphertext includes the 16-byte tag.
 
 This binds every record to its document, type, flags and complete header
-(object id, stream, epoch, suite, `plain_len`, codec, segment). Records
+(object id, stream, epoch, suite, `plain_len`, codec, segment).
+
+The AAD and signatures (§7.2) use the **header bytes exactly as stored**.
+Implementations MUST keep `header` (and `sig`) verbatim. They MUST NOT
+re-encode a decoded `RecordHeader`, because a reader that doesn't know a
+newer field would drop it, and the AAD and signature would no longer
+match. Copying a record (compaction, sync) MUST copy its bytes unchanged. Records
 therefore can't be moved between documents, relabelled, or have their
 header altered without decryption failing.
 
@@ -576,7 +582,10 @@ These refine `../design/file-format.md` while writing the normative text:
    Per edit batch (~50 ms) this is negligible.
 7. **ACL chain** is specified concretely: linear, index plus `prev_hash`,
    fork means tampering, and a permission table.
-8. *(Found while implementing M1.3)* **`key_records` in the `INDX`
+8. *(Found while implementing M1.3)* **Verbatim header bytes** (§6.3.1):
+   re-encoding a decoded header would silently drop unknown fields of
+   newer versions, and break the AAD and signatures.
+9. *(Found while implementing M1.3)* **`key_records` in the `INDX`
    header** of encrypted documents. Without it, a reader would need the
    key to decrypt the index that tells it where the keys are, and would
    have to scan the whole file instead.
