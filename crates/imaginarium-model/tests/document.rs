@@ -705,3 +705,35 @@ fn undoing_a_move_of_a_node_that_is_gone_leaves_no_empty_node() {
         assert_consistent(&doc);
     }
 }
+
+#[test]
+fn removing_a_duplicated_node_inside_a_subtree_keeps_the_view_consistent() {
+    // Two peers delete the same node and both undo: two live copies with
+    // one stored id, one of them shadowed. When the winner goes away as
+    // part of a deleted subtree, the other copy takes over the id.
+    let mut a = board();
+    let frame = shape(&mut a, Parent::Root, 0.0);
+    let dup = shape(&mut a, Parent::Root, 1.0);
+    let mut b = open(&a.export_snapshot().unwrap());
+    let (va, vb) = (a.version(), b.version());
+    for doc in [&mut a, &mut b] {
+        doc.transact(&Actor::User, |t| t.delete_node(dup)).unwrap();
+        doc.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    }
+    let from_b = b.export_updates_since(&vb).unwrap();
+    a.apply_remote(&[&from_b]).unwrap();
+    let from_a = a.export_updates_since(&va).unwrap();
+    b.apply_remote(&[&from_a]).unwrap();
+    assert_consistent(&a);
+    a.transact(&Actor::User, |t| {
+        t.move_node(dup, Parent::Node(frame), None)
+    })
+    .unwrap();
+    assert_consistent(&a);
+    a.transact(&Actor::User, |t| t.delete_node(frame)).unwrap();
+    assert_consistent(&a);
+    assert!(
+        a.view().node(dup).is_some(),
+        "the other copy has the id now"
+    );
+}
