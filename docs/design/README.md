@@ -7,6 +7,7 @@ with the code, or point to the normative spec that replaces it.
 | Design | Status | Milestone |
 |---|---|---|
 | [`file-format.md`](file-format.md): `.imag` container, objects, CRDT schema, encryption | Accepted | M1 |
+| [`m1-dependencies.md`](m1-dependencies.md): crypto, protobuf and CRDT crate review for M1 | Accepted | M1 |
 | `sync-protocol.md`: client ↔ Hub protocol, live frames, presence | To be written | M1 |
 | `ui-toolkit.md`: widget tree, signals, frame scheduling, a11y | To be written | M2 |
 | `rendering.md`: scene building, tile cache, compositor, backends | To be written | M2 |

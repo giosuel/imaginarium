@@ -9,7 +9,7 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.0 Dependency research** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Next step:** **M1.1 Normative spec v1** (see the M1 checklist below). Use **xhigh/max effort** for M1.
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
@@ -240,26 +240,24 @@ Use **xhigh/max effort** throughout. These crates are the hardest to change
 later. Commit after each item, and use one PR per item (or smaller). The
 design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
 
-- [ ] **M1.0 Dependency research** ← **next**
-  - Verify the maturity, maintenance, audits, MSRV and licenses of the
-    candidate crates, and record the result as a design note
-    (`docs/design/m1-dependencies.md`) or an ADR where a decision changes:
-    - AEAD XChaCha20-Poly1305 (`chacha20poly1305`), BLAKE3 (`blake3`),
-      Ed25519 (`ed25519-dalek`), Argon2id (`argon2`);
-    - post-quantum: X-Wing (`x-wing`?), ML-KEM (`ml-kem`), ML-DSA
-      (`ml-dsa`). Is there HPKE support for X-Wing (`hpke`, `hpke-rs`), or
-      do we specify an HPKE-style construction ourselves on top of
-      standard parts?
-    - protobuf: `prost` plus `.proto` as the normative schema. How is code
-      generated without `protoc` (e.g. `protox`), or are structs
-      hand-derived and checked against the `.proto` in a test?
-    - CRDT candidates: `loro` (encoding stability, shallow snapshots,
-      movable tree, rich text), `yrs`, `automerge`. Only the API survey
-      here; the benchmark is M1.5.
-  - AC: every primitive in suite 1 has a chosen crate with version and
-    rationale, or the spec is adjusted to what exists. Open risks are
-    listed.
-- [ ] **M1.1 Normative spec v1**: `docs/format/spec-v1.md` (RFC-style
+- [x] **M1.0 Dependency research** (done 2026-10-12, PR #10). See
+  [`docs/design/m1-dependencies.md`](design/m1-dependencies.md).
+  - RustCrypto for everything:
+    - `chacha20poly1305` (XChaCha), `blake3`, `ed25519-dalek` 3,
+      `argon2`, `crc32c`, `zstd`;
+    - **`hpke` 0.14 implements X-Wing as KEM 0x647A**, so key wrapping
+      is standard HPKE `(0x647A, HKDF-SHA256, ChaCha20-Poly1305)`;
+    - `ml-dsa` (ML-DSA-65).
+  - PQ crates are pre-1.0 and unaudited. ML-DSA had 2026 CVEs, fixed
+    before 0.1.0. Hybrid design: neither can make us weaker than
+    X25519/Ed25519.
+  - Protobuf: `prost` + `prost-build` + `protox` 0.9.1 (pure Rust, no
+    `protoc`). The `.proto` files are normative.
+  - CRDT: **only Loro has a movable tree and history trimming.** Yrs is
+    the fallback. The M1.5 benchmark decides.
+  - New rule in MAINTAINERS: **the two-week rule also applies to crates**.
+    Pin `x-wing` 0.1.0 until 0.1.1 is 14 days old (2026-10-15).
+- [ ] **M1.1 Normative spec v1** ← **next**: `docs/format/spec-v1.md` (RFC-style
   MUST/SHOULD), `docs/format/proto/*.proto`
   - byte layout (header, record framing, varints, flags, CRC32C, index,
     trailer);
