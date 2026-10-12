@@ -21,6 +21,7 @@ thiserror.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 imaginarium-test-utils.workspace = true
+peak_alloc.workspace = true
 proptest.workspace = true
 
 [lints]

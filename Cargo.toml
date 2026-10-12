@@ -40,6 +40,7 @@ imbl = "7.0.2"
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "hkdfsha2", "mlkem", "x25519"] }
 loro = "1.16.2"
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core"] }
+peak_alloc = "0.3.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
 proptest = "1.11.0"

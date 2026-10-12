@@ -995,6 +995,7 @@ dependencies = [
  "imaginarium-test-utils",
  "imbl",
  "loro",
+ "peak_alloc",
  "proptest",
  "thiserror 2.0.21",
 ]
@@ -1634,6 +1635,12 @@ checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
 dependencies = [
  "phc",
 ]
+
+[[package]]
+name = "peak_alloc"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccc90935a8dd139fdf341762773687a1e361d3f54b396a55d9dd1f7001e484bb"
 
 [[package]]
 name = "pest"
@@ -2397,7 +2404,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",
