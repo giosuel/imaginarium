@@ -219,6 +219,11 @@ uses it. Title and description are required, and the key is dotted
 the app registers at startup. Secrets are always `SecretRef` (OS
 keychain). See the `imaginarium-settings` crate docs.
 
+**Writing a command:** declare a `static FnCommand` with a stable id
+(`area.verb_object`), a *specific* description (AI models read it),
+synonyms, typed arguments with limits, and a cheap availability check. See
+"Writing a command" in the `imaginarium-commands` crate docs.
+
 **Adding a crate:** create `crates/imaginarium-<name>/` with the workspace
 package fields and `[lints] workspace = true`. Then check that it is in
 the layer table (`LAYERS` in `xtask/src/layers.rs`) and in the PLAN §4.1

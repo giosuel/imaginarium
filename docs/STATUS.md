@@ -9,12 +9,12 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M0 (Foundations and profiling)**
-- **Next step:** **M0.6 `imaginarium-commands`** (see the checklist below)
+- **Next step:** **M0.7 Website skeleton** (see the checklist below)
 - **Code status:** Cargo workspace with 6 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures) and
-  `imaginarium-settings` (typed registry, TOML). `commands` is still a
-  skeleton. The app only prints its
+  `imaginarium-settings` (typed registry, TOML) and `imaginarium-commands`
+  (registry, args/JSON Schema, keymaps, palette search). The app only prints its
   version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
@@ -172,15 +172,25 @@ Commit after each item. Each item lists its acceptance criteria (AC).
     These come with their milestones.
   - AC: ✅ 25 unit tests and 3 doctests (registration, validation,
     round-trip of all kinds, unregistered read).
-- [ ] **M0.6 `imaginarium-commands`** ← **next**
-  - `Command` trait (id, meta, `ArgsSchema` exportable as JSON Schema,
-    availability, run). The `Context` stays abstract or generic so no model
-    dependency exists yet.
-  - Registry and keymap model (platform-aware `Mod` = Ctrl/Cmd).
-  - **Fuzzy search index** with synonyms and a recency/frequency boost.
-  - AC: a benchmark searching **2,000 commands in < 1 ms per keystroke**
-    (one of the M2 gate criteria), plus tests for ranking.
-- [ ] **M0.7 Website skeleton** (`website/`, Astro Starlight)
+- [x] **M0.6 `imaginarium-commands`** (done 2026-10-12, PR #7, stacked on #6)
+  - `Command<Cx>` is generic over the context, so the crate has no model
+    dependency. `static FnCommand`s for built-ins (use
+    `FnCommand::<Cx>::new` when builder calls follow). `CommandMeta`
+    requires a title and description.
+  - `Registry::execute` is **the single execution path**: it checks
+    availability and validates arguments. `tool_definitions` and
+    `execute_tool_call` make every enabled command an AI tool (JSON Schema;
+    tool name `text.bold` → `text__bold`).
+  - `Keymap`: `Mod+Shift+K` is platform-neutral. It displays as
+    `Ctrl+Shift+K` or `⇧⌘K`, matches physical key presses, and detects
+    conflicts. Single strokes only (chords later).
+  - `SearchIndex`: fuzzy scoring with synonyms, field weights and a
+    bounded frecency boost (`UsageStats`, time passed in explicitly).
+    **Bench over 2,000 commands: worst 0.48 ms ("a"), typical
+    0.07–0.14 ms.** Budget 1 ms ✅.
+  - AC: ✅ 29 unit tests and 1 doctest, including ranking tests and the
+    benchmark.
+- [ ] **M0.7 Website skeleton** ← **next** (`website/`, Astro Starlight)
   - Sections: Home, Download (placeholder), User Guide, Self-hosting,
     Developer Docs (Architecture overview with a crate-map diagram, ADR
     index, File format, Contributing), and API reference link.
