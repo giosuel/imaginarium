@@ -1,402 +1,385 @@
 # Imaginarium: Project Plan
 
-Status: **Draft v1** (2026-10-12). Decisions marked *(ADR-xxxx)* are recorded
-in [`docs/adr/`](adr/). Each one can be revisited, but changing one means
-writing a superseding ADR.
+Status: **v2** (2026-10-12). This replaces v1. The reasoning behind each
+decision is in [`docs/adr/`](adr/), and detailed designs are in
+[`docs/design/`](design/).
 
 ---
 
 ## 1. Vision
 
-One application with one surface, the **board**. Documents, slides, page
-layouts, diagrams and raster drawings are all *objects on the board* or
-*views of the same document model*:
+**Imaginarium** is one fast, native application where documents,
+presentations, page layouts, diagrams and drawings live on one
+whiteboard-like surface. Generative AI is built in, using local or API
+models, and teams collaborate in real time through an end-to-end encrypted,
+self-hostable hub.
 
-- A **Board** is an infinite canvas (whiteboard, draw.io and Visio style).
-- A **Document** is a flowing, paginated text stream (Word, Writer).
-- A **Deck** is an ordered set of fixed-size frames (PowerPoint, Impress).
-- A **Layout** is a set of fixed pages with linked frames (Publisher).
-- A **Paint layer** is a tiled raster object (Paint). It can sit anywhere,
-  including on a slide or a board.
+### Pillars
 
-Because these share one object model, a diagram drawn on a board can be
-dropped into a document or a slide without conversion. Every mode uses the
-same selection, styling, undo, search and add-on APIs.
+1. **One surface, one model.** Board, Document, Deck, Layout and Paint are
+   views of a single CRDT document model. Anything can go anywhere.
+2. **Performance as a feature.** We own the UI toolkit, renderer and text
+   stack. Updates are fine-grained, and nothing redraws while idle.
+3. **Calm UX.** The UI is empty by default. Everything is a searchable
+   command, and controls appear in context. Every setting is in the UI.
+4. **AI-native, provider-agnostic.** Text, images and an assistant that
+   edits through the same commands as the user. Users choose local models
+   (Qwen, Mistral, Flux 2, SD) or APIs (Claude, ChatGPT, …).
+5. **Private collaboration.** Real-time editing, sharing, permissions and
+   comments, while the server can read nothing.
+6. **Open.** AGPL-3.0-or-later, an open and documented file format, an add-on
+   system, and docs for users and developers.
+
+### Business model
+
+The whole platform is open source (AGPL). Revenue comes from **subscription
+hosting of the hub**: storage, sync, uptime and backups. E2EE means the
+hosted offering never sees customer data, which is a selling point. AGPL
+means any modified hosted competitor must publish its changes.
 
 ### Non-goals (for now)
 
-- Spreadsheets. The model reserves a `Sheet` object kind so it can be added
-  later.
-- Real-time collaboration. The operation log (§4.3) is designed so that a
-  CRDT can be added later without rewriting the model.
-- Pixel-perfect fidelity with every MS Office feature. The goal is
-  *lossless round-trip* for anything we don't understand (see §6.3).
+Spreadsheets (the model reserves room for them), a web editor (a WASM web
+*viewer* is possible later), and mobile apps.
 
 ---
 
 ## 2. UX principles
 
-The UI should look like a clean whiteboard, with features appearing only
-when the user asks for them.
-
-1. **Empty by default.** On startup the user sees the canvas, a small floating
-   "pill" (mode, zoom, share/export) and nothing else. There is no ribbon
-   and no menu bar. On macOS the native menu bar is filled for platform
-   conventions only.
-2. **Contextual over global.** Selecting an object shows a small floating
-   toolbar next to it. The toolbar is generated from the commands that apply
-   to the selection: text selected shows text styles, a connector shows
-   arrowheads and routing.
-3. **One entry point for everything: the command palette** (`Ctrl/Cmd+K`).
-   Every feature is a *command* (§4.4), so every feature can be searched.
-   Results are ranked fuzzily with recency/frequency boosts, include
-   synonyms ("bold", "fett", "strong"), and show the keyboard shortcut so
-   users learn it.
-4. **Slash and quick-insert.** Typing `/` in text, or double-clicking empty
-   canvas, opens an insert picker (shape, table, image, slide, template)
-   that is filtered as you type.
-5. **Progressive disclosure.** Advanced properties live in an *inspector*
-   panel that is hidden until the user opens it (`Ctrl+I` or "More…" on the
-   floating toolbar). It slides over the canvas and does not reflow it.
-6. **Direct manipulation first.** Drag to connect, drag a handle to resize,
-   alt-drag to duplicate, show snapping guides. Dialogs are a last resort.
-7. **Nothing blocks.** Loading, saving, exporting and add-on work run in the
-   background with inline progress. No modal spinners.
-8. **Keyboard-complete and accessible.** Every action works by keyboard.
-   Screen-reader support goes through AccessKit. High-contrast and
-   reduced-motion themes are available.
-9. **Template packages** (shape libraries, slide themes, document styles,
-   brushes) are browsed in a single "Library" drawer that the palette can
-   also open. Packages are add-ons (§5).
+1. **Empty by default:** the canvas and a small floating pill (mode, zoom,
+   share, AI). There is no ribbon and no menu bar (macOS gets a native menu
+   for platform conventions only).
+2. **Contextual toolbars** appear next to the selection and are generated
+   from the commands available for it.
+3. **Command palette (`Ctrl/Cmd+K`)** is the entry point for everything:
+   commands, settings, templates, AI actions. It uses fuzzy search, synonyms
+   and recency, and shows shortcuts.
+4. **Quick insert:** type `/` in text, or double-click the canvas.
+5. **Inspector** for advanced properties. It is hidden until requested
+   (`Ctrl+I`) and slides over the canvas.
+6. **AI in context:**
+   - an assistant panel (`Ctrl+J`),
+   - inline "✦" actions on selections (rewrite, summarize, generate image,
+     remove background, …),
+   - AI suggestions shown as a reviewable diff (accept or reject).
+7. **All configuration in the UI.** Settings are searchable, generated from a
+   typed registry (ADR-0014), and include server administration.
+8. **Nothing blocks.** IO, AI, export, sync and crypto all run in the
+   background with inline progress.
+9. **Accessible and keyboard-complete.** AccessKit from day one, plus
+   high-contrast and reduced-motion themes.
+10. **Library drawer** for template packages, shape libraries, themes, brushes
+    and AI workflow templates.
 
 ---
 
-## 3. Technology choices (summary)
+## 3. Technology overview
 
-| Concern              | Choice                                              | ADR  |
-|----------------------|-----------------------------------------------------|------|
-| Language / build     | Rust (stable), Cargo workspace, MSRV pinned         | 0001 |
-| App shell / widgets  | **iced** (retained, Elm-style, wgpu)                | 0002 |
-| Canvas rendering     | Own render layer on **wgpu**; **Vello** for vector paths, tiled caches | 0003 |
-| Text shaping/layout  | **Parley** (+ swash, fontique) behind our own trait | 0003 |
-| Document model       | Arena + persistent (structurally shared) data       | 0004 |
-| Undo / history       | Operation log of invertible ops                     | 0004 |
-| OOXML (docx/pptx)    | **ooxmlsdk** for (de)serialization, own mapping layer | 0005 |
-| ODF (odt/odp)        | Own crate on `quick-xml` + `zip`                    | 0005 |
-| Native format        | Zip container: JSON manifest + binary chunks        | 0005 |
-| Add-ons              | **WebAssembly components** (wasmtime + WIT); declarative packages for templates | 0006 |
-| Accessibility        | AccessKit (used by iced and winit)                  | 0002 |
-| Async / background   | Dedicated worker pool (rayon) + channels; no tokio in core | 0003 |
-| CI                   | GitHub Actions matrix: ubuntu, windows, macos       | 0001 |
-
-Why these were chosen, and the risks, are in the ADRs. The most important
-architectural point: **the GUI framework is only the shell.** The canvas,
-text engine and document model are our own crates and do not depend on
-iced. If iced stops being a good fit, only `imaginarium-shell` has to be replaced.
+| Concern | Choice | ADR |
+|---|---|---|
+| Language / build | Rust stable, Cargo workspace, pinned toolchain | 0001 |
+| UI toolkit | **Own**: winit + wgpu + Vello + Parley + Taffy + AccessKit; fine-grained signals | 0007 |
+| Rendering | Vello (GPU) + CPU fallback, tile cache, single scene for panels and canvas | 0003 |
+| Document model | **Loro CRDT** + materialized `imbl` view model | 0009 |
+| Native format | `.imag`: encrypted, append-only object pack | 0010, [design](design/file-format.md) |
+| Interchange | DOCX/PPTX via `ooxmlsdk`, ODT/ODP via our own crate, PDF/SVG/PNG export | 0005 |
+| Security | XChaCha20-Poly1305, BLAKE3, Ed25519, HPKE, Argon2id, OPAQUE login | 0011 |
+| Collaboration | `imaginarium-hub`: axum + SQLite/Postgres + FS/S3, zero-knowledge relay | 0012 |
+| AI | Capability traits + provider adapters (API, Ollama/llama.cpp, ComfyUI, sd.cpp, ONNX), MCP | 0013 |
+| Add-ons | WASM components (wasmtime, WIT) + declarative packages; AGPL-compatible only | 0006, 0008 |
+| Settings | Typed registry → generated UI | 0014 |
+| Distribution / docs | cargo-dist installers, Docker hub image, Astro Starlight website | 0015 |
+| License | AGPL-3.0-or-later | 0008 |
 
 ---
 
 ## 4. Architecture
 
-### 4.1 Crate layout (Cargo workspace)
+### 4.1 Crate map
 
-Dependencies only point *downwards*. No crate below `shell` depends on a GUI
-framework.
-
-```
-crates/
-  imaginarium-app          # binary: wires everything together, CLI args, startup
-  imaginarium-shell        # iced UI: windows, palette, floating toolbars, inspector
-  imaginarium-canvas       # viewport, hit-testing, tools (select, pen, connector…), gestures
-  imaginarium-render       # scene → GPU (wgpu + vello), tile cache, raster compositing
-  imaginarium-text         # rich text model, shaping, line breaking, pagination
-  imaginarium-model        # document model: nodes, styles, ops, history, selection
-  imaginarium-commands     # command registry, keymaps, palette search index
-  imaginarium-layout       # page/flow layout for Document & Layout modes
-  imaginarium-diagram      # connectors, routing, snapping, shape geometry
-  imaginarium-paint        # raster layers, brushes, tiled pixel storage
-  imaginarium-io           # format traits + registry
-  imaginarium-io-native    # .imag container
-  imaginarium-io-ooxml     # docx, pptx
-  imaginarium-io-odf       # odt, odp
-  imaginarium-io-export    # pdf, svg, png
-  imaginarium-addon-api    # stable public API types + WIT definitions
-  imaginarium-addon-host   # wasmtime host, sandboxing, permissions
-  imaginarium-packages     # template/shape-library packages (declarative)
-  imaginarium-test-utils   # fixtures, golden-image & round-trip harness
-addons/              # first-party add-ons built on the public API
-  shapes-basic, shapes-uml, shapes-network, themes-default, …
-```
-
-Rules (enforced in CI with `cargo deny` and a small layering check):
-
-- `imaginarium-model` has **no** dependencies on rendering, IO or UI.
-- Each `imaginarium-io-*` crate implements the `Importer`/`Exporter` traits from
-  `imaginarium-io` and is registered at startup, the same way add-ons are.
-- First-party features use the same command and extension points as
-  third-party add-ons ("dogfood the API").
-
-### 4.2 Data flow (unidirectional, React/Elm-style)
+Dependencies point **downwards only**. Crates below the line know nothing
+about UI, networking or AI.
 
 ```
- input event ──► tool / command ──► Op(s) ──► Model (new version)
-                                               │
-                         ┌─────────────────────┤ change set (dirty node ids)
-                         ▼                     ▼
-               layout (incremental)     shell view state
-                         ▼
-               render scene diff ──► tile invalidation ──► GPU
+ apps        imaginarium-app (desktop)          imaginarium-hub (server)       imag (CLI)
+ ─────────────────────────────────────────────────────────────────────────────────────────
+ product     shell · canvas · ai-ui · admin-ui
+ features    diagram · layout · paint · io-ooxml · io-odf · io-export · packages
+ services    ai · ai-providers · ai-local · mcp · sync · addon-host · settings
+ toolkit     ui · reactive · render · text
+ core        model (Loro + view model) · commands · format · crypto · protocol
+ support     profiling · test-utils · addon-api (public, semver-stable)
 ```
 
-- **Single source of truth:** the model. UI state that should persist
-  (e.g. inspector open) lives in a small `ViewState`. Ephemeral state lives
-  in widgets.
-- **Ops in, change sets out.** Every mutation is an `Op`. Applying ops yields
-  a `ChangeSet` listing the touched node ids. Layout, render and UI re-run
-  *only* for those ids. This is the equivalent of React's reconciliation,
-  but explicit and O(changes) instead of O(tree).
+| Crate | Responsibility |
+|---|---|
+| `imaginarium-format` | `.imag` container: records, index, append/compaction, recovery. Standalone, fuzzed. |
+| `imaginarium-crypto` | Suites, key hierarchy, AEAD/sign/HPKE wrappers, keyring, ACL chain verification |
+| `imaginarium-model` | Schema on Loro, view model, transactions, ChangeSets, undo, migrations |
+| `imaginarium-commands` | Command registry, argument schemas (also used as AI tools), keymaps, search index |
+| `imaginarium-settings` | Typed settings registry, scopes, persistence |
+| `imaginarium-protocol` | Wire types shared by client and hub (versioned) |
+| `imaginarium-sync` | Client sync engine: object upload/download, live frames, presence, offline queue |
+| `imaginarium-reactive` / `-ui` | Signals; widget tree, input, IME, focus, layout, a11y |
+| `imaginarium-render` / `-text` | Scene building, tiles, compositor; rich text layout and editing |
+| `imaginarium-ai*` / `-mcp` | Capabilities, jobs, tool bridge; provider adapters; local ONNX models; MCP server and client |
+| `imaginarium-hub` | Accounts (OPAQUE), workspaces, ACL enforcement, object store, WebSocket fan-out, admin API |
 
-### 4.3 Document model
+### 4.2 Data flow
 
-- **Arena of nodes** keyed by stable `NodeId` (generational slotmap). Node
-  kinds: `Frame` (board/page/slide), `Shape`, `Connector`, `TextFlow`,
-  `Image`, `RasterLayer`, `Group`, `Table`, plus `Unknown` for preserved
-  foreign XML.
-- **Persistent data structures** (`imbl` / `rpds`) for node maps and child
-  lists. Cloning a document version is O(1), and old versions share
-  structure. This gives cheap snapshots for undo, autosave in the background,
-  and readers on other threads without locks.
-- **Styles are shared and referenced** (`StyleId`), not copied per node.
-  This mirrors DOCX/ODF style inheritance and keeps memory low.
-- **Operation log**: `Op` is small, serializable and invertible. Undo means
-  applying inverse ops. Grouping ("typing a word" counts as one undo step)
-  is done with transactions. The op log is also the basis for autosave,
-  crash recovery and future collaboration.
+```
+user input ─┐
+AI agent ───┼─► command ─► CRDT transaction ─► Loro doc ─► diff events ─► view model
+remote peer ┘                    │                                         │ ChangeSet
+                                 ▼                                         ▼
+                     encrypt+sign UPDT record                 signals mark dirty widgets/nodes
+                       ├─► append to local .imag              ▼
+                       └─► hub (WebSocket) ─► peers    incremental layout ─► dirty tiles ─► one Vello scene ─► GPU
+```
 
-### 4.4 Command system (the backbone of the UX)
+The user, the AI assistant, add-ons and remote collaborators all go through
+the **same path**. There is exactly one way to change a document.
+
+### 4.3 Threading and runtimes
+
+| Thread / pool | Work |
+|---|---|
+| **UI thread** | Input, signals, widget layout, scene submission. Never blocks. |
+| **Worker pool** (rayon) | Off-screen layout, parsing, export, crypto, compression, thumbnails, search indexing |
+| **Async runtime** (tokio, dedicated threads) | Hub sync, AI provider calls, MCP, downloads. Kept out of the core crates. |
+| **Add-on sandboxes** (wasmtime) | Add-on code with fuel and epoch limits |
+
+Communication uses channels and immutable snapshots, with no locks on the
+hot path.
+
+### 4.4 Command system
 
 ```rust
-/// A user-invokable action. Everything the user can do is a Command.
+/// A user-invokable action. The palette, toolbars, keymaps, add-ons and the
+/// AI assistant all go through this single registry.
 pub trait Command: Send + Sync {
-    fn id(&self) -> CommandId;                 // "text.bold"
-    fn meta(&self) -> &CommandMeta;            // title, synonyms, icon, category
-    fn is_available(&self, cx: &Context) -> Availability; // hidden/disabled/enabled
+    fn id(&self) -> CommandId;                    // "text.bold"
+    fn meta(&self) -> &CommandMeta;               // title, description, synonyms, icon
+    fn args_schema(&self) -> &ArgsSchema;         // typed args (→ JSON Schema for AI tools)
+    fn is_available(&self, cx: &Context) -> Availability;
     fn run(&self, cx: &mut Context, args: Args) -> Result<Outcome>;
 }
 ```
 
-- The palette, floating toolbars, keymaps, menus and add-ons all read from
-  the same registry. The contextual toolbar is
-  `registry.available(&selection).top_n(by_relevance)`.
-- Commands are data-described (metadata + localized strings), so a new
-  feature shows up in search with no UI code.
+---
 
-### 4.5 Rendering pipeline
+## 5. File format
 
-1. **Scene graph per frame of content** is built from the model and cached
-   per node (a retained display list).
-2. **Tiled rendering**: the canvas is split into 256×256 px tiles per zoom
-   level bucket. Only tiles intersecting dirty bounds are re-rendered.
-   Panning just composites cached tiles; new tiles render progressively,
-   with a low-res placeholder taken from the previous zoom level.
-3. **Vello** renders vector content into tiles on the GPU. There is a CPU
-   fallback (`vello_cpu` / tiny-skia) for software-only systems and for
-   headless tests.
-4. **Text** glyphs go through a glyph atlas. Layout results are cached per
-   paragraph and keyed by (content hash, width, style version).
-5. **Raster layers** (paint) are stored as sparse 256² tiles, so only painted
-   tiles use memory. Brush strokes are rendered incrementally.
-6. The **frame budget** is measured every frame (see §7). Work that would
-   miss the frame is deferred to the next frame or moved to a worker.
+This was designed first, because it is the hardest decision to change
+later. Full design: **[docs/design/file-format.md](design/file-format.md)**.
 
-### 4.6 Threading model
+In short:
 
-- **UI thread:** input, iced view, submitting GPU work. It must never block.
-- **Worker pool (rayon):** layout of off-screen pages, file parsing,
-  export, thumbnail generation, search indexing, tile rasterization when
-  using the CPU backend.
-- **Add-on threads:** each WASM instance runs off the UI thread with fuel and
-  epoch limits.
-- Communication uses channels plus immutable model snapshots (§4.3). This
-  avoids locks on the hot path.
+- **Logical layer:** a Loro CRDT document with a documented schema (node
+  tree, rich text, styles, assets, pages, AI provenance, namespaced
+  extensions). Comments live in a separate CRDT stream.
+- **Object layer:** immutable typed objects (`SNAP`, `UPDT`, `BLOB`, `KEYR`,
+  `ACLC`, `VERS`, …). Blobs are content-addressed with keyed BLAKE3 and
+  segmented into 256 KiB pieces.
+- **Container layer:** append-only records (each with its own zstd
+  compression, encryption and CRC), with an index and trailer at the end.
+  Incremental saves, compaction and crash recovery.
+- **Same bytes locally and on the hub.** Sync is object exchange, and the hub
+  never holds a key.
+- **Extensibility:** PNG-style CRITICAL/SAFE_TO_COPY flags, required-feature
+  list, protobuf field evolution, crypto-suite ids, and a codec id for the
+  CRDT.
 
 ---
 
-## 5. Add-on system *(ADR-0006)*
+## 6. Collaboration: Imaginarium Hub
 
-There are two tiers, so that simple things stay simple:
+- **Self-hostable** single binary or Docker image (SQLite + filesystem by
+  default; Postgres + S3 for scale). The **hosted subscription** runs the
+  same code.
+- **Accounts:** email + OPAQUE password login (the server never sees the
+  password), a recovery key, multiple devices, and optional TOTP.
+- **Workspaces, folders and files:** names and content are encrypted. Quotas,
+  trash and version history (named versions + time travel).
+- **Sharing:** with users, teams, or links (the key lives in the URL
+  fragment; optional password and expiry). Roles are
+  owner/admin/editor/commenter/viewer.
+- **Real-time:** WebSocket live update frames (~50 ms batches), presence
+  (cursors, selections, viewport follow), and offline editing with merge on
+  reconnect.
+- **Comments:** threads anchored to nodes or text ranges, @mentions,
+  resolve/reopen, and content-free notifications.
+- **Admin:** done from the desktop client. The hub prints a one-time setup
+  code on first start.
+- The sync protocol spec (`docs/design/sync-protocol.md`) is written together
+  with the format in M1.
 
-1. **Packages (declarative, no code):** shape libraries (SVG + JSON
-   metadata, connection points, resize rules), slide themes and layouts,
-   document style sets, brush presets, and templates. They are distributed as
-   a zip with a `package.toml` manifest. These are the "template packages"
-   from the brief.
-2. **Add-ons (code, WASM components):** written in any language that targets
-   the WASM component model (Rust first). They use a versioned WIT world
-   (`imaginarium:addon@1.x`) and can:
-   - register commands (and therefore appear in the palette and toolbars),
-   - register tools (canvas interactions),
-   - register importers and exporters,
-   - read the model and submit ops (through the same op API as the core),
-   - contribute inspector panels using a small declarative UI schema (not
-     raw iced, so the API stays stable even if the shell changes).
-   - Capability-based permissions (filesystem, network) are declared in the
-     manifest and granted by the user.
+## 7. Security model
 
-Native (dylib) plugins are deliberately **not** supported. Rust has no stable
-ABI, and they would make the program crash-prone and insecure.
+The full decision is in ADR-0011, and the cryptographic details are in
+§6 of the format design. In summary:
 
----
+- **E2EE for everything:** content, names, comments, thumbnails, presence.
+  TLS 1.3 on top.
+- **Keys:**
+  - per-document epoch keys, wrapped for members via HPKE
+    (re-keyed when membership changes),
+  - device keys signed by the user identity,
+  - signed edits (the server checks writers without reading; clients
+    re-verify).
+- **What the hub can see** (accounts, sharing graph, sizes, timing) is
+  documented openly in the security whitepaper.
+- **Performance:** fast primitives (≥1 GB/s per core), lazy and parallel
+  decryption, batching, never on the UI thread. Benchmarked in M1.
+- An **independent audit** happens before the hosted service launches.
 
-## 6. File formats *(ADR-0005)*
+## 8. Generative AI
 
-### 6.1 Native `.imag`
+Full decision: ADR-0013.
 
-A zip container with `manifest.json`, `model.bin` (postcard-serialized model
-with a version header), `ops.log` (recent ops for recovery), `media/`,
-`thumbnails/`, and `fonts/` (optional embedding). The format is versioned and
-has migrations; it is documented in `docs/format/`.
+- **Text:** generate, rewrite, tone, translate, summarize, and outline →
+  document/slides.
+- **Board/vector:** describe → diagram, sketch → clean shapes, auto-layout,
+  explain or critique a board, AI-generated SVG and vector edits.
+- **Image suite:** txt2img, img2img, multi-reference images, sketch → image,
+  inpaint/outpaint, background removal, click-to-segment masks, style
+  transfer, upscaling, object removal, variations, instruction-based edits.
+  All non-destructive, with stored recipes.
+- **Assistant:** chat with tool use over our command registry, a vision
+  view of the canvas, and suggestions as a reviewable diff. MCP server and
+  client.
+- **Providers:**
+  - API: Claude, OpenAI, Gemini, Mistral, BFL, OpenAI-compatible
+  - local: Ollama, llama.cpp, LM Studio, vLLM, ComfyUI, stable-diffusion.cpp
+  - built-in ONNX models
+- **Privacy:** per-document AI policy (off / local only / any), a clear
+  indicator when content goes to the cloud, keys in the OS keychain, and the
+  hub never involved.
 
-### 6.2 Interchange
+## 9. Add-ons and packages
 
-| Format | Read | Write | Crate                         | Milestone |
-|--------|------|-------|-------------------------------|-----------|
-| SVG/PNG/JPEG/WebP | ✓ | ✓ | `resvg`/`usvg`, `image`    | M2        |
-| PDF    | (later) | ✓  | `krilla` (or ooxmlsdk-pdf)    | M4        |
-| DOCX   | ✓    | ✓     | `ooxmlsdk` + mapping          | M4        |
-| ODT    | ✓    | ✓     | `imaginarium-io-odf`                | M4        |
-| PPTX   | ✓    | ✓     | `ooxmlsdk` + mapping          | M5        |
-| ODP    | ✓    | ✓     | `imaginarium-io-odf`                | M5        |
-| draw.io (`.drawio`) | ✓ | (later) | own, XML          | M2 stretch |
-| VSDX   | (later) | –  | `ooxmlsdk` (OPC)              | post-1.0  |
+- **Packages** (no code): shape libraries, templates, themes, styles,
+  brushes, AI prompt and workflow templates. Content licenses are declared.
+- **Add-ons** (WASM components, `imaginarium:addon@1` WIT):
+  - commands, tools, importers/exporters, AI providers, settings, and
+    declarative panels,
+  - capability-based permissions,
+  - AGPL-compatible licenses required (ADR-0008).
+- First-party features use the same registries, so the API gets exercised
+  constantly.
 
-### 6.3 Fidelity strategy
+## 10. Performance strategy
 
-- **Preserve what we don't understand.** Unknown elements and attributes are
-  kept as opaque XML on the nearest node and written back unchanged
-  (`Unknown` node / `extras` bag).
-- **Corpus-driven testing.** A test corpus (LibreOffice and Apache POI test
-  files plus our own) runs on every PR: parse → write → re-parse must be
-  stable, and rendering is compared against golden images.
+### Budgets (enforced by CI benchmarks)
 
----
+| Metric | Target |
+|---|---|
+| Input to pixels (typing, dragging) | < 1 frame (8 ms at 120 Hz) |
+| Cold start to interactive empty board | < 400 ms |
+| Open a 300-page document: first page visible | < 500 ms; the rest lays out in the background |
+| 10,000-shape board pan/zoom | 60 fps or more on an integrated GPU |
+| Applying a remote update (typical) | < 1 ms including decrypt + verify |
+| Idle CPU | ~0 % |
 
-## 7. Performance strategy
+### Practices we adopt from React and GUI research
 
-### 7.1 Budgets (enforced by benchmarks in CI)
+| Practice | How we apply it |
+|---|---|
+| Fine-grained reactivity (SolidJS/Leptos) instead of re-rendering a virtual DOM | Signals update only the widgets that read changed data. ChangeSets from the model feed the signals. |
+| Immutable data with structural sharing | `imbl` view-model versions; equality is a pointer comparison |
+| Virtualization / windowing | Only visible pages, slides, tiles and list rows are laid out and rendered |
+| Batched updates | One transaction and one redraw per event or frame. Pointer moves are coalesced. |
+| Concurrent priorities (`startTransition`) | Urgent work (cursor, drag) runs this frame. Deferred work (reflow, thumbnails, spellcheck, AI previews) yields. |
+| Keep the main thread free | Workers and an async runtime, fed with immutable snapshots |
+| Lazy loading and code splitting | Formats, AI providers, add-ons, fonts and blobs load on first use |
+| Retained display lists, GPU compositing, dirty rectangles | Per-node scene cache, 256² tile cache, a compositor that pans without re-rasterizing |
+| Measure everything | `tracing` + tracy, frame-time HUD (`F12`), criterion benchmarks, CI regression gates |
 
-| Metric                                     | Target           |
-|--------------------------------------------|------------------|
-| Input → pixels (typing, dragging)          | < 1 frame (8 ms @120 Hz, 16 ms @60 Hz) |
-| Cold start to interactive empty board      | < 400 ms         |
-| Open 300-page DOCX → first page visible    | < 500 ms; rest lays out in background |
-| Pan/zoom board with 10 000 shapes          | steady 60 fps on integrated GPU |
-| Idle CPU                                   | ~0 % (no redraw when nothing changes) |
-| Memory, empty doc                          | < 150 MB RSS     |
+**Profiling comes first:** `imaginarium-profiling` and the benchmark fixtures
+are built in M0, before any feature work.
 
-### 7.2 Best practices adopted (React / GUI research → our design)
+## 11. Code quality and maintenance
 
-| Practice (where it comes from)                         | How we apply it |
-|--------------------------------------------------------|-----------------|
-| Avoid unnecessary re-renders (React.memo, `shouldComponentUpdate`) | Change sets with node ids. Views memoize on `(node_id, version)`. iced `lazy` widgets for panels. |
-| Immutable data and structural sharing (Redux, Immer)   | Persistent model versions. Equality checks are pointer comparisons. |
-| Virtualized lists and windowing (react-window)         | Only visible pages/slides/tiles are laid out and rendered. Thumbnails and long lists are virtualized. |
-| Batching state updates (React 18 automatic batching)   | All ops from one event are coalesced into one transaction and one redraw. |
-| Concurrent rendering and transitions (React `startTransition`) | Two priorities: *urgent* (cursor, drag) runs this frame; *deferred* (reflow of later pages, thumbnails, spell-check) yields to input. |
-| Keep the main thread free (web workers)                | Parse, layout, export and search run in the rayon pool on immutable snapshots. |
-| Debounce and throttle expensive reactions              | Autosave, search indexing and thumbnailing are debounced. Pointer-move events are coalesced to one per frame. |
-| Code splitting and lazy loading                        | Format crates, add-ons and fonts load on first use. Startup only initializes the shell and the board. |
-| Retained display lists and GPU compositing (browsers, Figma) | Per-node cached scenes, tile cache, and a compositor that pans without re-rasterizing. |
-| Dirty-rect redraw (classic GUI toolkits)                | Tile invalidation from the bounds of changed nodes. No redraw at all when idle. |
-| Measure, don't guess                                   | `tracing` spans everywhere, `tracy` integration behind a feature flag, `criterion` benches for layout, render and IO, and a frame-time HUD (`F12`). |
+- Each crate has a crate-level doc describing its responsibility and
+  boundaries. `#![warn(missing_docs)]` is on, and examples are written as
+  doctests.
+- `CLAUDE.md` and `CONTRIBUTING.md` describe conventions, the crate map, and
+  "how to add a command, setting, format, AI provider or add-on".
+- Lints and checks: clippy `-D warnings`, rustfmt, `cargo deny` (AGPL-compatible
+  license allowlist and advisories), `cargo machete`, and a layering check.
+- Tests:
+  - unit tests,
+  - proptests (CRDT convergence, undo, format round-trip),
+  - **fuzzing** of the format parser and protocol,
+  - golden-image render tests (CPU backend),
+  - DOCX/ODT/PPTX/ODP corpus round-trips,
+  - multi-client sync simulation tests.
+- Error handling: `thiserror` in libraries, `anyhow` only in binaries, and no
+  `unwrap()` outside tests.
+- Git: Conventional Commits, one commit per module, refactor or decision.
+  Author Giosuel, co-author Claude. DCO sign-off for external contributors.
 
-### 7.3 Profiling infrastructure (built in M0, not bolted on later)
+## 12. Roadmap
 
-- The `tracing` + `tracing-tracy` feature, a frame-time overlay, and
-  benchmark fixtures (big DOCX, 10k-shape board, 100-slide deck).
-- CI benchmark job that comments regressions > 10 % on PRs.
+Each milestone ends with a tagged, usable build **and its docs**.
 
----
+### Phase A: Foundations
 
-## 8. Code quality and maintainability
+| # | Milestone | Content |
+|---|---|---|
+| M0 | **Foundations and profiling** | Workspace, CI on 3 OSes, `cargo deny`, `imaginarium-profiling` + benchmark fixtures, `settings` registry, `commands` registry, website skeleton, `CLAUDE.md`/`CONTRIBUTING.md` |
+| M1 | **Format, crypto, model** | `format` (records, index, append, compaction, recovery) + spec v1 + test vectors + fuzzing; `crypto` (suite 1, keyring, ACL chain); `model` on Loro (schema, view model, undo, migrations) with a Loro/Yrs/Automerge benchmark; sync-protocol design doc; `imag` CLI |
+| M2 | **UI prototype gate** | `reactive` + minimal `ui` + tile renderer, a stress-test app, and the 6 pass criteria of ADR-0007 (GPUI fallback if it fails) |
 
-- **Documentation:** every crate has a crate-level doc (`//!`) that explains
-  its responsibility and its boundaries. `#![warn(missing_docs)]` is set on
-  public crates. Architecture docs live in `docs/`, and decisions are
-  recorded as ADRs.
-- **`CLAUDE.md` / `CONTRIBUTING.md`:** conventions, how to run, where things
-  live, and how to add a command, format or add-on. This lets humans and
-  Claude pick up work quickly.
-- **Lints:** `clippy -D warnings` (pedantic selectively), `rustfmt`,
-  `cargo deny` (licenses/advisories), `cargo machete` (unused deps).
-- **Tests:** unit tests per crate, property tests (`proptest`) for ops and
-  undo (applying an op and then its inverse must leave the model unchanged),
-  round-trip corpus tests, golden-image render tests (CPU renderer, so they
-  are deterministic), and `insta` snapshots for layout.
-- **Errors:** `thiserror` in libraries, `anyhow` only in the binary. No
-  `unwrap()` outside tests (clippy-enforced).
-- **Git:** Conventional Commits (`feat(model): …`), one commit per
-  module, refactor or decision. Commits are authored as Giosuel with Claude
-  as co-author.
-- **Licensing:** dependencies are MIT/Apache-compatible. The project license
-  is still to be decided (see open questions).
+### Phase B: Core editor
 
----
+| # | Milestone | Content |
+|---|---|---|
+| M3 | Shell and canvas | Palette, contextual toolbar, inspector, settings UI, basic shapes, selection/transform, themes, local `.imag` save/load |
+| M4 | Diagramming | Connectors and routing, snapping, groups, alignment, package format, shape libraries, SVG/PNG/PDF export, draw.io import (stretch goal) |
+| M5 | Text engine | Rich text, IME, bidi, text in shapes, find/replace, spellcheck hook |
+| M6 | **AI foundation** | Capability layer, providers (API + Ollama/llama.cpp + ComfyUI), AI settings UI, assistant with command tools and diff review, text generation, txt2img, ONNX background removal, MCP server |
 
-## 9. Roadmap
+### Phase C: Office modes and collaboration
 
-Each milestone ends with a usable build and a tagged release. The estimates
-are relative, not calendar promises.
+| # | Milestone | Content |
+|---|---|---|
+| M7 | Documents | Pagination, styles, tables, headers/footers, footnotes, TOC; DOCX + ODT import/export; PDF |
+| M8 | **Collaboration (Hub)** | Hub server, OPAQUE accounts, devices, E2EE sharing, roles, real-time sync and presence, comments, version history, admin UI, Docker |
+| M9 | Presentations | Masters/layouts, themes, presenter view, transitions; PPTX + ODP |
+| M10 | Layout (Publisher) | Fixed pages, linked text frames, master pages, bleed and crop marks |
+| M11 | **Paint + AI image suite** | Raster layers and masks, pressure brushes; img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
 
-| #  | Milestone                | Deliverable |
-|----|--------------------------|-------------|
-| M0 | **Foundations**          | Workspace, CI matrix (3 OS), lints, `tracing`, `imaginarium-model` (nodes, ops, undo, persistent versions), `imaginarium-commands` registry. No UI yet; fully unit-tested. |
-| M1 | **Shell + canvas**       | iced window, infinite board, pan/zoom, tile renderer with Vello, rectangles/ellipses/lines, selection and transform handles, command palette, floating toolbar, hidden inspector, light/dark theme. Frame-time HUD. |
-| M2 | **Diagramming**          | Connectors with orthogonal/curved routing, connection points, snapping and guides, groups, z-order, alignment and distribution, the declarative **package format** with basic, flowchart, UML and network shape libraries, `.imag` save/load, autosave and recovery, SVG/PNG export. Stretch goal: `.drawio` import. |
-| M3 | **Text engine**          | Rich text (runs, paragraphs, lists), Parley shaping, IME, bidi, text inside shapes, find/replace, spell-check hook. |
-| M4 | **Document mode**        | Paginated flow layout (incremental and background), styles, headers/footers, tables, images, footnotes (basic), TOC. DOCX and ODT import/export, PDF export. Round-trip corpus in CI. |
-| M5 | **Presentation mode**    | Slides as frames, masters and layouts, themes, presenter view (2nd window), transitions (basic), PPTX and ODP import/export. |
-| M6 | **Layout mode (Publisher)** | Fixed pages, linked text frames (text flows across frames), master pages, bleed and crop marks in PDF export. |
-| M7 | **Paint**                | Raster layers, brushes with pressure (tablet input), eraser, fill, selection, layer blending, PNG/JPEG/WebP. |
-| M8 | **Add-on SDK**           | wasmtime host, WIT world v1, permissions, Rust SDK crate + template, docs, a sample add-on. (The internal extension points have existed since M0; this milestone opens them to third parties.) |
-| M9 | **1.0 polish**           | Accessibility audit, i18n (Fluent), installers (MSI, DMG with notarization, Flatpak/AppImage), auto-update, crash reporting (opt-in), performance pass against §7.1. |
-| –  | *Later*                  | Spreadsheets, collaboration (CRDT on the op log), VSDX import, PDF import. |
+### Phase D: Ecosystem and 1.0
 
-### First concrete steps (M0 breakdown)
+| # | Milestone | Content |
+|---|---|---|
+| M12 | Add-on SDK | wasmtime host, WIT v1, Rust SDK, templates, package library |
+| M13 | 1.0 | Accessibility audit, i18n (Fluent), installers and auto-update, complete website, **external security audit** |
+| — | Hosted service launch | Billing, multi-tenant operations, status page, backups |
+| — | Later | Spreadsheets, WASM web viewer, mobile viewer, PDF import, VSDX import, post-quantum suite by default |
 
-1. Workspace skeleton with empty crates, crate docs and layering rules. *(commit)*
-2. CI: fmt, clippy, test, deny on 3 OSes. *(commit)*
-3. `imaginarium-model`: ids, node arena, persistent maps. *(commit)*
-4. `imaginarium-model`: ops and transactions, undo/redo, plus proptests. *(commit)*
-5. `imaginarium-commands`: registry, availability, fuzzy search index. *(commit)*
-6. `tracing` setup and bench harness. *(commit)*
-7. `CLAUDE.md` + `CONTRIBUTING.md`. *(commit)*
-
----
-
-## 10. Risks and mitigations
+## 13. Risks
 
 | Risk | Mitigation |
-|------|------------|
-| Vello is still pre-1.0. GPU features (some blend modes, masks) are incomplete. | Hide it behind the `imaginarium-render` trait. Keep a CPU backend (vello_cpu/tiny-skia) that is always working. Pin versions. |
-| iced's API changes between releases, and its wgpu version may not match Vello's. | Upgrade both in lock-step. The canvas is rendered by our own pipeline into a texture that iced only composites. Shell code is kept thin. |
-| Rich-text editing (IME, bidi, complex scripts) is hard. | Use Parley (made for editors) and cosmic-text as a fallback, and write extensive tests with CJK, Arabic and emoji. |
-| DOCX/PPTX fidelity is a bottomless pit. | Preserve unknown XML, test against a corpus, and prioritize features by how often they appear in real files. |
-| ODF has no mature Rust crate. | Write our own crate early and keep it small: map only what our model supports, and preserve the rest. |
-| Feature creep makes the UI cluttered. | Commands-first design. Any new UI surface needs a UX justification in its PR. |
+|---|---|
+| The scope is very large | Strict milestones, each shippable. Shared model and commands avoid building features twice. |
+| Building our own UI toolkit costs too much | M2 gate with measurable criteria, and GPUI as the fallback |
+| Loro dependency or encoding changes | CRDT codec id in the format, benchmark in M1, upstream is stable since 1.0 |
+| E2EE + CRDT + permissions complexity | Design docs first, proptests and simulation tests, external audit, and reliance on proven designs (HPKE, signed ACL chain) |
+| Users lose keys | Mandatory recovery key, multi-device, clear UX, plain local files by default |
+| AI providers change quickly | Capability traits + adapters, ComfyUI workflows as data, providers as add-ons |
+| DOCX/PPTX fidelity | Preserve unknown XML, corpus testing, prioritize features by how often they appear |
+| Vello is pre-1.0 | CPU backend always working, pinned versions, upstream contact |
 
----
+## 14. Open questions
 
-## 11. Open questions for you
-
-1. **Name.** Keep "Imaginarium" or choose another? (Crates are prefixed, so it's
-   best to decide before M0 step 1.)
-2. **License.** For example MIT/Apache-2.0 (permissive), GPL-3.0, or MPL-2.0.
-   This also affects which add-on ecosystem we encourage.
-3. **GUI framework.** I recommend iced (ADR-0002). The main alternatives are
-   GPUI (Zed's framework: extremely fast, but less documented and less
-   stable outside Zed) and Slint (polished, but its royalty-free license has
-   conditions and it suits rich canvases less well). Do you want to confirm
-   iced before M1?
-4. **Priority order.** I put Board/Diagramming before Documents because it
-   proves the renderer and UX early. Would you rather have documents first?
+1. **Format defaults** (format design §11): should local files be plain by
+   default, are thumbnails opt-in, should the default history be 90 days,
+   and should the post-quantum suite be on from the first release?
+2. **CLA vs DCO.** A CLA keeps open the option of relicensing later (for
+   example for app stores). DCO is simpler and more contributor-friendly.
+3. **Phase C order.** Collaboration (M8) comes right after Documents, because
+   it is the business. Is that the order you want, or should presentations
+   come first?
+4. **Hub name.** Is "Imaginarium Hub" fine?
