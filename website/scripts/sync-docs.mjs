@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Copies the repository's developer docs (docs/PLAN.md, docs/design/*,
-// docs/adr/*) into the site, so `docs/` stays the single source of truth.
+// Copies the repository's developer docs (docs/PLAN.md, docs/format/spec-v*,
+// docs/design/*, docs/adr/*) into the site, so `docs/` stays the single source of truth.
 //
 // For each file it:
 // - takes the first `# Heading` as the page title (Starlight frontmatter)
@@ -25,6 +25,11 @@ const outRoot = resolve(here, '..', 'src', 'content', 'docs', 'developers', 'ref
 /** Repo-relative source path → site slug (without base, trailing slash). */
 const sources = new Map();
 sources.set('docs/PLAN.md', 'developers/reference/plan');
+for (const file of readdirSync(join(repoRoot, 'docs', 'format'))) {
+  if (/^spec-v\d+\.md$/.test(file)) {
+    sources.set(`docs/format/${file}`, `developers/reference/format/${file.replace(/\.md$/, '')}`);
+  }
+}
 for (const file of readdirSync(join(repoRoot, 'docs', 'design'))) {
   if (file.endsWith('.md') && file !== 'README.md') {
     sources.set(`docs/design/${file}`, `developers/reference/design/${file.replace(/\.md$/, '')}`);
@@ -54,7 +59,8 @@ rmSync(outRoot, { recursive: true, force: true });
 for (const [source, slug] of sources) {
   const text = readFileSync(join(repoRoot, source), 'utf8');
   const heading = text.match(/^# (.+)$/m);
-  const title = heading ? heading[1].trim() : posix.basename(source, '.md');
+  // Titles are plain text in Starlight, so drop Markdown code backticks.
+  const title = (heading ? heading[1].trim() : posix.basename(source, '.md')).replace(/`/g, '');
   const body = heading ? text.replace(heading[0], '').trimStart() : text;
   const frontmatter = [
     '---',
