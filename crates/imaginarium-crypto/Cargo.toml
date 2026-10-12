@@ -33,6 +33,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# The vectors test needs deterministic randomness.
+imaginarium-crypto = { path = ".", features = ["test-vectors"] }
 proptest.workspace = true
 
 [lints]
