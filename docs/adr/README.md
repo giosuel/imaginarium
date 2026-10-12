@@ -24,3 +24,4 @@ Template: `0000-template.md`. Statuses: Proposed, Accepted, Superseded by NNNN.
 | 0014 | All configuration via typed settings registry + UI   | Accepted |
 | 0015 | Distribution, website and documentation              | Accepted |
 | 0016 | Format defaults: local encryption, history, thumbnails, PQC | Accepted |
+| 0017 | Dev build profile: optimized deps, unoptimized build-time crates | Accepted |
