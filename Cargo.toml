@@ -22,6 +22,7 @@ publish = false
 imaginarium-commands = { path = "crates/imaginarium-commands" }
 imaginarium-crypto = { path = "crates/imaginarium-crypto" }
 imaginarium-format = { path = "crates/imaginarium-format" }
+imaginarium-model = { path = "crates/imaginarium-model" }
 imaginarium-profiling = { path = "crates/imaginarium-profiling" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
 imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
@@ -35,8 +36,11 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 crc32c = "0.6.8"
 ed25519-dalek = { version = "3.0.0", features = ["alloc"] }
 getrandom = "0.4.3"
+imbl = "7.0.2"
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "hkdfsha2", "mlkem", "x25519"] }
+loro = "1.16.2"
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core"] }
+peak_alloc = "0.3.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
 proptest = "1.11.0"
@@ -111,9 +115,23 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.beef]
 opt-level = 0
+[profile.dev.package.bumpalo]
+opt-level = 0
 [profile.dev.package.cc]
 opt-level = 0
 [profile.dev.package.curve25519-dalek-derive]
+opt-level = 0
+[profile.dev.package.darling]
+opt-level = 0
+[profile.dev.package.darling_core]
+opt-level = 0
+[profile.dev.package.darling_macro]
+opt-level = 0
+[profile.dev.package.derive_arbitrary]
+opt-level = 0
+[profile.dev.package.enum-as-inner]
+opt-level = 0
+[profile.dev.package.enum_dispatch]
 opt-level = 0
 [profile.dev.package.find-msvc-tools]
 opt-level = 0
@@ -122,6 +140,8 @@ opt-level = 0
 [profile.dev.package.foldhash]
 opt-level = 0
 [profile.dev.package.heck]
+opt-level = 0
+[profile.dev.package.ident_case]
 opt-level = 0
 [profile.dev.package.jobserver]
 opt-level = 0
@@ -136,6 +156,12 @@ opt-level = 0
 [profile.dev.package.miette-derive]
 opt-level = 0
 [profile.dev.package.multimap]
+opt-level = 0
+[profile.dev.package.pest_derive]
+opt-level = 0
+[profile.dev.package.pest_generator]
+opt-level = 0
+[profile.dev.package.pest_meta]
 opt-level = 0
 [profile.dev.package.petgraph]
 opt-level = 0
@@ -165,9 +191,13 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.semver]
 opt-level = 0
+[profile.dev.package.serde_columnar_derive]
+opt-level = 0
 [profile.dev.package.serde_derive]
 opt-level = 0
 [profile.dev.package.shlex]
+opt-level = 0
+[profile.dev.package.strsim]
 opt-level = 0
 [profile.dev.package.syn]
 opt-level = 0
@@ -178,6 +208,12 @@ opt-level = 0
 [profile.dev.package.unicode-ident]
 opt-level = 0
 [profile.dev.package.unicode-width]
+opt-level = 0
+[profile.dev.package.version_check]
+opt-level = 0
+[profile.dev.package.wasm-bindgen-macro]
+opt-level = 0
+[profile.dev.package.wasm-bindgen-macro-support]
 opt-level = 0
 [profile.dev.package.zerocopy-derive]
 opt-level = 0

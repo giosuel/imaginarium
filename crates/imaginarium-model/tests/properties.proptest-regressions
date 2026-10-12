@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 63ff1658e444b1f7e03ecbb2af3079aca395f6278ef7856e789162095884618c # shrinks to setup = [Create { parent: None, kind: 1, ai: false }, InsertText { node: Index(0), pos: Index(0), text: "a" }], edit = Create { parent: None, kind: 0, ai: false }
+cc ca8506cd23f184024561ad1cadd9ec0d6d0fa2efd9eea3babc29c371b06ec039 # shrinks to peers = 2, steps = [Edit { peer: 0, op: Create { parent: None, kind: 0, ai: false } }, Edit { peer: 0, op: Create { parent: None, kind: 1, ai: false } }, Edit { peer: 2, op: InsertText { node: Index(0), pos: Index(0), text: "a" } }]
+cc 6474da78a35d96fdf7756f7056ab645ce576bb22c9e3ba0a33e5979d8826c6bd # shrinks to setup = [Create { parent: None, kind: 0, ai: false }, Create { parent: Some(Index(0)), kind: 0, ai: false }, Create { parent: None, kind: 1, ai: false }, Delete(Index(0)), InsertText { node: Index(0), pos: Index(0), text: "a" }], edit = Mark { node: Index(60121240275), start: Index(18020013627041802457), len: 1, key: 2 }

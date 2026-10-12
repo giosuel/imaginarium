@@ -1,0 +1,32 @@
+[package]
+name = "imaginarium-model"
+description = "The document model: schema v1 on Loro, typed transactions, an incremental imbl view model, ChangeSets, per-actor undo and migrations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+getrandom.workspace = true
+imbl.workspace = true
+loro.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+imaginarium-test-utils.workspace = true
+peak_alloc.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "model"
+harness = false

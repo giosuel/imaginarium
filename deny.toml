@@ -18,7 +18,16 @@ all-features = true
 [advisories]
 # Known vulnerabilities and unmaintained crates fail the check. To ignore an
 # advisory, add `{ id = "RUSTSEC-…", reason = "…" }` with a justification.
-ignore = []
+ignore = [
+  # `im` 15.1.0 (and its `bitmaps`, `sized-chunks`) is unmaintained, but only
+  # reached through Loro (`loro-internal`), our CRDT (ADR-0009). These are
+  # "unmaintained" notices, not vulnerabilities, and no upgrade exists. Our
+  # own code uses the maintained fork `imbl`. Remove these when Loro moves
+  # off `im`, and re-check on every Loro update (STATUS, known issues).
+  { id = "RUSTSEC-2026-0247", reason = "bitmaps: unmaintained, only via im via loro-internal" },
+  { id = "RUSTSEC-2026-0248", reason = "im: unmaintained, only via loro-internal" },
+  { id = "RUSTSEC-2026-0251", reason = "sized-chunks: unmaintained, only via im via loro-internal" },
+]
 
 [licenses]
 # Every dependency must be compatible with AGPL-3.0-or-later (ADR-0008).

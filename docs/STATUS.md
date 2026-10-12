@@ -9,14 +9,15 @@ Last updated: 2026-10-12
 ## Current position
 
 - **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** **M1.6 `imaginarium-model`** (see the M1 checklist below). Use **xhigh/max effort** for M1.
-- **Code status:** Cargo workspace with 8 crates. Working: `xtask` (repo
+- **Next step:** **M1.7 `imaginarium-cli` (`imag`)** (see the M1 checklist below). Use **xhigh/max effort** for M1.
+- **Code status:** Cargo workspace with 9 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
   (registry, args/JSON Schema, keymaps, palette search),
-  `imaginarium-format` (the `.imag` container) and `imaginarium-crypto`
-  (encryption, keyrings, signatures, ACL chain). The app only prints its
+  `imaginarium-format` (the `.imag` container), `imaginarium-crypto`
+  (encryption, keyrings, signatures, ACL chain) and `imaginarium-model`
+  (the document on Loro, view model, undo). The app only prints its
   version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
@@ -398,18 +399,63 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
       wall, 496 CPU-s, 1.35 GB peak;
     - full run: 14 min 12 s, single-threaded, 849 CPU-s, 371 MB peak.
       13 of the 14 minutes are Automerge's typing phase.
-- [ ] **M1.6 `imaginarium-model`** ← **next**:
-  - schema (§3 of the design) on Loro;
-  - the M1.5 follow-ups (`docs/design/crdt-benchmark.md` §5): remote updates
-    on the worker pool, batched per frame; memory after large imports;
-    shallow snapshots for compaction; snapshot sizes on realistic
-    documents; Loro workloads as criterion benches;
-  - `imbl` view model, transactions, `ChangeSet`;
-  - collaboration-aware undo;
-  - migrations and `required_features`;
-  - proptests: convergence, undo inverse.
-- [ ] **M1.7 `imaginarium-cli` (`imag`)**: `inspect`, `verify`,
-  `export-json`.
+- [x] **M1.6 `imaginarium-model`** (done 2026-10-12, branch
+  `feat/m1.6-model`):
+  - **Schema v1, Draft 1** in [`docs/format/schema-v1.md`](format/schema-v1.md).
+    It covers root containers, node keys and kinds, geometry in points,
+    character marks and paragraph marks (on the terminating `\n`), styles,
+    assets, evolution and actors. It's on the website too.
+  - `Document`:
+    - `transact` runs typed, pre-validated `Transaction` edits and records
+      the actor as the commit message;
+    - a failing command is reverted, with the undo stacks paused;
+    - `apply_remote`, export of snapshot, shallow snapshot and updates;
+    - two undo stacks, user and assistant, separated by commit origins.
+  - `DocumentView`:
+    - persistent `imbl` maps of `Arc`'d nodes; text as chunked
+      paragraphs of marked runs;
+    - updated incrementally from Loro events, reporting a `ChangeSet`;
+    - anything unexpected rebuilds and diffs.
+  - Migrations and `required_features` (read-only mode).
+  - **Findings built in** (also in ADR-0009 "Refinements"):
+    - **Loro's undo re-creates deleted nodes under new tree ids.** Nodes
+      therefore have a stable stored `id` (53-bit integer, exact in JS),
+      and references survive undo and redo.
+    - Concurrent creations at one position arrive as delete + create of
+      the same node. The model reports that as a move.
+    - Lazily created child containers are Loro *mergeable* containers
+      (Loro ≥ 1.13.1), so concurrent first edits share one container.
+    - Loro has no public rollback: the model validates before mutating,
+      and on failure uses `revert_to` with the undo stacks paused.
+  - Tests: 7 unit, 17 integration, 2 property tests and 1 doctest.
+    - Property 1: every peer's incremental view equals a rebuild after
+      every step, and peers converge.
+    - Property 2: undo is an inverse.
+    - 2,000 cases each pass. Mutation-checked: breaking the updater in two
+      places fails both.
+  - Benchmarks (`cargo bench -p imaginarium-model`, dev VM):
+
+    | Operation | Measured | Budget |
+    |---|---|---|
+    | Open the 300-page document (import + view) | 47 ms | first page < 500 ms |
+    | Open the 10k-shape board | 339 ms | (none yet) |
+    | Keystroke in 300 pages: local / remote | 59 / 55 µs | remote < 1 ms incl. ~74 µs crypto |
+    | Drag step on 10k board: local / remote | 29 / 38 µs | same |
+    | Memory, opened board / document | 30.6 / 4.2 MiB | |
+    | Snapshot, board / shallow | 2.8 / 1.6 MiB | |
+
+    The benchmarks found and fixed:
+    - keystrokes 504 → 59 µs (chunked text, run-level fast path);
+    - opened board 40 → 31 MiB (exact-size property maps);
+    - 37 → 9 bytes per node id (integer instead of string).
+  - Profile:
+    - bench build + run: 2 min 17 s wall, 182 CPU-s, 804 MB peak;
+    - property soak (2,000 cases): 14 s.
+- [ ] **M1.7 `imaginarium-cli` (`imag`)** ← **next**: `inspect`, `verify`,
+  `export-json`. It combines format, crypto and model:
+  - open (with keys), list records;
+  - verify CRCs, signatures and the ACL chain;
+  - dump the document (`Document::to_value`).
 - [ ] **M1.8 Wrap-up**:
   - code review, publish the test vectors, update the website docs;
   - **automate the two-week rule**: an xtask check of **every** entry of
@@ -433,6 +479,17 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
   local cache, use batch verification, or verify only what the newest
   snapshot doesn't cover. The ACL replay (36 ms per 100 changes) can be
   cached by head hash in the same way.
+- **Loro depends on `im` 15.1.0, which RustSec lists as unmaintained**, and
+  so are its `bitmaps` and `sized-chunks` (RUSTSEC-2026-0247/-0248/-0251).
+  These are not vulnerabilities. They are ignored in `deny.toml` with
+  reasons. Re-check on every Loro update and remove the ignores once Loro
+  moves off `im`. Our own code uses `imbl`.
+- **Opening a 10k-shape board takes 339 ms** on this VM (Loro import ~90 ms;
+  building the view ~25 µs per node). Optimize in M2, when boards render:
+  read nodes in bulk (`LoroTree::get_value_with_meta`) instead of key by
+  key.
+- Typing at one spot copies that run's text per keystroke, which is fine
+  up to tens of KB per run. Very long single runs would need a rope.
 - HPKE unwrap (303 µs) is 3× the design estimate, because `x-wing` 0.1.0
   expands the private seed (ML-KEM key generation plus X25519) on every
   decapsulation (checked in its source, `DecapsulationKey::decapsulate`). It runs
