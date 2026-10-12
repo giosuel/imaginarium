@@ -13,12 +13,14 @@
 //!   password protection a keyring and encryption ([`save_new`],
 //!   [`save_new_path`], which replaces the file atomically).
 //!
+//! In documents with an ACL chain, every record the document is read from
+//! must be signed by a device the chain allows to write it (spec §7.3,
+//! §8.4). That costs about 70 µs per record (STATUS, known issues).
+//!
 //! # Non-goals (yet)
 //! - Incremental saving (appending `UPDT`s), blobs, thumbnails, the
-//!   `discussion` stream and Hub documents (account keys, ACL chains) come
-//!   with the app (M2) and collaboration (M8).
-//! - Verifying every signature on open is the `imag verify` command's job:
-//!   it costs time per record (STATUS, known issues).
+//!   `discussion` stream and saving Hub documents (account keys, ACL
+//!   chains) come with the app (M2) and collaboration (M8).
 #![forbid(unsafe_code)]
 
 mod error;
@@ -84,9 +86,9 @@ pub fn open_path(path: &Path, credentials: Credentials) -> Result<Opened> {
 pub fn open<F: Read + Seek>(file: F, credentials: Credentials) -> Result<Opened> {
     let mut reader = open_reader(file, credentials)?;
     let records = IndexedRecords::new(&reader);
-    let document = read_document(&mut reader, &records)?;
-    let meta = read_meta(&mut reader)?;
     let acl = read_acl(&mut reader)?;
+    let document = read_document(&mut reader, &records, acl.as_ref())?;
+    let meta = read_meta(&mut reader)?;
     Ok(Opened {
         document,
         header: *reader.header(),
@@ -139,11 +141,13 @@ impl IndexedRecords {
 }
 
 /// The payloads of a stream's head (snapshot, then updates), decrypted and
-/// decompressed. `None` if the file has no such stream.
+/// decompressed. `None` if the file has no such stream. With `acl`, every
+/// record must be signed by a device the chain allows to write it.
 pub fn stream_parts<F: Read + Seek>(
     reader: &mut Reader<F>,
     records: &IndexedRecords,
     stream: &StreamKey,
+    acl: Option<&AclState>,
 ) -> Result<Option<Vec<Vec<u8>>>> {
     let Some(head) = reader.index().head(stream).cloned() else {
         return Ok(None);
@@ -163,18 +167,23 @@ pub fn stream_parts<F: Read + Seek>(
         if record.header().codec != CODEC {
             return Err(NativeError::UnsupportedCodec(record.header().codec.clone()));
         }
+        if let Some(acl) = acl {
+            acl.verify_content(&record)?;
+        }
         parts.push(reader.read_content(&entry)?);
     }
     Ok(Some(parts))
 }
 
-/// Reads the `main` stream into a document.
+/// Reads the `main` stream into a document, checking its records against
+/// `acl` (from [`read_acl`]) if the file has an ACL chain.
 pub fn read_document<F: Read + Seek>(
     reader: &mut Reader<F>,
     records: &IndexedRecords,
+    acl: Option<&AclState>,
 ) -> Result<Document> {
     let parts =
-        stream_parts(reader, records, &StreamKey::main())?.ok_or(NativeError::NoDocument)?;
+        stream_parts(reader, records, &StreamKey::main(), acl)?.ok_or(NativeError::NoDocument)?;
     let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
     Ok(Document::open(&parts)?)
 }

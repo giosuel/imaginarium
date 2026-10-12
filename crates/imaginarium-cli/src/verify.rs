@@ -202,7 +202,10 @@ pub(crate) fn run(path: &Path, keys: &KeyArgs, out: &mut dyn Write) -> Result<bo
 
     // 6. The document itself.
     let records = IndexedRecords::new(&reader);
-    let outcome = match read_document(&mut reader, &records) {
+    // Checked against the chain like the app does; a chain that doesn't
+    // replay already failed the signatures check.
+    let acl = imaginarium_io_native::read_acl(&mut reader).ok().flatten();
+    let outcome = match read_document(&mut reader, &records, acl.as_ref()) {
         Ok(document) => {
             let view = document.view();
             let version = view
