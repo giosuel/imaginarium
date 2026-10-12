@@ -2,6 +2,8 @@
 
 //! Record framing (spec §4.2–§4.3, §5.1).
 
+use std::io::Read as _;
+
 use prost::Message;
 
 use crate::pb;
@@ -401,14 +403,15 @@ fn stream_bytes<R: std::io::Read>(
             limit,
         });
     }
-    let len = usize::try_from(len).map_err(|_| FormatError::Limit {
-        what,
-        value: len,
-        limit,
-    })?;
+    // Grow with the data actually read, never with the *claimed* length,
+    // so a tiny file claiming a 1 GiB payload can't force a 1 GiB allocation.
     let start = raw.len();
-    raw.resize(start + len, 0);
-    read_exact(reader, &mut raw[start..], what)
+    reader.take(len).read_to_end(raw)?;
+    if (raw.len() - start) as u64 == len {
+        Ok(())
+    } else {
+        Err(FormatError::Truncated { what })
+    }
 }
 
 fn read_varint(buf: &[u8], pos: &mut usize, what: &'static str) -> Result<u64> {
@@ -555,6 +558,21 @@ mod tests {
         let (read, consumed) = Record::read_from(&mut cursor, &Limits::default()).unwrap();
         assert_eq!((read, consumed), (record, len));
         assert_eq!(cursor.position(), len as u64);
+    }
+
+    #[test]
+    fn streaming_read_of_a_huge_claimed_length_fails_without_allocating_it() {
+        // rtype, flags, hlen 0, then plen = 1 GiB, with only 3 bytes of data.
+        let mut bytes = vec![0x04, 0x01, 0x00];
+        varint::encode(1 << 30, &mut bytes);
+        bytes.extend_from_slice(b"abc");
+        let started = std::time::Instant::now();
+        let result = Record::read_from(&mut std::io::Cursor::new(bytes), &Limits::default());
+        assert!(matches!(result, Err(FormatError::Truncated { .. })));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "no 1 GiB allocation"
+        );
     }
 
     #[test]

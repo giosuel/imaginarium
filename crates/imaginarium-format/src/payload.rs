@@ -235,14 +235,7 @@ impl Record {
             self.payload().to_vec()
         };
         let content = if self.flags().contains(RecordFlags::ZSTD) {
-            let capacity = usize::try_from(plain_len).map_err(|_| FormatError::Limit {
-                what: "plain_len",
-                value: plain_len,
-                limit: limits.max_payload,
-            })?;
-            // `bulk::decompress` refuses to produce more than `capacity`.
-            zstd::bulk::decompress(&data, capacity)
-                .map_err(|err| FormatError::Decompress(err.to_string()))?
+            decompress_bounded(&data, plain_len)?
         } else {
             data
         };
@@ -254,6 +247,22 @@ impl Record {
         }
         Ok(content)
     }
+}
+
+/// Decompresses a zstd frame, producing at most `plain_len + 1` bytes.
+/// Memory grows with the actual output, never with the claimed length,
+/// so a lying header can't force a huge allocation, and a bomb stops one
+/// byte past the limit.
+fn decompress_bounded(data: &[u8], plain_len: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let decoder = zstd::stream::read::Decoder::new(data)
+        .map_err(|err| FormatError::Decompress(err.to_string()))?;
+    let mut out = Vec::with_capacity(usize::try_from(plain_len.min(1 << 20)).unwrap_or(0));
+    decoder
+        .take(plain_len.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|err| FormatError::Decompress(err.to_string()))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -385,6 +394,28 @@ mod tests {
             honest.open_content(&DOC, None, &tight),
             Err(FormatError::Limit { .. })
         ));
+    }
+
+    #[test]
+    fn huge_claimed_plain_len_does_not_allocate_up_front() {
+        // A tiny compressed payload claiming 1 GiB must fail fast and
+        // without allocating 1 GiB (it would OOM otherwise).
+        let tiny = RecordBuilder::new(RecordType::BLOB, ObjectId([1; 32]))
+            .compress(true)
+            .build(&DOC, vec![0u8; 100], None)
+            .unwrap();
+        let mut header = tiny.header().clone();
+        header.plain_len = 1 << 30;
+        let liar = Record::new(tiny.rtype(), tiny.flags(), header, tiny.payload().to_vec());
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            liar.open_content(&DOC, None, &Limits::default()),
+            Err(FormatError::PlainLen { .. })
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "no 1 GiB allocation"
+        );
     }
 
     #[test]
