@@ -11,7 +11,7 @@ use vello_cpu::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::scene::{Scene, Target, TextureKey, TextureWork, replay};
+use crate::scene::{Scene, Target, TextureKey, TextureWork, Textures, replay};
 
 /// How the CPU backend trades speed against reproducibility.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,7 +67,8 @@ impl CpuRenderer {
                 context: &mut context,
                 resources: &mut self.resources,
                 glyph_atlas: false,
-                pixmaps: Some(&self.textures),
+                textures: Textures::Pixmaps(&self.textures),
+                missing: 0,
             },
             Affine::IDENTITY,
         );

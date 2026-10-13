@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use vello_common::paint::{Image, ImageSource};
@@ -55,10 +56,25 @@ pub(crate) enum Command {
 
 /// A texture the renderer keeps across frames for its owner (a canvas
 /// tile): rendered with [`Scene::render_texture`], drawn with
-/// [`Scene::draw_texture`], released with [`Scene::free_texture`]. The
-/// owner picks the keys.
+/// [`Scene::draw_texture`], released with [`Scene::free_texture`].
+///
+/// Keys are unique in the process ([`TextureKey::unique`]): one renderer
+/// holds the textures of every owner (all canvases of a window), so keys
+/// picked per owner would collide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TextureKey(pub u64);
+pub struct TextureKey(u64);
+
+impl TextureKey {
+    /// A key no other texture has.
+    pub fn unique() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn id(self) -> u64 {
+        self.0
+    }
+}
 
 /// Work on textures, done before the scene is drawn, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -334,9 +350,21 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) resources: &'a mut R,
     /// Draw glyphs from the backend's glyph atlas.
     pub(crate) glyph_atlas: bool,
-    /// Textures as pixmaps (the CPU backend); `None`: textures are the
-    /// GPU's, bound by key at render time.
-    pub(crate) pixmaps: Option<&'a HashMap<TextureKey, Arc<Pixmap>>>,
+    /// The textures the scene may draw.
+    pub(crate) textures: Textures<'a>,
+    /// Draws of textures that don't exist (skipped).
+    pub(crate) missing: u32,
+}
+
+/// The textures a backend can draw.
+pub(crate) enum Textures<'a> {
+    /// None (inside a texture's own content).
+    None,
+    /// The CPU backend's pixmaps.
+    Pixmaps(&'a HashMap<TextureKey, Arc<Pixmap>>),
+    /// The GPU's, bound by key at render time. Drawing a key without a
+    /// binding would fail the whole frame.
+    Bound(&'a HashMap<TextureKey, crate::gpu::GpuTexture>),
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -442,21 +470,33 @@ macro_rules! impl_sink {
                 if width == 0 || height == 0 || dest.is_zero_area() {
                     return;
                 }
-                let image = match self.pixmaps {
-                    Some(pixmaps) => match pixmaps.get(&key) {
+                // A texture that was never rendered or is freed shows
+                // nothing; the owner has a bug, but one frame of a missing
+                // tile beats ending the program.
+                let image = match self.textures {
+                    Textures::Pixmaps(pixmaps) => match pixmaps.get(&key) {
                         Some(pixmap) => ImageSource::Pixmap(pixmap.clone()),
-                        None => return, // never rendered: nothing to show
+                        None => {
+                            self.missing += 1;
+                            return;
+                        }
                     },
-                    None => ImageSource::external_texture(
-                        vello_common::TextureId(key.0),
-                        vello_common::geometry::RectU16 {
-                            x0: 0,
-                            y0: 0,
-                            x1: width,
-                            y1: height,
-                        },
-                        true,
-                    ),
+                    Textures::Bound(bound) if bound.contains_key(&key) => {
+                        ImageSource::external_texture(
+                            vello_common::TextureId(key.id()),
+                            vello_common::geometry::RectU16 {
+                                x0: 0,
+                                y0: 0,
+                                x1: width,
+                                y1: height,
+                            },
+                            true,
+                        )
+                    }
+                    Textures::Bound(_) | Textures::None => {
+                        self.missing += 1;
+                        return;
+                    }
                 };
                 self.context.set_paint(Image {
                     image,

@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use imaginarium_render::kurbo::{Affine, Circle, Rect, RoundedRect};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::peniko::color::palette::css;
-use imaginarium_render::{CpuMode, CpuRenderer, GpuOptions, OffscreenRenderer, Pixmap, Scene};
+use imaginarium_render::{
+    CpuMode, CpuRenderer, GpuOptions, OffscreenRenderer, Pixmap, Scene, TextureKey,
+};
 
 const WIDTH: u16 = 160;
 const HEIGHT: u16 = 120;
@@ -167,12 +169,12 @@ fn scenes_balance_their_layers() {
 }
 
 /// What tiles do: content rendered into a texture once, then drawn.
-fn through_texture(content: &Scene, offset: (f64, f64)) -> Scene {
-    use imaginarium_render::TextureKey;
+fn through_texture(content: &Scene, offset: (f64, f64)) -> (Scene, TextureKey) {
+    let key = TextureKey::unique();
     let mut scene = Scene::new();
-    scene.render_texture(TextureKey(1), WIDTH, HEIGHT, content.clone());
+    scene.render_texture(key, WIDTH, HEIGHT, content.clone());
     scene.draw_texture(
-        TextureKey(1),
+        key,
         WIDTH,
         HEIGHT,
         Rect::new(
@@ -182,7 +184,7 @@ fn through_texture(content: &Scene, offset: (f64, f64)) -> Scene {
             offset.1 + f64::from(HEIGHT),
         ),
     );
-    scene
+    (scene, key)
 }
 
 #[test]
@@ -190,19 +192,15 @@ fn a_texture_drawn_one_to_one_matches_drawing_directly() {
     let direct =
         CpuRenderer::new(CpuMode::Deterministic).render(&sample(), WIDTH, HEIGHT, background());
     let mut renderer = CpuRenderer::new(CpuMode::Deterministic);
-    let textured = renderer.render(
-        &through_texture(&sample(), (0.0, 0.0)),
-        WIDTH,
-        HEIGHT,
-        background(),
-    );
+    let (scene, key) = through_texture(&sample(), (0.0, 0.0));
+    let textured = renderer.render(&scene, WIDTH, HEIGHT, background());
     assert_eq!(renderer.texture_count(), 1, "the texture is kept");
     let (max, share) = compare(&direct, &textured, 2);
     assert!(share == 0.0, "{share} of pixels differ (max {max})");
     // Drawing it again needs no new render.
     let mut again = Scene::new();
     again.draw_texture(
-        imaginarium_render::TextureKey(1),
+        key,
         WIDTH,
         HEIGHT,
         Rect::new(0.0, 0.0, f64::from(WIDTH), f64::from(HEIGHT)),
@@ -218,15 +216,11 @@ fn a_texture_follows_the_transform_and_its_destination() {
     // under a 2× transform: the red texel covers device (24, 24)–(28, 28).
     let mut content = Scene::new();
     content.fill(&Rect::new(1.0, 1.0, 2.0, 2.0), css::RED);
+    let key = TextureKey::unique();
     let mut scene = Scene::new();
-    scene.render_texture(imaginarium_render::TextureKey(9), 2, 2, content);
+    scene.render_texture(key, 2, 2, content);
     scene.set_transform(Affine::scale(2.0));
-    scene.draw_texture(
-        imaginarium_render::TextureKey(9),
-        2,
-        2,
-        Rect::new(10.0, 10.0, 14.0, 14.0),
-    );
+    scene.draw_texture(key, 2, 2, Rect::new(10.0, 10.0, 14.0, 14.0));
     let pixmap = CpuRenderer::new(CpuMode::Deterministic).render(&scene, 40, 40, background());
     let at = |x: usize, y: usize| pixmap.data()[y * 40 + x];
     assert!(
@@ -247,10 +241,39 @@ fn the_gpu_draws_textures_like_the_cpu() {
             return;
         }
     };
-    let scene = through_texture(&sample(), (0.0, 0.0));
+    let (scene, _) = through_texture(&sample(), (0.0, 0.0));
     let on_gpu = gpu.render(&scene, WIDTH, HEIGHT, background()).unwrap();
     let on_cpu =
         CpuRenderer::new(CpuMode::Deterministic).render(&scene, WIDTH, HEIGHT, background());
     let (max, share) = compare(&on_gpu, &on_cpu, 24);
     assert!(share < 0.01, "{:.2} % differ (max {max})", share * 100.0);
+}
+
+/// A texture that doesn't exist (never rendered, or freed) shows nothing on
+/// both backends, instead of failing the frame.
+#[test]
+fn drawing_a_missing_texture_draws_nothing() {
+    let mut scene = Scene::new();
+    scene.draw_texture(
+        TextureKey::unique(),
+        WIDTH,
+        HEIGHT,
+        Rect::new(0.0, 0.0, f64::from(WIDTH), f64::from(HEIGHT)),
+    );
+    let empty =
+        CpuRenderer::new(CpuMode::Deterministic).render(&Scene::new(), WIDTH, HEIGHT, background());
+    let on_cpu =
+        CpuRenderer::new(CpuMode::Deterministic).render(&scene, WIDTH, HEIGHT, background());
+    assert_eq!(compare(&empty, &on_cpu, 0).1, 0.0);
+    let mut gpu = match OffscreenRenderer::new(&GpuOptions::default()) {
+        Ok(gpu) => gpu,
+        Err(err) => {
+            eprintln!("skipped: {err}");
+            return;
+        }
+    };
+    let on_gpu = gpu
+        .render(&scene, WIDTH, HEIGHT, background())
+        .expect("a missing texture doesn't fail the frame");
+    assert_eq!(compare(&empty, &on_gpu, 2).1, 0.0);
 }
