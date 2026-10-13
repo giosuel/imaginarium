@@ -86,6 +86,9 @@ pub(crate) struct Board {
     pub(crate) last_canvas: CanvasStats,
     /// Visible tiles still to be rendered: another frame is needed.
     pub(crate) owed: bool,
+    /// Frames painted so far: the first is drawn without tiles (cold
+    /// start), the tiles fill in from the second.
+    painted: u64,
     last_viewport: Option<Viewport>,
     hovered_shape: Option<usize>,
     selection: BTreeSet<usize>,
@@ -146,6 +149,7 @@ impl Board {
             tiles,
             last_canvas: CanvasStats::default(),
             owed: false,
+            painted: 0,
             last_viewport: None,
             hovered_shape: None,
             selection: BTreeSet::new(),
@@ -651,6 +655,10 @@ impl Board {
         };
         self.last_viewport = Some(canvas_view);
         let now = Instant::now();
+        // Rendering every visible tile would delay the first frame (each is
+        // its own GPU submission): draw it directly, tiles from the next.
+        let tiles = self.tiles && self.painted > 0;
+        self.painted += 1;
         let stats = match self.mode {
             Mode::Cards => {
                 let mut content = CardContent {
@@ -664,7 +672,7 @@ impl Board {
                     scale_factor: canvas_view.scale_factor,
                     layouts: 0,
                 };
-                let stats = if self.tiles {
+                let stats = if tiles {
                     self.cards_canvas
                         .frame(scene, &canvas_view, now, &mut content)
                 } else {
@@ -682,7 +690,7 @@ impl Board {
                     lifted,
                 };
                 self.last_layouts = 0;
-                if self.tiles {
+                if tiles {
                     self.shapes_canvas
                         .frame(scene, &canvas_view, now, &mut content)
                 } else {
@@ -691,7 +699,7 @@ impl Board {
                 }
             }
         };
-        self.owed = stats.owed > 0;
+        self.owed = stats.owed > 0 || (self.tiles && !tiles);
         self.last_canvas = stats;
         // Live overlays, drawn every frame, never baked into tiles.
         scene.set_transform(self.camera());
