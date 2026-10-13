@@ -84,9 +84,14 @@ works, odd (what), or broken.
 5a. Ctrl+2 (or "Shapes" in the toolbar) shows 10,000 shapes. Pan and
     zoom from 800 % down to all of them: smooth? Any tiles that show up
     late or blurry, or seams between tiles?
-5b. Drag shapes around. Turn on "Tile updates" (Ctrl+T): only the one or
-    two tiles under the dragged shape flash red; panning flashes only the
-    tiles coming into view.
+5b. Drag shapes around. Turn on "Tile updates" (Ctrl+T): tiles flash red
+    when they re-render. A drag flashes the tiles under the shapes when it
+    starts and ends, none while they move (they are drawn live on top);
+    panning flashes only the tiles coming into view.
+5b2. Editing: click selects, Shift+click adds, Shift+drag on empty board
+    draws a selection rectangle, Ctrl+A selects all; drag moves the
+    selection, arrow keys nudge (Shift: 10), Delete removes, Ctrl+Z /
+    Ctrl+Shift+Z undo and redo.
 5c. Ctrl+1 goes back to the cards (their tiles are kept).
 
 **HiDPI (criterion 5)**

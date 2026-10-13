@@ -753,8 +753,18 @@ app runs. Two owner exceptions for M2:
     (shapes), 1.6 vs 4.4 ms (cards). Criterion 1 can't be judged here:
     llvmpipe rasterizes inside `submit` (~23 ms of a 27 ms frame); the
     UI thread's own work is 2.5–5 ms. Cold start 378 ms, idle 0 %.
-  - Not yet (design §10): tile rendering on workers, margin prefetch, the
-    dragged item as an overlay, a property test of invalidation.
+  - Then: shape editing (selection by click, Shift+click, rubber band,
+    Ctrl+A; drag, nudge, delete, undo/redo). A drag lifts the selection
+    out of the tiles and draws it live, so it renders tiles only at its
+    start and end (scripted drag: 2 tile renders in 240 frames). The
+    board's first frame is drawn without tiles (cold start 324–351 ms
+    instead of 404–428 ms with 24 tile submissions on llvmpipe).
+  - Not yet (design §10): tile rendering on workers, margin prefetch, a
+    property test of invalidation.
+  - Disk full during M2.5 (2026-10-13 ~01:55 UTC): accumulated Cargo
+    output (another project's `~/.cache/somedesk-target*`, 77 GB; ours
+    `target/`, 42 GB). Freed our `target/debug/incremental` (9.3 GB).
+    Clean `target/debug` between milestones.
 - [ ] **M2.6 Gate binary** (mostly done along the way): scripted
   scenarios for criteria 1, 2, 3 and 6, `gate-report.json` with toolkit
   and renderer numbers apart, `--gpu low|high`, `--adapter`, `--no-vsync`,
