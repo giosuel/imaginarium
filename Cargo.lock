@@ -2152,9 +2152,11 @@ dependencies = [
 name = "imaginarium-gate"
 version = "0.0.1"
 dependencies = [
+ "accesskit",
  "anyhow",
  "clap",
  "imaginarium-render",
+ "imaginarium-text",
  "imaginarium-ui",
  "serde_json",
 ]

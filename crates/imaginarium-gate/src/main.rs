@@ -13,14 +13,19 @@
 //! - Not a product binary, and nothing depends on it. It is deleted or
 //!   folded into a benchmark once the gate is decided.
 //!
-//! # Measurements so far (M2.2)
+//! # Measurements so far (M2.3)
 //! - Cold start: process start (`/proc/self/stat`) and `main` until the
-//!   first presented frame.
-//! - Scripted pan: per-frame CPU time and frame-to-frame intervals.
+//!   first presented frame, and loading the fonts.
+//! - Scripted pan: per-frame paint (toolkit), encode and submit (renderer),
+//!   swapchain wait, and frame-to-frame intervals.
+//! - Scripted typing into the search field: handling a keystroke
+//!   (editing, searching 2,000 cards) and the frame after it.
 //! - Idle: CPU used and frames drawn while nothing happens (criterion 6).
 //! - The GPU and machine it ran on.
 
+mod app;
 mod board;
+mod content;
 mod proc;
 
 use std::path::PathBuf;
@@ -29,18 +34,19 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use clap::{Parser, ValueEnum};
 use imaginarium_render::Scene;
-use imaginarium_render::kurbo::{Size, Vec2};
+use imaginarium_render::kurbo::{Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{GpuOptions, Power};
-use imaginarium_ui::{FrameInfo, Input, View, WindowOptions};
+use imaginarium_render::{GpuInfo, GpuOptions, Power};
+use imaginarium_text::Fonts;
+use imaginarium_ui::{AccessTree, FrameInfo, Input, View, WindowOptions};
 
-use crate::board::Board;
+use crate::app::App;
 
 /// The M2 gate app: shows test content and measures the UI toolkit.
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
-    /// Run the scripted measurement (pan, then idle), write the report and
+    /// Run the scripted measurement (pan, type, idle), write the report and
     /// close. Without it the window stays open for manual testing, and the
     /// report is written when it closes.
     #[arg(long)]
@@ -48,6 +54,9 @@ struct Args {
     /// Frames of scripted panning to time.
     #[arg(long, default_value_t = 300)]
     pan_frames: u32,
+    /// Keystrokes of scripted typing into the search field to time.
+    #[arg(long, default_value_t = 60)]
+    type_keys: u32,
     /// Seconds of idling to measure.
     #[arg(long, default_value_t = 10.0)]
     idle_seconds: f64,
@@ -64,6 +73,10 @@ struct Args {
     /// Don't wait for vertical sync (measures how fast frames could be).
     #[arg(long)]
     no_vsync: bool,
+    /// Draw every glyph's outline each frame instead of from Vello's
+    /// (experimental) glyph atlas.
+    #[arg(long)]
+    no_glyph_atlas: bool,
     /// Where to write the report.
     #[arg(long, default_value = "gate-report.json")]
     report: PathBuf,
@@ -78,6 +91,9 @@ enum GpuChoice {
     High,
 }
 
+/// What the scripted typing types, one character per frame.
+const TYPED: &str = "quarterly planning review notes";
+
 /// Where the scripted run is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
@@ -85,6 +101,11 @@ enum Phase {
     Start,
     /// Panning, with this many frames to go.
     Pan(u32),
+    /// Typing into the search field, with this many keystrokes to go.
+    Type(u32),
+    /// Waiting for the frame that shows the cleared search, so the idle
+    /// measurement starts with nothing left to draw.
+    Settle,
     /// Idling since the instant, with the CPU time and frame count then.
     Idle {
         since: Instant,
@@ -98,9 +119,10 @@ enum Phase {
 }
 
 struct Gate {
-    board: Board,
+    app: App,
     measure: bool,
     pan_frames: u32,
+    type_keys: u32,
     idle: Duration,
     close_after_frames: Option<u64>,
     phase: Phase,
@@ -108,6 +130,12 @@ struct Gate {
     first_frame: Option<FrameInfo>,
     last_at: Option<Duration>,
     pan: Vec<FrameSample>,
+    /// Layouts built during the pan (text cache misses).
+    pan_layouts: usize,
+    typing: Vec<KeySample>,
+    /// The handling time of the keystroke whose frame comes next.
+    pending_key: Option<(Duration, Duration)>,
+    typed: usize,
     idle_result: Option<IdleResult>,
     inputs: u64,
     inputs_during_idle: u64,
@@ -120,6 +148,15 @@ struct FrameSample {
     encode: Duration,
     submit: Duration,
     interval: Duration,
+}
+
+/// One scripted keystroke: handling it, then the frame showing it.
+#[derive(Clone, Copy, Debug)]
+struct KeySample {
+    handle: Duration,
+    search: Duration,
+    paint: Duration,
+    encode: Duration,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -137,11 +174,39 @@ impl Gate {
             frames: self.frames,
         };
     }
+
+    /// Types the next character of [`TYPED`] (starting over when done).
+    fn type_key(&mut self) {
+        let chars: Vec<char> = TYPED.chars().collect();
+        if self.typed > 0 && self.typed.is_multiple_of(chars.len()) {
+            self.app.clear_search();
+        }
+        let c = chars[self.typed % chars.len()];
+        let start = Instant::now();
+        self.app.type_text(&c.to_string());
+        self.pending_key = Some((start.elapsed(), self.app.last_search));
+        self.typed += 1;
+    }
+
+    fn after_pan(&mut self) -> bool {
+        if self.type_keys > 0 {
+            self.phase = Phase::Type(self.type_keys);
+            self.type_key();
+            true
+        } else {
+            self.start_idle();
+            false
+        }
+    }
 }
 
 impl View for Gate {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
-        self.board.paint(scene, size);
+        self.app.paint(scene, size);
+    }
+
+    fn opened(&mut self, gpu: &GpuInfo) {
+        self.app.set_gpu(format!("{} ({})", gpu.name, gpu.backend));
     }
 
     fn input(&mut self, input: &Input) -> bool {
@@ -149,10 +214,10 @@ impl View for Gate {
         if matches!(self.phase, Phase::Idle { .. }) {
             self.inputs_during_idle += 1;
         }
-        // Scripted phases ignore the pointer, so a mouse resting on the
-        // window doesn't skew them.
+        // Scripted phases ignore input, so a mouse resting on the window
+        // doesn't skew them.
         match self.phase {
-            Phase::Manual => self.board.input(input),
+            Phase::Manual => self.app.input(input),
             _ => false,
         }
     }
@@ -161,6 +226,7 @@ impl View for Gate {
         self.frames = frame.number;
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
+        self.app.set_frame(frame.paint, frame.render.encode);
         if self.first_frame.is_none() {
             self.first_frame = Some(*frame);
         }
@@ -175,13 +241,10 @@ impl View for Gate {
             }
             Phase::Start if self.pan_frames > 0 => {
                 self.phase = Phase::Pan(self.pan_frames);
-                self.board.pan(Vec2::new(-6.0, -3.0));
+                self.app.board.pan(Vec2::new(-6.0, -3.0));
                 true
             }
-            Phase::Start => {
-                self.start_idle();
-                false
-            }
+            Phase::Start => self.after_pan(),
             Phase::Pan(left) => {
                 self.pan.push(FrameSample {
                     paint: frame.paint,
@@ -190,13 +253,38 @@ impl View for Gate {
                     submit: frame.render.submit,
                     interval,
                 });
+                self.pan_layouts += self.app.board.last_layouts;
                 if left > 1 {
                     self.phase = Phase::Pan(left - 1);
-                    self.board.pan(Vec2::new(-6.0, -3.0));
+                    self.app.board.pan(Vec2::new(-6.0, -3.0));
                     true
                 } else {
-                    self.start_idle();
-                    false
+                    self.after_pan()
+                }
+            }
+            Phase::Settle => {
+                self.start_idle();
+                false
+            }
+            Phase::Type(left) => {
+                if let Some((handle, search)) = self.pending_key.take() {
+                    self.typing.push(KeySample {
+                        handle,
+                        search,
+                        paint: frame.paint,
+                        encode: frame.render.encode,
+                    });
+                }
+                if left > 1 {
+                    self.phase = Phase::Type(left - 1);
+                    self.type_key();
+                    true
+                } else {
+                    // Leave the field, or its caret would blink through
+                    // the idle measurement.
+                    self.app.clear_search();
+                    self.phase = Phase::Settle;
+                    true
                 }
             }
             _ => false,
@@ -204,14 +292,20 @@ impl View for Gate {
     }
 
     fn wake_at(&mut self) -> Option<Instant> {
-        match self.phase {
+        let deadline = match self.phase {
             Phase::Idle { since, .. } => Some(since + self.idle),
             _ => None,
+        };
+        match (deadline, self.app.wake_at()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
     fn wake(&mut self, now: Instant) -> bool {
-        if let Phase::Idle { since, cpu, frames } = self.phase {
+        if let Phase::Idle { since, cpu, frames } = self.phase
+            && now >= since + self.idle
+        {
             self.idle_result = Some(IdleResult {
                 wall: now - since,
                 cpu: cpu
@@ -220,8 +314,10 @@ impl View for Gate {
                 frames: self.frames - frames,
             });
             self.phase = Phase::Done;
+            return false;
         }
-        false
+        // A caret blink.
+        true
     }
 
     fn should_close(&mut self) -> bool {
@@ -229,6 +325,18 @@ impl View for Gate {
             || self
                 .close_after_frames
                 .is_some_and(|limit| self.frames >= limit)
+    }
+
+    fn ime_area(&mut self) -> Option<Rect> {
+        self.app.ime_area()
+    }
+
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        self.app.access(tree);
+    }
+
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        self.app.access_action(request)
     }
 }
 
@@ -263,6 +371,7 @@ fn main() -> anyhow::Result<()> {
         },
         adapter: args.adapter.clone(),
         no_vsync: args.no_vsync,
+        glyph_atlas: !args.no_glyph_atlas,
     };
     let options = WindowOptions {
         title: "Imaginarium gate".into(),
@@ -270,10 +379,14 @@ fn main() -> anyhow::Result<()> {
         gpu,
         background: Color::WHITE,
     };
+    let fonts_started = Instant::now();
+    let fonts = Fonts::new();
+    let fonts_time = fonts_started.elapsed();
     let mut gate = Gate {
-        board: Board::new(args.cards),
+        app: App::new(fonts, args.cards),
         measure: args.measure,
         pan_frames: args.pan_frames,
+        type_keys: args.type_keys,
         idle: Duration::from_secs_f64(args.idle_seconds.max(0.0)),
         close_after_frames: args.frames,
         phase: Phase::Start,
@@ -281,6 +394,10 @@ fn main() -> anyhow::Result<()> {
         first_frame: None,
         last_at: None,
         pan: Vec::new(),
+        pan_layouts: 0,
+        typing: Vec::new(),
+        pending_key: None,
+        typed: 0,
         idle_result: None,
         inputs: 0,
         inputs_during_idle: 0,
@@ -293,6 +410,8 @@ fn main() -> anyhow::Result<()> {
 
     let first = gate.first_frame;
     let pan = |field: fn(&FrameSample) -> Duration| gate.pan.iter().map(field).collect::<Vec<_>>();
+    let typing =
+        |field: fn(&KeySample) -> Duration| gate.typing.iter().map(field).collect::<Vec<_>>();
     let idle = gate.idle_result.map(|idle| {
         serde_json::json!({
             "seconds": idle.wall.as_secs_f64(),
@@ -306,7 +425,7 @@ fn main() -> anyhow::Result<()> {
     });
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
-        "milestone": "M2.2",
+        "milestone": "M2.3",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -316,6 +435,7 @@ fn main() -> anyhow::Result<()> {
             "driver": gpu.driver,
             "requested": format!("{:?}", args.gpu).to_lowercase(),
             "vsync": !args.no_vsync,
+            "glyph_atlas": !args.no_glyph_atlas,
         })),
         "window": first.map(|frame| serde_json::json!({
             "scale": frame.scale,
@@ -326,8 +446,12 @@ fn main() -> anyhow::Result<()> {
             "main_to_first_frame_ms": stats.first_frame.map(|first| millis(before_run + first)),
             "first_frame_paint_ms": first.map(|frame| millis(frame.paint)),
             "first_frame_encode_ms": first.map(|frame| millis(frame.render.encode)),
+            "fonts_ms": millis(fonts_time),
+            "font_families": gate.app.fonts.family_count(),
+            // Criterion 6: cold start under 400 ms.
+            "pass": stats.first_frame.map(|first| before_main.unwrap_or_default() + before_run + first < Duration::from_millis(400)),
         },
-        "content": { "cards": gate.board.cards() },
+        "content": { "cards": gate.app.board.cards() },
         "pan": {
             // The toolkit's share: the view building its scene.
             "paint": summary(pan(|sample| sample.paint)),
@@ -340,6 +464,15 @@ fn main() -> anyhow::Result<()> {
             // Frame to frame: with vertical sync, the refresh interval
             // when everything keeps up.
             "interval": summary(gate.pan.iter().skip(1).map(|sample| sample.interval).collect()),
+            // Card text laid out during the pan (cache misses).
+            "layouts": gate.pan_layouts,
+        },
+        "typing": {
+            // Editing the field and searching every card's text.
+            "handle": summary(typing(|sample| sample.handle)),
+            "search": summary(typing(|sample| sample.search)),
+            "paint": summary(typing(|sample| sample.paint)),
+            "encode": summary(typing(|sample| sample.encode)),
         },
         "idle": idle,
         "frames": stats.frames,
