@@ -180,6 +180,73 @@ fn scenes_balance_their_layers() {
     assert_eq!(outside.r, 255, "the translation applied");
 }
 
+/// A rounded clip, an opacity layer in it, and a rectangular clip in that.
+fn nested_clips() -> Scene {
+    let mut scene = Scene::new();
+    scene.push_clip(&RoundedRect::new(10.0, 10.0, 110.0, 90.0, 20.0));
+    scene.push_opacity(0.5);
+    scene.push_clip(&Rect::new(20.0, 20.0, 60.0, 60.0));
+    scene.fill(&Rect::new(0.0, 0.0, 160.0, 120.0), css::BLACK);
+    scene.pop();
+    scene.pop();
+    scene.fill(&Rect::new(70.0, 0.0, 160.0, 120.0), css::BLUE);
+    scene.pop();
+    scene.fill(&Rect::new(140.0, 100.0, 160.0, 120.0), css::RED);
+    scene
+}
+
+fn check_nested_clips(pixmap: &Pixmap, backend: &str) {
+    let at = |x: usize, y: usize| pixmap.data()[y * usize::from(WIDTH) + x];
+    let white = |x, y, what: &str| {
+        let p = at(x, y);
+        assert_eq!(
+            (p.r, p.g, p.b),
+            (255, 255, 255),
+            "{backend}: {what} at ({x}, {y})"
+        );
+    };
+    let p = at(40, 40);
+    assert!(
+        p.r > 100 && p.r < 160,
+        "{backend}: half-transparent black in both clips: {p:?}"
+    );
+    white(15, 50, "the black outside its rectangle");
+    let p = at(90, 50);
+    assert!(
+        p.b > 200 && p.r < 50,
+        "{backend}: blue in the rounded clip: {p:?}"
+    );
+    white(105, 15, "the blue outside the rounded corner");
+    white(130, 50, "the blue right of the rounded clip");
+    let p = at(150, 110);
+    assert!(
+        p.r > 200 && p.b < 50,
+        "{backend}: red after the last pop: {p:?}"
+    );
+}
+
+#[test]
+fn clips_take_any_shape_and_nest_with_layers() {
+    let on_cpu = CpuRenderer::new(CpuMode::Deterministic).render(
+        &nested_clips(),
+        WIDTH,
+        HEIGHT,
+        background(),
+    );
+    check_nested_clips(&on_cpu, "CPU");
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
+        Err(err) => {
+            eprintln!("GPU part skipped: {err}");
+            return;
+        }
+    };
+    let on_gpu = gpu
+        .render(&nested_clips(), WIDTH, HEIGHT, background())
+        .unwrap();
+    check_nested_clips(&on_gpu, "GPU");
+}
+
 /// What tiles do: content rendered into a texture once, then drawn.
 fn through_texture(content: &Scene, offset: (f64, f64)) -> (Scene, TextureKey) {
     let key = TextureKey::unique();

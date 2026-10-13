@@ -32,6 +32,8 @@ pub(crate) enum Command {
         style: Stroke,
         color: Color,
     },
+    /// A clip to an axis-aligned rectangle (in the current transform).
+    PushClipRect(Rect),
     PushClip(BezPath),
     PushOpacity(f32),
     Pop,
@@ -263,10 +265,16 @@ impl Scene {
     }
 
     /// Clips what follows to `shape`, until the matching [`Scene::pop`].
+    ///
+    /// The clip applies to each thing drawn, not to a layer of them: it
+    /// costs no extra pass on the GPU, and a rectangle on whole pixels
+    /// costs nothing at all.
     pub fn push_clip(&mut self, shape: &impl Shape) {
         self.open_layers += 1;
-        self.commands
-            .push(Command::PushClip(shape.to_path(PATH_TOLERANCE)));
+        self.commands.push(match shape.as_rect() {
+            Some(rect) => Command::PushClipRect(rect),
+            None => Command::PushClip(shape.to_path(PATH_TOLERANCE)),
+        });
     }
 
     /// Draws what follows with `opacity` (0 to 1), until the matching
@@ -326,10 +334,6 @@ impl Scene {
     pub(crate) fn commands(&self) -> &[Command] {
         &self.commands
     }
-
-    pub(crate) fn open_layers(&self) -> u32 {
-        self.open_layers
-    }
 }
 
 /// What both Vello renderers can draw.
@@ -339,9 +343,11 @@ pub(crate) trait Sink {
     fn fill_rect(&mut self, rect: &Rect);
     fn fill_path(&mut self, path: &BezPath);
     fn stroke_path(&mut self, path: &BezPath, style: &Stroke);
+    fn push_clip_rect(&mut self, rect: &Rect);
     fn push_clip(&mut self, path: &BezPath);
+    fn pop_clip(&mut self);
     fn push_opacity(&mut self, opacity: f32);
-    fn pop(&mut self);
+    fn pop_layer(&mut self);
     fn fill_glyphs(
         &mut self,
         font: &FontData,
@@ -386,6 +392,15 @@ pub(crate) enum Textures<'a> {
 /// transform (the window's scale factor, say).
 pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
     sink.set_transform(base);
+    // What each open push was, for its pop: clips and layers pop apart.
+    let mut open: Vec<bool> = Vec::new();
+    let pop = |sink: &mut _, layer| {
+        if layer {
+            Sink::pop_layer(sink);
+        } else {
+            Sink::pop_clip(sink);
+        }
+    };
     for command in scene.commands() {
         match command {
             Command::Transform(t) => sink.set_transform(base * *t),
@@ -401,9 +416,23 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
                 sink.set_color(*color);
                 sink.stroke_path(path, style);
             }
-            Command::PushClip(path) => sink.push_clip(path),
-            Command::PushOpacity(opacity) => sink.push_opacity(*opacity),
-            Command::Pop => sink.pop(),
+            Command::PushClipRect(rect) => {
+                sink.push_clip_rect(rect);
+                open.push(false);
+            }
+            Command::PushClip(path) => {
+                sink.push_clip(path);
+                open.push(false);
+            }
+            Command::PushOpacity(opacity) => {
+                sink.push_opacity(*opacity);
+                open.push(true);
+            }
+            Command::Pop => {
+                if let Some(layer) = open.pop() {
+                    pop(sink, layer);
+                }
+            }
             Command::DrawTexture {
                 key,
                 width,
@@ -429,8 +458,8 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
             }
         }
     }
-    for _ in 0..scene.open_layers() {
-        sink.pop();
+    while let Some(layer) = open.pop() {
+        pop(sink, layer);
     }
 }
 
@@ -464,13 +493,19 @@ macro_rules! impl_sink {
                 self.context.set_stroke(style.clone());
                 self.context.stroke_path(path);
             }
+            fn push_clip_rect(&mut self, rect: &Rect) {
+                self.context.push_clip_rect(rect);
+            }
             fn push_clip(&mut self, path: &BezPath) {
-                self.context.push_clip_layer(path);
+                self.context.push_clip_path(path);
+            }
+            fn pop_clip(&mut self) {
+                self.context.pop_clip();
             }
             fn push_opacity(&mut self, opacity: f32) {
                 self.context.push_opacity_layer(opacity);
             }
-            fn pop(&mut self) {
+            fn pop_layer(&mut self) {
                 self.context.pop_layer();
             }
             fn fill_glyphs(
