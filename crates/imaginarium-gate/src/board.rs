@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The test content: a board of cards with text, panned with the wheel or
-//! by dragging, zoomed with Ctrl + wheel. Double-click a card to edit its
-//! text in place, at any zoom.
+//! The test content: a board of 2,000 cards with text, or of 10,000
+//! shapes, drawn through the canvas tile cache. Pan with the wheel or by
+//! dragging, zoom with Ctrl + wheel. Double-click a card to edit its text
+//! in place, at any zoom; drag shapes to move them.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use accesskit::{Node, NodeId, Role};
 use imaginarium_render::Scene;
+use imaginarium_render::canvas::{Canvas, CanvasContent, CanvasStats, ItemId, Viewport};
 use imaginarium_render::kurbo::{Affine, Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use imaginarium_ui::{AccessTree, Clipboard, Input, Key, TextField, access_rect};
 
 use crate::content;
+use crate::shapes::{self, Shape};
 
 const CARD: Size = Size::new(180.0, 112.0);
 const GAP: f64 = 28.0;
@@ -57,8 +60,32 @@ struct CardText {
     body: TextBlock,
 }
 
+/// Which board is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// 2,000 cards with text (search, editing).
+    Cards,
+    /// 10,000 shapes (criteria 1 and 2).
+    Shapes,
+}
+
 /// The board, its camera and the card being edited.
 pub(crate) struct Board {
+    mode: Mode,
+    cards_canvas: Canvas,
+    shapes_canvas: Canvas,
+    shapes: Vec<Shape>,
+    /// Draw through tiles (`false`: every item every frame, to compare).
+    pub(crate) tiles: bool,
+    /// What the canvas did in the last paint.
+    pub(crate) last_canvas: CanvasStats,
+    /// Visible tiles still to be rendered: another frame is needed.
+    pub(crate) owed: bool,
+    last_viewport: Option<Viewport>,
+    /// The shape being dragged, and the document point it was at.
+    shape_drag: Option<(usize, Point)>,
+    hovered_shape: Option<usize>,
+    top_z: u64,
     cards: usize,
     columns: usize,
     titles: Vec<String>,
@@ -84,9 +111,33 @@ pub(crate) struct Board {
 
 impl Board {
     /// A board of `cards` cards, laid out in a roughly 16:10 grid.
-    pub(crate) fn new(cards: usize) -> Self {
+    pub(crate) fn new(cards: usize, shape_count: usize, tiles: bool) -> Self {
         let columns = ((cards as f64 * 1.6).sqrt().ceil() as usize).max(1);
+        let mut cards_canvas = Canvas::new();
+        for index in 0..cards {
+            cards_canvas.upsert(
+                ItemId(index as u64),
+                index as u64,
+                card_bounds(card_rect(columns, index)),
+            );
+        }
+        let shapes = shapes::generate(shape_count);
+        let mut shapes_canvas = Canvas::new();
+        for (index, shape) in shapes.iter().enumerate() {
+            shapes_canvas.upsert(ItemId(index as u64), shape.z, shape.bounds());
+        }
         let mut board = Self {
+            mode: Mode::Cards,
+            cards_canvas,
+            shapes_canvas,
+            top_z: shapes.len() as u64,
+            shapes,
+            tiles,
+            last_canvas: CanvasStats::default(),
+            owed: false,
+            last_viewport: None,
+            shape_drag: None,
+            hovered_shape: None,
             cards,
             columns,
             titles: (0..cards).map(content::title).collect(),
@@ -113,6 +164,69 @@ impl Board {
     /// The card count.
     pub(crate) fn cards(&self) -> usize {
         self.cards
+    }
+
+    /// The shape count.
+    pub(crate) fn shape_count(&self) -> usize {
+        self.shapes.len()
+    }
+
+    /// Which board is shown.
+    pub(crate) fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Shows the other board (each keeps its tiles).
+    pub(crate) fn set_mode(&mut self, fonts: &mut Fonts, mode: Mode) {
+        if mode != self.mode {
+            self.stop_editing(fonts);
+            self.mode = mode;
+            self.hovered = None;
+            self.hovered_shape = None;
+        }
+    }
+
+    /// Tints tiles rendered in each frame (shows what a change redraws).
+    pub(crate) fn toggle_tile_updates(&mut self) -> bool {
+        let on = !self.cards_canvas.show_updates;
+        self.cards_canvas.show_updates = on;
+        self.shapes_canvas.show_updates = on;
+        on
+    }
+
+    /// Moves shape `index` by `delta` document units, on top of the others
+    /// (scripted drags, and the pointer).
+    pub(crate) fn move_shape(&mut self, index: usize, delta: Vec2) {
+        let Some(shape) = self.shapes.get_mut(index) else {
+            return;
+        };
+        if shape.z != self.top_z {
+            self.top_z += 1;
+            shape.z = self.top_z;
+        }
+        shape.translate(delta);
+        let (z, bounds) = (shape.z, shape.bounds());
+        self.shapes_canvas.upsert(ItemId(index as u64), z, bounds);
+    }
+
+    /// The shape nearest the middle of the view (scripted drags).
+    pub(crate) fn shape_in_view(&self) -> Option<usize> {
+        let center = self.to_world(self.viewport.center());
+        let id = self.shapes_canvas.item_at(center).or_else(|| {
+            // Between shapes: the nearest by grid search outwards.
+            (1..20).find_map(|step| {
+                let d = f64::from(step) * 16.0;
+                [
+                    Vec2::new(d, 0.0),
+                    Vec2::new(0.0, d),
+                    Vec2::new(-d, 0.0),
+                    Vec2::new(0.0, -d),
+                ]
+                .into_iter()
+                .find_map(|offset| self.shapes_canvas.item_at(center + offset))
+            })
+        })?;
+        Some(id.0 as usize)
     }
 
     /// The zoom factor.
@@ -154,6 +268,12 @@ impl Board {
             .then_some(index)
     }
 
+    /// Back to 100 % at the board's start.
+    pub(crate) fn reset_view(&mut self) {
+        self.origin = Point::new(-40.0, -40.0);
+        self.zoom = 1.0;
+    }
+
     /// Moves the camera by `delta` screen pixels (content follows).
     pub(crate) fn pan(&mut self, delta: Vec2) {
         self.origin -= delta / self.zoom;
@@ -171,7 +291,9 @@ impl Board {
     pub(crate) fn search(&mut self, query: &str) -> Option<usize> {
         let query = query.trim().to_lowercase();
         if query.is_empty() {
-            self.matches = None;
+            if self.matches.take().is_some() {
+                self.cards_canvas.invalidate_all();
+            }
             return None;
         }
         let matches: Vec<bool> = self
@@ -181,6 +303,8 @@ impl Board {
             .collect();
         let count = matches.iter().filter(|&&m| m).count();
         self.matches = Some(matches);
+        // Every card's look may have changed.
+        self.cards_canvas.invalidate_all();
         Some(count)
     }
 
@@ -191,6 +315,8 @@ impl Board {
             self.bodies[index] = field.text();
             self.haystacks[index] = self.haystack(index);
             self.texts.remove(&index);
+            self.cards_canvas
+                .invalidate(card_bounds(card_rect(self.columns, index)));
         }
     }
 
@@ -199,6 +325,9 @@ impl Board {
         let mut field = TextField::new(&self.bodies[index], body_style(), true).with_padding(2.0);
         field.focus();
         self.texts.remove(&index);
+        // The tiles show the card without its body while it is edited.
+        self.cards_canvas
+            .invalidate(card_bounds(card_rect(self.columns, index)));
         self.editing = Some((index, field));
     }
 
@@ -253,6 +382,11 @@ impl Board {
     }
 
     fn handle(&mut self, fonts: &mut Fonts, input: &Input) -> bool {
+        if self.mode == Mode::Shapes
+            && let Some(changed) = self.handle_shapes(input)
+        {
+            return changed;
+        }
         match input {
             Input::PointerMoved(position) => {
                 if let Some(last) = self.dragging {
@@ -335,15 +469,75 @@ impl Board {
         }
     }
 
+    /// Shape dragging and hover; `None` for input the shared code handles
+    /// (panning, zooming).
+    fn handle_shapes(&mut self, input: &Input) -> Option<bool> {
+        match input {
+            Input::PointerMoved(position) => {
+                let world = self.to_world(*position);
+                if let Some((index, last)) = self.shape_drag {
+                    self.move_shape(index, world - last);
+                    self.shape_drag = Some((index, world));
+                    return Some(true);
+                }
+                if self.dragging.is_some() {
+                    return None;
+                }
+                let hovered = self
+                    .viewport
+                    .contains(*position)
+                    .then(|| self.shapes_canvas.item_at(world))
+                    .flatten()
+                    .map(|id| id.0 as usize);
+                let changed = hovered != self.hovered_shape;
+                self.hovered_shape = hovered;
+                Some(changed)
+            }
+            Input::PointerButton {
+                primary: true,
+                pressed: true,
+                position,
+                ..
+            } if self.viewport.contains(*position) => {
+                let world = self.to_world(*position);
+                match self.shapes_canvas.item_at(world) {
+                    Some(id) => {
+                        self.shape_drag = Some((id.0 as usize, world));
+                        Some(true)
+                    }
+                    None => None,
+                }
+            }
+            Input::PointerButton {
+                primary: true,
+                pressed: false,
+                ..
+            } if self.shape_drag.is_some() => {
+                self.shape_drag = None;
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
     fn hover(&mut self, card: Option<usize>) -> bool {
         let changed = self.hovered != card;
         self.hovered = card;
         changed
     }
 
-    /// The caret blink of the edited card.
+    /// The caret blink of the edited card, or a zoom pause after which
+    /// the canvas switches levels.
     pub(crate) fn wake_at(&self) -> Option<Instant> {
-        self.editing.as_ref().and_then(|(_, field)| field.wake_at())
+        let caret = self.editing.as_ref().and_then(|(_, field)| field.wake_at());
+        let canvas = self.last_viewport.and_then(|viewport| match self.mode {
+            Mode::Cards => self.cards_canvas.wake_at(&viewport),
+            Mode::Shapes => self.shapes_canvas.wake_at(&viewport),
+        });
+        match (caret, canvas) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Where the input method's window goes while a card is edited.
@@ -356,10 +550,11 @@ impl Board {
         Some(camera.transform_rect_bbox(area))
     }
 
-    /// Draws the board into `viewport` (window coordinates).
+    /// Draws the board into `viewport` (window coordinates): the dot grid,
+    /// the items through the tile cache, then live overlays (hover, the
+    /// edited card).
     pub(crate) fn paint(&mut self, fonts: &mut Fonts, scene: &mut Scene, viewport: Rect) {
         self.viewport = viewport;
-        self.last_layouts = 0;
         scene.fill(&viewport, PAPER);
         let view = Rect::from_points(
             self.to_world(viewport.origin()),
@@ -368,7 +563,86 @@ impl Board {
         scene.push_clip(&viewport);
         scene.set_transform(self.camera());
         self.paint_grid(scene, view);
-        self.paint_cards(fonts, scene, view);
+        scene.set_transform(Affine::IDENTITY);
+        let canvas_view = Viewport {
+            origin: self.origin,
+            zoom: self.zoom,
+            screen: viewport,
+            scale_factor: imaginarium_ui::scale_factor(),
+        };
+        self.last_viewport = Some(canvas_view);
+        let now = Instant::now();
+        let stats = match self.mode {
+            Mode::Cards => {
+                let mut content = CardContent {
+                    fonts,
+                    columns: self.columns,
+                    titles: &self.titles,
+                    bodies: &self.bodies,
+                    texts: &mut self.texts,
+                    matches: self.matches.as_deref(),
+                    editing: self.editing.as_ref().map(|(index, _)| *index),
+                    scale_factor: canvas_view.scale_factor,
+                    layouts: 0,
+                };
+                let stats = if self.tiles {
+                    self.cards_canvas
+                        .frame(scene, &canvas_view, now, &mut content)
+                } else {
+                    self.cards_canvas
+                        .draw_direct(scene, &canvas_view, &mut content)
+                };
+                self.last_layouts = content.layouts;
+                stats
+            }
+            Mode::Shapes => {
+                let mut content = ShapeContent {
+                    shapes: &self.shapes,
+                };
+                self.last_layouts = 0;
+                if self.tiles {
+                    self.shapes_canvas
+                        .frame(scene, &canvas_view, now, &mut content)
+                } else {
+                    self.shapes_canvas
+                        .draw_direct(scene, &canvas_view, &mut content)
+                }
+            }
+        };
+        self.owed = stats.owed > 0;
+        self.last_canvas = stats;
+        // Live overlays, drawn every frame, never baked into tiles.
+        scene.set_transform(self.camera());
+        match self.mode {
+            Mode::Cards => {
+                if let Some(index) = self.hovered
+                    && self
+                        .editing
+                        .as_ref()
+                        .is_none_or(|(editing, _)| *editing != index)
+                {
+                    let card = RoundedRect::from_rect(self.card_rect(index), 10.0);
+                    scene.stroke(&card, 2.0 / self.zoom, ACCENT.with_alpha(0.7));
+                }
+                let columns = self.columns;
+                if let Some((index, field)) = &mut self.editing {
+                    let rect = card_rect(columns, *index);
+                    let body = body_rect(rect);
+                    scene.fill(&body, Color::WHITE.with_alpha(0.55));
+                    scene.stroke(&RoundedRect::from_rect(rect, 10.0), 2.5 / self.zoom, ACCENT);
+                    field.paint(fonts, scene, body, ACCENT);
+                }
+            }
+            Mode::Shapes => {
+                let marked = self
+                    .shape_drag
+                    .map(|(index, _)| index)
+                    .or(self.hovered_shape);
+                if let Some(shape) = marked.and_then(|index| self.shapes.get(index)) {
+                    scene.stroke(&shape.bounds().inflate(2.0, 2.0), 2.0 / self.zoom, ACCENT);
+                }
+            }
+        }
         scene.set_transform(Affine::IDENTITY);
         scene.pop();
     }
@@ -409,66 +683,6 @@ impl Board {
             .filter(move |&index| index < cards)
     }
 
-    fn paint_cards(&mut self, fonts: &mut Fonts, scene: &mut Scene, view: Rect) {
-        let detailed = self.zoom >= TEXT_ZOOM;
-        let editing = self.editing.as_ref().map(|(index, _)| *index);
-        for index in self.visible_cards(view) {
-            let rect = self.card_rect(index);
-            let dimmed = self.matches.as_ref().is_some_and(|matches| !matches[index]);
-            let tint = TINTS[index % TINTS.len()];
-            let tint = if dimmed { tint.with_alpha(0.3) } else { tint };
-            if !detailed {
-                scene.fill(&rect, tint);
-                continue;
-            }
-            let card = RoundedRect::from_rect(rect, 10.0);
-            // A soft shadow, then the card.
-            scene.fill(
-                &RoundedRect::from_rect(rect + Vec2::new(0.0, 3.0), 10.0),
-                INK.with_alpha(if dimmed { 0.03 } else { 0.08 }),
-            );
-            scene.fill(&card, tint);
-            if dimmed {
-                scene.push_opacity(0.35);
-            }
-            scene.push_clip(&card);
-            if !self.texts.contains_key(&index) {
-                self.last_layouts += 1;
-                let width = (CARD.width - 2.0 * PADDING) as f32;
-                let text = CardText {
-                    // One line: long titles are cut at the card's edge.
-                    title: TextBlock::new(fonts, &self.titles[index], &title_style(), None),
-                    body: TextBlock::new(fonts, &self.bodies[index], &body_style(), Some(width)),
-                };
-                self.texts.insert(index, text);
-            }
-            if let Some(text) = self.texts.get(&index) {
-                text.title
-                    .paint(scene, Point::new(rect.x0 + PADDING, rect.y0 + 12.0), false);
-                if editing != Some(index) {
-                    scene.push_clip(&body_rect(rect));
-                    text.body
-                        .paint(scene, Point::new(rect.x0 + PADDING, rect.y0 + 38.0), false);
-                    scene.pop();
-                }
-            }
-            scene.pop();
-            if dimmed {
-                scene.pop();
-            }
-            if editing == Some(index) {
-                scene.fill(&self.body_rect(index), Color::WHITE.with_alpha(0.55));
-                scene.stroke(&card, 2.5 / self.zoom, ACCENT);
-            } else if self.hovered == Some(index) {
-                scene.stroke(&card, 2.0 / self.zoom, ACCENT.with_alpha(0.7));
-            }
-        }
-        let columns = self.columns;
-        if let Some((index, field)) = &mut self.editing {
-            field.paint(fonts, scene, body_rect(card_rect(columns, *index)), ACCENT);
-        }
-    }
-
     /// Adds the visible cards (and the edited card's field) to `tree`, with
     /// ids from `base`; returns the cards' ids.
     pub(crate) fn access_children(
@@ -477,6 +691,9 @@ impl Board {
         tree: &mut AccessTree,
         base: u64,
     ) -> Vec<NodeId> {
+        if self.mode == Mode::Shapes {
+            return Vec::new();
+        }
         let view = Rect::from_points(
             self.to_world(self.viewport.origin()),
             self.to_world(Point::new(self.viewport.x1, self.viewport.y1)),
@@ -505,6 +722,88 @@ impl Board {
     }
 }
 
+/// Paints cards into tiles: text above a zoom of 0.3, plain tiles below.
+struct CardContent<'a> {
+    fonts: &'a mut Fonts,
+    columns: usize,
+    titles: &'a [String],
+    bodies: &'a [String],
+    texts: &'a mut HashMap<usize, CardText>,
+    matches: Option<&'a [bool]>,
+    editing: Option<usize>,
+    scale_factor: f64,
+    /// Text layouts built (cache misses).
+    layouts: usize,
+}
+
+impl CanvasContent for CardContent<'_> {
+    fn paint_item(&mut self, id: ItemId, scene: &mut Scene, level_scale: f64) {
+        let index = id.0 as usize;
+        let rect = card_rect(self.columns, index);
+        let dimmed = self.matches.is_some_and(|matches| !matches[index]);
+        let tint = TINTS[index % TINTS.len()];
+        let tint = if dimmed { tint.with_alpha(0.3) } else { tint };
+        // The level's scale in logical pixels decides the detail.
+        if level_scale / self.scale_factor < TEXT_ZOOM {
+            scene.fill(&rect, tint);
+            return;
+        }
+        let card = RoundedRect::from_rect(rect, 10.0);
+        // A soft shadow, then the card.
+        scene.fill(
+            &RoundedRect::from_rect(rect + Vec2::new(0.0, 3.0), 10.0),
+            INK.with_alpha(if dimmed { 0.03 } else { 0.08 }),
+        );
+        scene.fill(&card, tint);
+        if dimmed {
+            scene.push_opacity(0.35);
+        }
+        scene.push_clip(&card);
+        if !self.texts.contains_key(&index) {
+            self.layouts += 1;
+            let width = (CARD.width - 2.0 * PADDING) as f32;
+            let text = CardText {
+                // One line: long titles are cut at the card's edge.
+                title: TextBlock::new(self.fonts, &self.titles[index], &title_style(), None),
+                body: TextBlock::new(self.fonts, &self.bodies[index], &body_style(), Some(width)),
+            };
+            self.texts.insert(index, text);
+        }
+        if let Some(text) = self.texts.get(&index) {
+            text.title
+                .paint(scene, Point::new(rect.x0 + PADDING, rect.y0 + 12.0), false);
+            if self.editing != Some(index) {
+                scene.push_clip(&body_rect(rect));
+                text.body
+                    .paint(scene, Point::new(rect.x0 + PADDING, rect.y0 + 38.0), false);
+                scene.pop();
+            }
+        }
+        scene.pop();
+        if dimmed {
+            scene.pop();
+        }
+    }
+}
+
+/// Paints shapes into tiles.
+struct ShapeContent<'a> {
+    shapes: &'a [Shape],
+}
+
+impl CanvasContent for ShapeContent<'_> {
+    fn paint_item(&mut self, id: ItemId, scene: &mut Scene, level_scale: f64) {
+        if let Some(shape) = self.shapes.get(id.0 as usize) {
+            shape.paint(scene, level_scale);
+        }
+    }
+}
+
+/// What a card paints: the card and its shadow.
+fn card_bounds(card: Rect) -> Rect {
+    Rect::new(card.x0 - 1.0, card.y0 - 1.0, card.x1 + 1.0, card.y1 + 4.0)
+}
+
 /// Card `index` in a grid of `columns`, in world coordinates.
 fn card_rect(columns: usize, index: usize) -> Rect {
     let column = (index % columns) as f64;
@@ -528,7 +827,7 @@ mod tests {
     use super::*;
 
     fn board() -> Board {
-        let mut board = Board::new(100);
+        let mut board = Board::new(100, 100, true);
         board.viewport = Rect::new(0.0, 44.0, 1280.0, 800.0);
         board
     }

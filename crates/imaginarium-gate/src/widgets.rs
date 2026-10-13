@@ -40,7 +40,15 @@ impl Widget for BoardWidget {
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
-        self.board.borrow_mut().paint(cx.fonts(), scene, bounds);
+        let owed = {
+            let mut board = self.board.borrow_mut();
+            board.paint(cx.fonts(), scene, bounds);
+            board.owed
+        };
+        // Tiles the budget left over: draw again right away.
+        if owed {
+            imaginarium_ui::invalidate(cx.id(), false);
+        }
     }
 
     fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
@@ -91,7 +99,13 @@ impl Widget for BoardWidget {
             cx.add_access_child(child);
         }
         let mut node = Node::new(Role::Canvas);
-        node.set_label("Board");
+        let label = match self.board.borrow().mode() {
+            crate::board::Mode::Cards => "Board".to_owned(),
+            crate::board::Mode::Shapes => {
+                format!("Shapes board, {} shapes", self.board.borrow().shape_count())
+            }
+        };
+        node.set_label(label);
         node.set_bounds(access_rect(bounds));
         Some(node)
     }

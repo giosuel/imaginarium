@@ -22,6 +22,8 @@
 //!   (editing, searching 2,000 cards) and the frame after it.
 //! - Scripted typing into the command palette (criterion 3): the search
 //!   over 2,000 commands, the widget tree's layout, paint and encode.
+//! - The 10,000-shape board through the tile cache (criteria 1 and 2):
+//!   scripted pan, zoom and drag, with tiles rendered per frame.
 //! - Idle: CPU used and frames drawn while nothing happens (criterion 6).
 //! - The GPU and machine it ran on.
 
@@ -30,6 +32,7 @@ mod board;
 mod commands;
 mod content;
 mod proc;
+mod shapes;
 mod widgets;
 
 use std::path::PathBuf;
@@ -67,6 +70,16 @@ struct Args {
     /// How many cards the board shows.
     #[arg(long, default_value_t = 2_000)]
     cards: usize,
+    /// How many shapes the shapes board has.
+    #[arg(long, default_value_t = 10_000)]
+    shapes: usize,
+    /// Draw every visible item every frame instead of through cached tiles
+    /// (to compare).
+    #[arg(long)]
+    no_tiles: bool,
+    /// Frames of each scripted phase on the shapes board (pan, zoom, drag).
+    #[arg(long, default_value_t = 240)]
+    shape_frames: u32,
     /// How many commands the palette searches.
     #[arg(long, default_value_t = 2_000)]
     commands: usize,
@@ -117,6 +130,9 @@ enum Phase {
     Type(u32),
     /// Typing into the command palette, with this many keystrokes to go.
     Palette(u32),
+    /// The shapes board: panning, zooming, dragging a shape, with this
+    /// many frames to go.
+    Shapes(ShapePhase, u32),
     /// Waiting for the frame that shows the cleared search, so the idle
     /// measurement starts with nothing left to draw.
     Settle,
@@ -149,6 +165,11 @@ struct Gate {
     typing: Vec<KeySample>,
     palette_keys: u32,
     palette: Vec<PaletteSample>,
+    shape_frames: u32,
+    shape_samples: [Vec<CanvasSample>; 3],
+    /// Tiles rendered during the cards pan.
+    pan_canvas: Vec<CanvasSample>,
+    dragged: Option<usize>,
     /// The handling time of the keystroke whose frame comes next.
     pending_key: Option<(Duration, Duration)>,
     typed: usize,
@@ -173,6 +194,28 @@ struct KeySample {
     search: Duration,
     paint: Duration,
     encode: Duration,
+}
+
+/// The scripted phases on the shapes board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShapePhase {
+    Pan,
+    Zoom,
+    Drag,
+}
+
+/// One frame of a canvas phase.
+#[derive(Clone, Copy, Debug, Default)]
+struct CanvasSample {
+    /// Everything on the UI thread: paint, texture renders, encode, submit.
+    frame: Duration,
+    paint: Duration,
+    textures: Duration,
+    encode: Duration,
+    interval: Duration,
+    rendered: usize,
+    owed: usize,
+    items: usize,
 }
 
 /// One scripted palette keystroke and the frame after it.
@@ -226,6 +269,58 @@ impl Gate {
         self.app.type_command(&c.to_string());
         self.pending_key = Some((start.elapsed(), Duration::ZERO));
         self.typed += 1;
+    }
+
+    fn canvas_sample(&self, frame: &FrameInfo, interval: Duration) -> CanvasSample {
+        let canvas = self.app.board.borrow().last_canvas.clone();
+        CanvasSample {
+            frame: frame.paint + frame.render.textures + frame.render.encode + frame.render.submit,
+            paint: frame.paint,
+            textures: frame.render.textures,
+            encode: frame.render.encode,
+            interval,
+            rendered: canvas.rendered,
+            owed: canvas.owed,
+            items: canvas.items_painted,
+        }
+    }
+
+    fn start_shapes(&mut self) {
+        if self.shape_frames == 0 {
+            self.phase = Phase::Settle;
+            return;
+        }
+        self.app.set_mode(crate::board::Mode::Shapes);
+        self.app.reset_view();
+        self.phase = Phase::Shapes(ShapePhase::Pan, self.shape_frames);
+        self.shape_step(ShapePhase::Pan, self.shape_frames);
+    }
+
+    /// Moves the shapes board on for the next frame of a phase.
+    fn shape_step(&mut self, which: ShapePhase, left: u32) {
+        match which {
+            ShapePhase::Pan => self.app.pan_board(Vec2::new(-9.0, -4.0)),
+            ShapePhase::Zoom => {
+                // Out for the first half, back in for the second.
+                let out = left > self.shape_frames / 2;
+                self.app.zoom_board(if out { 0.985 } else { 1.0 / 0.985 });
+            }
+            ShapePhase::Drag => {
+                let index = match self.dragged {
+                    Some(index) => index,
+                    None => {
+                        let index = self.app.board.borrow().shape_in_view().unwrap_or(0);
+                        self.dragged = Some(index);
+                        index
+                    }
+                };
+                // A circle, so the shape crosses tile edges.
+                let t = f64::from(left) / 12.0;
+                let delta = Vec2::new(t.cos() * 5.0, t.sin() * 5.0);
+                self.app.board.borrow_mut().move_shape(index, delta);
+                self.app.ui.refresh(self.app.board_id());
+            }
+        }
     }
 
     fn after_typing(&mut self) -> bool {
@@ -306,6 +401,8 @@ impl View for Gate {
                     interval,
                 });
                 self.pan_layouts += self.app.board.borrow().last_layouts;
+                let sample = self.canvas_sample(frame, interval);
+                self.pan_canvas.push(sample);
                 if left > 1 {
                     self.phase = Phase::Pan(left - 1);
                     self.app.pan_board(Vec2::new(-6.0, -3.0));
@@ -356,7 +453,33 @@ impl View for Gate {
                     self.palette_key();
                 } else {
                     self.app.close_palette();
-                    self.phase = Phase::Settle;
+                    self.start_shapes();
+                }
+                true
+            }
+            Phase::Shapes(which, left) => {
+                let sample = self.canvas_sample(frame, interval);
+                self.shape_samples[which as usize].push(sample);
+                if left > 1 {
+                    self.phase = Phase::Shapes(which, left - 1);
+                    self.shape_step(which, left - 1);
+                } else {
+                    let next = match which {
+                        ShapePhase::Pan => Some(ShapePhase::Zoom),
+                        ShapePhase::Zoom => Some(ShapePhase::Drag),
+                        ShapePhase::Drag => None,
+                    };
+                    match next {
+                        Some(next) => {
+                            self.app.reset_view();
+                            self.phase = Phase::Shapes(next, self.shape_frames);
+                            self.shape_step(next, self.shape_frames);
+                        }
+                        None => {
+                            self.app.set_mode(crate::board::Mode::Cards);
+                            self.phase = Phase::Settle;
+                        }
+                    }
                 }
                 true
             }
@@ -418,6 +541,42 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// The `q` quantile of `samples`.
+fn percentile(mut samples: Vec<Duration>, q: f64) -> Option<Duration> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    Some(samples[((samples.len() - 1) as f64 * q).round() as usize])
+}
+
+/// Timings and tile counts of a canvas phase.
+fn canvas_report(samples: &[CanvasSample]) -> serde_json::Value {
+    if samples.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let field = |f: fn(&CanvasSample) -> Duration| samples.iter().map(f).collect::<Vec<_>>();
+    let counts = |f: fn(&CanvasSample) -> usize| {
+        let values: Vec<usize> = samples.iter().map(f).collect();
+        serde_json::json!({
+            "mean": values.iter().sum::<usize>() as f64 / values.len() as f64,
+            "max": values.iter().max(),
+            "total": values.iter().sum::<usize>(),
+        })
+    };
+    serde_json::json!({
+        "frame": summary(field(|s| s.frame)),
+        "frame_p99_ms": percentile(field(|s| s.frame), 0.99).map(millis),
+        "paint": summary(field(|s| s.paint)),
+        "textures": summary(field(|s| s.textures)),
+        "encode": summary(field(|s| s.encode)),
+        "interval": summary(samples.iter().skip(1).map(|s| s.interval).collect()),
+        "tiles_rendered": counts(|s| s.rendered),
+        "tiles_owed": counts(|s| s.owed),
+        "items_painted": counts(|s| s.items),
+    })
+}
+
 /// Mean, median, 95th percentile and maximum, in milliseconds.
 fn summary(mut samples: Vec<Duration>) -> serde_json::Value {
     if samples.is_empty() {
@@ -457,9 +616,19 @@ fn main() -> anyhow::Result<()> {
     let fonts = Fonts::new();
     let fonts_time = fonts_started.elapsed();
     let mut gate = Gate {
-        app: App::new(fonts, args.cards, args.commands),
+        app: App::new(
+            fonts,
+            args.cards,
+            args.shapes,
+            args.commands,
+            !args.no_tiles,
+        ),
         palette_keys: args.palette_keys,
         palette: Vec::new(),
+        shape_frames: args.shape_frames,
+        shape_samples: [Vec::new(), Vec::new(), Vec::new()],
+        pan_canvas: Vec::new(),
+        dragged: None,
         measure: args.measure,
         pan_frames: args.pan_frames,
         type_keys: args.type_keys,
@@ -508,9 +677,25 @@ fn main() -> anyhow::Result<()> {
             "pass": idle.frames == 0 && idle.cpu.is_none_or(|cpu| cpu.as_secs_f64() / idle.wall.as_secs_f64() < 0.01),
         })
     });
+    // Criterion 1: p99 frame time under 16 ms while panning and zooming
+    // 10,000 shapes. (Frames per second come from the intervals with
+    // vertical sync; --no-vsync shows the headroom.)
+    let criterion_1 = [&gate.shape_samples[0], &gate.shape_samples[1]]
+        .iter()
+        .all(|samples| {
+            percentile(samples.iter().map(|sample| sample.frame).collect(), 0.99)
+                .is_some_and(|p99| p99 < Duration::from_millis(16))
+        });
+    // Criterion 2: dragging re-renders only the tiles under the shape (its
+    // old and new place): at most 4 per frame.
+    let criterion_2 = !gate.shape_samples[2].is_empty()
+        && gate.shape_samples[2]
+            .iter()
+            .skip(1)
+            .all(|sample| sample.rendered <= 4);
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
-        "milestone": "M2.4",
+        "milestone": "M2.5",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -536,7 +721,12 @@ fn main() -> anyhow::Result<()> {
             // Criterion 6: cold start under 400 ms.
             "pass": stats.first_frame.map(|first| before_main.unwrap_or_default() + before_run + first < Duration::from_millis(400)),
         },
-        "content": { "cards": gate.app.board.borrow().cards(), "commands": args.commands },
+        "content": {
+            "cards": gate.app.board.borrow().cards(),
+            "shapes": gate.app.board.borrow().shape_count(),
+            "commands": args.commands,
+            "tiles": !args.no_tiles,
+        },
         "pan": {
             // The toolkit's share: the view building its scene.
             "paint": summary(pan(|sample| sample.paint)),
@@ -551,6 +741,14 @@ fn main() -> anyhow::Result<()> {
             "interval": summary(gate.pan.iter().skip(1).map(|sample| sample.interval).collect()),
             // Card text laid out during the pan (cache misses).
             "layouts": gate.pan_layouts,
+            "canvas": canvas_report(&gate.pan_canvas),
+        },
+        "shapes": {
+            "pan": canvas_report(&gate.shape_samples[0]),
+            "zoom": canvas_report(&gate.shape_samples[1]),
+            "drag": canvas_report(&gate.shape_samples[2]),
+            "criterion_1_pass": criterion_1,
+            "criterion_2_pass": criterion_2,
         },
         "typing": {
             // Editing the field and searching every card's text.
