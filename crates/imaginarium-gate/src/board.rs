@@ -16,6 +16,11 @@ use imaginarium_render::peniko::Color;
 use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use imaginarium_ui::{AccessTree, Clipboard, Input, Key, TextField, access_rect};
 
+#[path = "board_edit.rs"]
+mod edit;
+
+use std::collections::BTreeSet;
+
 use crate::content;
 use crate::shapes::{self, Shape};
 
@@ -82,9 +87,15 @@ pub(crate) struct Board {
     /// Visible tiles still to be rendered: another frame is needed.
     pub(crate) owed: bool,
     last_viewport: Option<Viewport>,
-    /// The shape being dragged, and the document point it was at.
-    shape_drag: Option<(usize, Point)>,
     hovered_shape: Option<usize>,
+    selection: BTreeSet<usize>,
+    /// Shapes being dragged, drawn live instead of in the tiles.
+    lifted: Option<edit::Lift>,
+    /// A rubber-band selection: where it began and where the pointer is.
+    rubber: Option<(Point, Point)>,
+    undo: Vec<edit::ShapeEdit>,
+    redo: Vec<edit::ShapeEdit>,
+    deleted: Vec<bool>,
     top_z: u64,
     cards: usize,
     columns: usize,
@@ -136,8 +147,13 @@ impl Board {
             last_canvas: CanvasStats::default(),
             owed: false,
             last_viewport: None,
-            shape_drag: None,
             hovered_shape: None,
+            selection: BTreeSet::new(),
+            lifted: None,
+            rubber: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            deleted: vec![false; shape_count],
             cards,
             columns,
             titles: (0..cards).map(content::title).collect(),
@@ -194,19 +210,20 @@ impl Board {
         on
     }
 
-    /// Moves shape `index` by `delta` document units, on top of the others
-    /// (scripted drags, and the pointer).
-    pub(crate) fn move_shape(&mut self, index: usize, delta: Vec2) {
-        let Some(shape) = self.shapes.get_mut(index) else {
-            return;
-        };
-        if shape.z != self.top_z {
-            self.top_z += 1;
-            shape.z = self.top_z;
+    /// Starts dragging shape `index` alone (scripted drags).
+    pub(crate) fn begin_drag(&mut self, index: usize) {
+        if index < self.shapes.len() {
+            self.select_only(index);
+            let at = self.shapes[index].rect.center();
+            self.lift(at);
         }
-        shape.translate(delta);
-        let (z, bounds) = (shape.z, shape.bounds());
-        self.shapes_canvas.upsert(ItemId(index as u64), z, bounds);
+    }
+
+    /// Moves the dragged shapes by `delta` document units.
+    pub(crate) fn drag_by(&mut self, delta: Vec2) {
+        if let Some(at) = self.lifted.as_ref().map(edit::Lift::at) {
+            self.drag_to(at + delta);
+        }
     }
 
     /// The shape nearest the middle of the view (scripted drags).
@@ -469,15 +486,18 @@ impl Board {
         }
     }
 
-    /// Shape dragging and hover; `None` for input the shared code handles
-    /// (panning, zooming).
+    /// Selecting, dragging, deleting and undoing shapes, and hover; `None`
+    /// for input the shared code handles (panning, zooming).
     fn handle_shapes(&mut self, input: &Input) -> Option<bool> {
         match input {
             Input::PointerMoved(position) => {
                 let world = self.to_world(*position);
-                if let Some((index, last)) = self.shape_drag {
-                    self.move_shape(index, world - last);
-                    self.shape_drag = Some((index, world));
+                if self.lifted.is_some() {
+                    self.drag_to(world);
+                    return Some(true);
+                }
+                if let Some((start, _)) = self.rubber {
+                    self.rubber = Some((start, world));
                     return Some(true);
                 }
                 if self.dragging.is_some() {
@@ -497,23 +517,82 @@ impl Board {
                 primary: true,
                 pressed: true,
                 position,
+                modifiers,
                 ..
             } if self.viewport.contains(*position) => {
                 let world = self.to_world(*position);
                 match self.shapes_canvas.item_at(world) {
-                    Some(id) => {
-                        self.shape_drag = Some((id.0 as usize, world));
+                    Some(id) if modifiers.shift => {
+                        self.toggle_selected(id.0 as usize);
                         Some(true)
                     }
-                    None => None,
+                    Some(id) => {
+                        let index = id.0 as usize;
+                        if !self.selection.contains(&index) {
+                            self.select_only(index);
+                        }
+                        self.lift(world);
+                        Some(true)
+                    }
+                    None if modifiers.shift => {
+                        self.rubber = Some((world, world));
+                        Some(true)
+                    }
+                    None => {
+                        // A press on empty board clears the selection and
+                        // pans.
+                        self.selection.clear();
+                        self.dragging = Some(*position);
+                        Some(true)
+                    }
                 }
             }
             Input::PointerButton {
                 primary: true,
                 pressed: false,
+                modifiers,
                 ..
-            } if self.shape_drag.is_some() => {
-                self.shape_drag = None;
+            } => {
+                if self.lifted.is_some() {
+                    self.drop_lift();
+                    return Some(true);
+                }
+                if let Some((start, end)) = self.rubber.take() {
+                    self.select_in(Rect::from_points(start, end), modifiers.shift);
+                    return Some(true);
+                }
+                None
+            }
+            Input::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => {
+                let step = if modifiers.shift { 10.0 } else { 1.0 };
+                let command = |c: &str| {
+                    modifiers.command()
+                        && matches!(key, Key::Character(typed) if typed.eq_ignore_ascii_case(c))
+                };
+                match key {
+                    Key::Delete | Key::Backspace => self.delete_selection(),
+                    Key::ArrowLeft => self.nudge(Vec2::new(-step, 0.0)),
+                    Key::ArrowRight => self.nudge(Vec2::new(step, 0.0)),
+                    Key::ArrowUp => self.nudge(Vec2::new(0.0, -step)),
+                    Key::ArrowDown => self.nudge(Vec2::new(0.0, step)),
+                    Key::Escape => self.selection.clear(),
+                    _ if command("z") && modifiers.shift => {
+                        self.redo();
+                    }
+                    _ if command("z") => {
+                        self.undo();
+                    }
+                    _ if command("y") => {
+                        self.redo();
+                    }
+                    _ if command("a") => self.select_all(),
+                    _ => return None,
+                }
                 Some(true)
             }
             _ => None,
@@ -596,8 +675,11 @@ impl Board {
                 stats
             }
             Mode::Shapes => {
+                let lifted = self.lifted.as_ref().map(|lift| lift.ids.as_slice());
                 let mut content = ShapeContent {
                     shapes: &self.shapes,
+                    deleted: &self.deleted,
+                    lifted,
                 };
                 self.last_layouts = 0;
                 if self.tiles {
@@ -634,12 +716,18 @@ impl Board {
                 }
             }
             Mode::Shapes => {
-                let marked = self
-                    .shape_drag
-                    .map(|(index, _)| index)
-                    .or(self.hovered_shape);
-                if let Some(shape) = marked.and_then(|index| self.shapes.get(index)) {
-                    scene.stroke(&shape.bounds().inflate(2.0, 2.0), 2.0 / self.zoom, ACCENT);
+                let level_scale = canvas_view.device_scale();
+                self.paint_shape_overlay(scene, view, level_scale);
+                if let Some(index) = self.hovered_shape
+                    && self.lifted.is_none()
+                    && !self.selection.contains(&index)
+                    && let Some(shape) = self.shapes.get(index)
+                {
+                    scene.stroke(
+                        &shape.bounds().inflate(2.0, 2.0),
+                        1.5 / self.zoom,
+                        ACCENT.with_alpha(0.5),
+                    );
                 }
             }
         }
@@ -786,14 +874,26 @@ impl CanvasContent for CardContent<'_> {
     }
 }
 
-/// Paints shapes into tiles.
+/// Paints shapes into tiles, except deleted ones and those being dragged
+/// (drawn live on top).
 struct ShapeContent<'a> {
     shapes: &'a [Shape],
+    deleted: &'a [bool],
+    /// Sorted.
+    lifted: Option<&'a [usize]>,
 }
 
 impl CanvasContent for ShapeContent<'_> {
     fn paint_item(&mut self, id: ItemId, scene: &mut Scene, level_scale: f64) {
-        if let Some(shape) = self.shapes.get(id.0 as usize) {
+        let index = id.0 as usize;
+        if self.deleted.get(index).copied().unwrap_or(true)
+            || self
+                .lifted
+                .is_some_and(|lifted| lifted.binary_search(&index).is_ok())
+        {
+            return;
+        }
+        if let Some(shape) = self.shapes.get(index) {
             shape.paint(scene, level_scale);
         }
     }

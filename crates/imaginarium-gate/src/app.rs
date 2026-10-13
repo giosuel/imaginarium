@@ -214,13 +214,22 @@ impl App {
                 TextStyle::new(12.0).color(INK.with_alpha(0.65)),
                 move || {
                     let (paint, encode) = frame.get();
-                    let (zoom, mode, canvas) = board
-                        .try_borrow()
-                        .map_or((1.0, Mode::Cards, Default::default()), |board| {
-                            (board.zoom(), board.mode(), board.last_canvas.clone())
-                        });
+                    let (zoom, mode, canvas, selected) = board.try_borrow().map_or(
+                        (1.0, Mode::Cards, Default::default(), 0),
+                        |board| {
+                            (
+                                board.zoom(),
+                                board.mode(),
+                                board.last_canvas.clone(),
+                                board.selection_len(),
+                            )
+                        },
+                    );
                     let what = match mode {
                         Mode::Cards => format!("{cards} cards"),
+                        Mode::Shapes if selected > 0 => {
+                            format!("{shapes} shapes, {selected} selected")
+                        }
                         Mode::Shapes => format!("{shapes} shapes"),
                     };
                     let mut text = format!(

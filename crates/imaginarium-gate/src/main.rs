@@ -306,18 +306,20 @@ impl Gate {
                 self.app.zoom_board(if out { 0.985 } else { 1.0 / 0.985 });
             }
             ShapePhase::Drag => {
-                let index = match self.dragged {
-                    Some(index) => index,
-                    None => {
-                        let index = self.app.board.borrow().shape_in_view().unwrap_or(0);
-                        self.dragged = Some(index);
-                        index
-                    }
-                };
-                // A circle, so the shape crosses tile edges.
-                let t = f64::from(left) / 12.0;
-                let delta = Vec2::new(t.cos() * 5.0, t.sin() * 5.0);
-                self.app.board.borrow_mut().move_shape(index, delta);
+                let mut board = self.app.board.borrow_mut();
+                if self.dragged.is_none() {
+                    let index = board.shape_in_view().unwrap_or(0);
+                    board.begin_drag(index);
+                    self.dragged = Some(index);
+                }
+                if left > 1 {
+                    // A circle, so the shape crosses tile edges.
+                    let t = f64::from(left) / 12.0;
+                    board.drag_by(Vec2::new(t.cos() * 5.0, t.sin() * 5.0));
+                } else {
+                    board.drop_lift();
+                }
+                drop(board);
                 self.app.ui.refresh(self.app.board_id());
             }
         }
