@@ -33,7 +33,9 @@ mod scene;
 
 pub use cpu::{CpuMode, CpuRenderer};
 pub use error::RenderError;
-pub use gpu::{FrameOutcome, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer};
+pub use gpu::{
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer,
+};
 pub use scene::Scene;
 pub use vello_common::{kurbo, peniko};
 pub use vello_cpu::Pixmap;

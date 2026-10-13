@@ -2,6 +2,8 @@
 
 //! The GPU backend: `vello_gpu` on `wgpu`.
 
+use std::time::{Duration, Instant};
+
 use vello_common::kurbo::Affine;
 use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
@@ -125,11 +127,25 @@ fn clamp_size(width: u32, height: u32) -> (u16, u16) {
     (clamp(width), clamp(height))
 }
 
+/// Where a presented frame's time went on the calling thread. The GPU's
+/// own work isn't included: it runs after `submit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameTiming {
+    /// Waiting for the window's next texture (blocks while the swapchain
+    /// is full, i.e. on vertical sync).
+    pub acquire: Duration,
+    /// Turning the scene into GPU work: Vello flattens paths and builds
+    /// its strips on the CPU here.
+    pub encode: Duration,
+    /// Submitting the work and presenting.
+    pub submit: Duration,
+}
+
 /// What happened to a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameOutcome {
     /// It is on its way to the screen.
-    Presented,
+    Presented(FrameTiming),
     /// The window wasn't ready (minimized, resized meanwhile, …): draw
     /// again on the next redraw.
     Skipped,
@@ -271,6 +287,7 @@ impl WindowRenderer {
         background: Color,
         transform: Affine,
     ) -> Result<FrameOutcome, RenderError> {
+        let start = Instant::now();
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -285,6 +302,7 @@ impl WindowRenderer {
             }
             _ => return Ok(FrameOutcome::Skipped), // timeout, occluded
         };
+        let acquired = Instant::now();
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
@@ -317,9 +335,14 @@ impl WindowRenderer {
                 }),
             )
             .map_err(|err| RenderError::Render(err.to_string()))?;
+        let encoded = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
         self.gpu.queue.present(texture);
-        Ok(FrameOutcome::Presented)
+        Ok(FrameOutcome::Presented(FrameTiming {
+            acquire: acquired - start,
+            encode: encoded - acquired,
+            submit: encoded.elapsed(),
+        }))
     }
 }
 
