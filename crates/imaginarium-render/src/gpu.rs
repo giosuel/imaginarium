@@ -274,6 +274,10 @@ pub struct FrameTiming {
     pub encode: Duration,
     /// Submitting the work and presenting.
     pub submit: Duration,
+    /// Of `submit`: presenting. Some systems block here until the GPU or
+    /// the display catches up (Mesa's software GPU on X11): a wait, not
+    /// work.
+    pub present: Duration,
     /// Rendering textures (canvas tiles) before the frame: encoding and
     /// submitting each.
     pub textures: Duration,
@@ -812,12 +816,15 @@ impl WindowRenderer {
         if let Some(timer) = &mut self.timer {
             timer.submitted();
         }
+        let presenting = Instant::now();
         self.gpu.queue.present(texture);
+        let present = presenting.elapsed();
         self.frames += 1;
         Ok(FrameOutcome::Presented(FrameTiming {
             acquire: acquired - textured,
             encode: encoded - acquired,
             submit: encoded.elapsed(),
+            present,
             textures: textured - start,
             texture_renders: texture_stats.renders,
             textures_create: texture_stats.create,

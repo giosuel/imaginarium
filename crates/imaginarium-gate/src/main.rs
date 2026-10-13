@@ -282,6 +282,8 @@ struct CanvasSample {
     encode: Duration,
     /// The wait for the window's texture (vertical sync, or the GPU).
     acquire: Duration,
+    /// Presenting (part of the frame time; blocks on some systems).
+    present: Duration,
     interval: Duration,
     rendered: usize,
     owed: usize,
@@ -356,6 +358,7 @@ impl Gate {
             textures: frame.render.textures,
             encode: frame.render.encode,
             acquire: frame.render.acquire,
+            present: frame.render.present,
             interval,
             rendered: canvas.rendered,
             owed: canvas.owed,
@@ -464,7 +467,10 @@ impl View for Gate {
         self.app.set_frame(frame.paint, frame.render.encode);
         self.app.board.borrow_mut().note_render_time(
             frame.render.textures,
-            frame.paint + frame.render.encode + frame.render.submit,
+            // Work, not waits: a blocking present isn't tile time lost.
+            frame.paint
+                + frame.render.encode
+                + frame.render.submit.saturating_sub(frame.render.present),
         );
         self.missing_textures += u64::from(frame.render.missing_textures);
         if let Some(gpu) = frame.render.gpu {
@@ -704,6 +710,7 @@ fn canvas_report(
         "textures": summary(field(|s| s.textures)),
         "encode": summary(field(|s| s.encode)),
         "acquire": summary(field(|s| s.acquire)),
+        "present": summary(field(|s| s.present)),
         // The GPU's own time (timestamp queries), for the frames it came
         // back for.
         "gpu": gpu_report(samples, gpu),
