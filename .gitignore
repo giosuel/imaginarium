@@ -39,6 +39,7 @@ flamegraph*.svg
 dhat-heap.json
 heaptrack.*
 cargo-timing*.html
+gate-report*.json
 
 # Website
 website/node_modules/

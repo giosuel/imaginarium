@@ -72,7 +72,8 @@ pub(crate) fn forbidden_reason(path: &str) -> Option<&'static str> {
         || file_name.ends_with(".profdata")
         || file_name.starts_with("heaptrack.")
         || file_name == "dhat-heap.json"
-        || (file_name.starts_with("cargo-timing") && file_name.ends_with(".html"));
+        || (file_name.starts_with("cargo-timing") && file_name.ends_with(".html"))
+        || (file_name.starts_with("gate-report") && file_name.ends_with(".json"));
     if generated {
         return Some("profiling output");
     }
@@ -129,6 +130,7 @@ mod tests {
     fn generated_artifacts_are_forbidden() {
         for path in [
             "artifacts/screenshot.png",
+            "gate-report.json",
             "profiling/run1.json",
             "target/debug/x",
             "capture.tracy",
