@@ -377,6 +377,10 @@ impl Textures {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the window renderer's parts, borrowed apart from each other"
+    )]
     /// Renders and frees textures as `work` says, one submission each:
     /// Vello rewrites its buffers between renders, so renders sharing one
     /// submission would see the last one's data.

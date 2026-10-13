@@ -218,12 +218,10 @@ impl GpuTimer {
         let size = u64::from(slot.used) * u64::from(wgpu::QUERY_SIZE);
         let ticks: Vec<u64> = match slot.readback.get_mapped_range(..size) {
             Ok(view) => view
-                .chunks_exact(8)
-                .map(|bytes| {
-                    let mut word = [0; 8];
-                    word.copy_from_slice(bytes);
-                    u64::from_le_bytes(word)
-                })
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|bytes| u64::from_le_bytes(*bytes))
                 .collect(),
             Err(_) => Vec::new(),
         };
@@ -236,15 +234,15 @@ impl GpuTimer {
             ..GpuFrameTime::default()
         };
         let (mut first, mut last) = (u64::MAX, 0);
-        for (start, pair) in (0u32..).step_by(2).zip(ticks.chunks_exact(2)) {
-            let took = time(pair[1].saturating_sub(pair[0]));
+        for (start, &[begin, end]) in (0u32..).step_by(2).zip(ticks.as_chunks::<2>().0) {
+            let took = time(end.saturating_sub(begin));
             if slot.scene == Some(start) {
                 times.scene = took;
             } else {
                 times.textures += took;
             }
-            first = first.min(pair[0]);
-            last = last.max(pair[1]);
+            first = first.min(begin);
+            last = last.max(end);
         }
         times.span = time(last.saturating_sub(first));
         Some(times)
