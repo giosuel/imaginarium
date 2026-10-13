@@ -2,11 +2,14 @@
 
 //! A recorded frame: drawing commands that every backend replays.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
-use vello_common::peniko::{Color, FontData};
-use vello_cpu::Glyph;
+use vello_common::paint::{Image, ImageSource};
+use vello_common::peniko::{Color, FontData, ImageSampler};
+use vello_cpu::{Glyph, Pixmap};
 
 /// Curves are flattened to this tolerance (in the scene's units) when a
 /// shape is turned into a path.
@@ -41,6 +44,35 @@ pub(crate) enum Command {
         /// Into [`Scene::glyphs`].
         glyphs: Range<usize>,
     },
+    /// Draws texture `key`'s `width × height` texels into `dest`.
+    DrawTexture {
+        key: TextureKey,
+        width: u16,
+        height: u16,
+        dest: Rect,
+    },
+}
+
+/// A texture the renderer keeps across frames for its owner (a canvas
+/// tile): rendered with [`Scene::render_texture`], drawn with
+/// [`Scene::draw_texture`], released with [`Scene::free_texture`]. The
+/// owner picks the keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TextureKey(pub u64);
+
+/// Work on textures, done before the scene is drawn, in order.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TextureWork {
+    /// Renders `scene` into texture `key` (`width × height`, transparent
+    /// first), creating or resizing it.
+    Render {
+        key: TextureKey,
+        width: u16,
+        height: u16,
+        scene: Scene,
+    },
+    /// Releases texture `key`.
+    Free(TextureKey),
 }
 
 /// The attributes shared by a run of glyphs (see [`Scene::glyphs`]).
@@ -83,6 +115,8 @@ pub struct Scene {
     /// run.
     glyphs: Vec<Glyph>,
     coords: Vec<i16>,
+    /// Texture renders and releases, done before the frame.
+    textures: Vec<TextureWork>,
     open_layers: u32,
     /// The transform in effect at the end, restored after [`Scene::append`].
     current: Affine,
@@ -99,6 +133,7 @@ impl Scene {
         self.commands.clear();
         self.glyphs.clear();
         self.coords.clear();
+        self.textures.clear();
         self.open_layers = 0;
         self.current = Affine::IDENTITY;
     }
@@ -160,6 +195,47 @@ impl Scene {
         });
     }
 
+    /// Renders `content` into texture `key` (`width × height` pixels,
+    /// transparent before), before this scene is drawn. The texture stays
+    /// until [`Scene::free_texture`]; rendering again replaces its pixels.
+    pub fn render_texture(&mut self, key: TextureKey, width: u16, height: u16, content: Scene) {
+        self.textures.push(TextureWork::Render {
+            key,
+            width,
+            height,
+            scene: content,
+        });
+    }
+
+    /// Draws texture `key` (`width × height` texels) into `dest`, in the
+    /// current transform. A texture drawn at 1:1 on whole device pixels is
+    /// copied exactly.
+    pub fn draw_texture(&mut self, key: TextureKey, width: u16, height: u16, dest: Rect) {
+        self.commands.push(Command::DrawTexture {
+            key,
+            width,
+            height,
+            dest,
+        });
+    }
+
+    /// Releases texture `key` after this frame's work.
+    pub fn free_texture(&mut self, key: TextureKey) {
+        self.textures.push(TextureWork::Free(key));
+    }
+
+    /// Texture renders queued by this scene.
+    pub fn texture_renders(&self) -> usize {
+        self.textures
+            .iter()
+            .filter(|work| matches!(work, TextureWork::Render { .. }))
+            .count()
+    }
+
+    pub(crate) fn texture_work(&self) -> &[TextureWork] {
+        &self.textures
+    }
+
     /// Clips what follows to `shape`, until the matching [`Scene::pop`].
     pub fn push_clip(&mut self, shape: &impl Shape) {
         self.open_layers += 1;
@@ -192,6 +268,7 @@ impl Scene {
         let (glyph_base, coord_base) = (self.glyphs.len(), self.coords.len());
         self.glyphs.extend_from_slice(&other.glyphs);
         self.coords.extend_from_slice(&other.coords);
+        self.textures.extend_from_slice(&other.textures);
         for command in &other.commands {
             self.commands.push(match command {
                 Command::Transform(t) => Command::Transform(transform * *t),
@@ -247,6 +324,7 @@ pub(crate) trait Sink {
         coords: &[i16],
         glyphs: &[Glyph],
     );
+    fn draw_texture(&mut self, key: TextureKey, width: u16, height: u16, dest: &Rect);
 }
 
 /// A backend's drawing context with the resources its glyph caches live
@@ -256,6 +334,9 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) resources: &'a mut R,
     /// Draw glyphs from the backend's glyph atlas.
     pub(crate) glyph_atlas: bool,
+    /// Textures as pixmaps (the CPU backend); `None`: textures are the
+    /// GPU's, bound by key at render time.
+    pub(crate) pixmaps: Option<&'a HashMap<TextureKey, Arc<Pixmap>>>,
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -280,6 +361,12 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
             Command::PushClip(path) => sink.push_clip(path),
             Command::PushOpacity(opacity) => sink.push_opacity(*opacity),
             Command::Pop => sink.pop(),
+            Command::DrawTexture {
+                key,
+                width,
+                height,
+                dest,
+            } => sink.draw_texture(*key, *width, *height, dest),
             Command::Glyphs {
                 font,
                 size,
@@ -350,6 +437,41 @@ macro_rules! impl_sink {
                     .normalized_coords(coords)
                     .atlas_cache(self.glyph_atlas)
                     .fill_glyphs(glyphs.iter().copied());
+            }
+            fn draw_texture(&mut self, key: TextureKey, width: u16, height: u16, dest: &Rect) {
+                if width == 0 || height == 0 || dest.is_zero_area() {
+                    return;
+                }
+                let image = match self.pixmaps {
+                    Some(pixmaps) => match pixmaps.get(&key) {
+                        Some(pixmap) => ImageSource::Pixmap(pixmap.clone()),
+                        None => return, // never rendered: nothing to show
+                    },
+                    None => ImageSource::external_texture(
+                        vello_common::TextureId(key.0),
+                        vello_common::geometry::RectU16 {
+                            x0: 0,
+                            y0: 0,
+                            x1: width,
+                            y1: height,
+                        },
+                        true,
+                    ),
+                };
+                self.context.set_paint(Image {
+                    image,
+                    sampler: ImageSampler::default(),
+                });
+                // Texels to the destination rectangle.
+                self.context.set_paint_transform(
+                    Affine::translate(dest.origin().to_vec2())
+                        * Affine::scale_non_uniform(
+                            dest.width() / f64::from(width),
+                            dest.height() / f64::from(height),
+                        ),
+                );
+                self.context.fill_rect(dest);
+                self.context.reset_paint_transform();
             }
         }
     };

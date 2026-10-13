@@ -37,6 +37,6 @@ pub use error::RenderError;
 pub use gpu::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer,
 };
-pub use scene::{GlyphRun, Scene};
+pub use scene::{GlyphRun, Scene, TextureKey};
 pub use vello_common::{kurbo, peniko};
 pub use vello_cpu::{Glyph, Pixmap};

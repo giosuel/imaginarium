@@ -165,3 +165,92 @@ fn scenes_balance_their_layers() {
     let outside = pixmap.data()[0];
     assert_eq!(outside.r, 255, "the translation applied");
 }
+
+/// What tiles do: content rendered into a texture once, then drawn.
+fn through_texture(content: &Scene, offset: (f64, f64)) -> Scene {
+    use imaginarium_render::TextureKey;
+    let mut scene = Scene::new();
+    scene.render_texture(TextureKey(1), WIDTH, HEIGHT, content.clone());
+    scene.draw_texture(
+        TextureKey(1),
+        WIDTH,
+        HEIGHT,
+        Rect::new(
+            offset.0,
+            offset.1,
+            offset.0 + f64::from(WIDTH),
+            offset.1 + f64::from(HEIGHT),
+        ),
+    );
+    scene
+}
+
+#[test]
+fn a_texture_drawn_one_to_one_matches_drawing_directly() {
+    let direct =
+        CpuRenderer::new(CpuMode::Deterministic).render(&sample(), WIDTH, HEIGHT, background());
+    let mut renderer = CpuRenderer::new(CpuMode::Deterministic);
+    let textured = renderer.render(
+        &through_texture(&sample(), (0.0, 0.0)),
+        WIDTH,
+        HEIGHT,
+        background(),
+    );
+    assert_eq!(renderer.texture_count(), 1, "the texture is kept");
+    let (max, share) = compare(&direct, &textured, 2);
+    assert!(share == 0.0, "{share} of pixels differ (max {max})");
+    // Drawing it again needs no new render.
+    let mut again = Scene::new();
+    again.draw_texture(
+        imaginarium_render::TextureKey(1),
+        WIDTH,
+        HEIGHT,
+        Rect::new(0.0, 0.0, f64::from(WIDTH), f64::from(HEIGHT)),
+    );
+    assert_eq!(again.texture_renders(), 0);
+    let reused = renderer.render(&again, WIDTH, HEIGHT, background());
+    assert_eq!(compare(&textured, &reused, 0).1, 0.0);
+}
+
+#[test]
+fn a_texture_follows_the_transform_and_its_destination() {
+    // A 2×2 texture: one red texel at (1, 1), drawn into (10, 10)–(14, 14)
+    // under a 2× transform: the red texel covers device (24, 24)–(28, 28).
+    let mut content = Scene::new();
+    content.fill(&Rect::new(1.0, 1.0, 2.0, 2.0), css::RED);
+    let mut scene = Scene::new();
+    scene.render_texture(imaginarium_render::TextureKey(9), 2, 2, content);
+    scene.set_transform(Affine::scale(2.0));
+    scene.draw_texture(
+        imaginarium_render::TextureKey(9),
+        2,
+        2,
+        Rect::new(10.0, 10.0, 14.0, 14.0),
+    );
+    let pixmap = CpuRenderer::new(CpuMode::Deterministic).render(&scene, 40, 40, background());
+    let at = |x: usize, y: usize| pixmap.data()[y * 40 + x];
+    assert!(
+        at(26, 26).r > 200 && at(26, 26).g < 60,
+        "red inside: {:?}",
+        at(26, 26)
+    );
+    assert!(at(21, 21).g > 200, "white outside: {:?}", at(21, 21));
+    assert!(at(30, 30).g > 200, "white outside: {:?}", at(30, 30));
+}
+
+#[test]
+fn the_gpu_draws_textures_like_the_cpu() {
+    let mut gpu = match OffscreenRenderer::new(&GpuOptions::default()) {
+        Ok(gpu) => gpu,
+        Err(err) => {
+            eprintln!("skipped: {err}");
+            return;
+        }
+    };
+    let scene = through_texture(&sample(), (0.0, 0.0));
+    let on_gpu = gpu.render(&scene, WIDTH, HEIGHT, background()).unwrap();
+    let on_cpu =
+        CpuRenderer::new(CpuMode::Deterministic).render(&scene, WIDTH, HEIGHT, background());
+    let (max, share) = compare(&on_gpu, &on_cpu, 24);
+    assert!(share < 0.01, "{:.2} % differ (max {max})", share * 100.0);
+}
