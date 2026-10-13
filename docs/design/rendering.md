@@ -186,13 +186,30 @@ also keeps a browser (wasm) build possible.
   bound as external textures of the frame; the CPU backend keeps pixmaps,
   so golden images cover it. A tile drawn at 1:1 on whole device pixels
   equals drawing its items directly (tested).
-- **Overlays** (hover outlines, the edited card, drag handles) are drawn
-  live on top and never dirty tiles.
+- **Overlays** (hover outlines, the edited card, selection outlines) are
+  drawn live on top and never dirty tiles. A **drag lifts** the selected
+  shapes out of the tiles: their tiles render once without them, the
+  shapes are drawn live while they move, and they go back into the tiles
+  when the drag ends.
+- **Texture rules** (from the first gate run, M2.7):
+  - Texture keys are unique in the process (`TextureKey::unique`): one
+    renderer holds the textures of every canvas of a window.
+  - Texture work is done once, in the frame that first draws a scene: the
+    widget tree moves a repainted widget's work into the frame
+    (`Scene::move_texture_work`) and caches only the drawing.
+  - The window renderer does the work before it acquires the surface, so
+    a skipped frame (outdated surface, timeout) loses none of it.
+  - A stand-in counts as drawn, so that frame's eviction keeps it.
+  - A draw of a texture that doesn't exist draws nothing and is counted
+    (`FrameTiming::missing_textures`, the gate report's
+    `missing_textures`), on both backends.
+  - Property test: every texture a frame draws exists when the renderer
+    draws it, with two canvases sharing one renderer.
 - Not yet: rendering tiles on worker threads, prefetching the margin ring,
-  drawing the dragged item as an overlay until the drag ends (a drag
-  re-renders 1–2 tiles per frame today), and partial tile updates.
+  and partial tile updates.
 
 Measured in the gate app (llvmpipe VM, M2.5): with tiles, a pan frame
 encodes in 1.4 ms instead of 4.7 ms for the 10,000 shapes, and 1.6 ms
 instead of 4.4 ms for the text cards; a drag renders at most 2 tiles per
-frame (criterion 2).
+frame (criterion 2); with the drag lift, 2 tile renders in 240 drag
+frames.

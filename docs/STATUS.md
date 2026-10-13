@@ -10,7 +10,11 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.7 Gate run** by the owner with the M2.5 test binary (see the M2 checklist below). Meanwhile: the remaining M2.6 items.
+- **Next step:** **M2.7 Gate run**, in progress. The owner's first manual
+  session crashed (missing tile texture); fixed on `fix/m2.7-tile-textures`
+  (details in `docs/design/m2-gate.md`, "First run"). Waiting for the five
+  `--measure` reports and the checklist notes from the fixed binary, then
+  the fix round for failed criteria (cold start already fails: 746 ms).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -776,7 +780,14 @@ app runs. Two owner exceptions for M2:
   mixed-DPI checks (manual for now).
 - [ ] **M2.7 Gate run** on the owner's laptop: results in
   `docs/design/m2-gate.md`, one focused fix round for failed criteria,
-  then the decision. ADR-0007 notes that the gate evaluates the renderer
+  then the decision.
+  - First run (2026-10-13, manual): a crash from tile textures freed while
+    drawn, and boards showing each other's tiles after switching. Fixed
+    (unique texture keys, stand-ins kept from eviction, texture work before
+    the surface is acquired and done once per repaint, missing textures
+    draw nothing); property test with two canvases on one renderer. The
+    report now has manual sessions' frames and the cold start's window and
+    GPU parts. ADR-0007 notes that the gate evaluates the renderer
   of ADR-0003 too (a renderer failure has other fallbacks than GPUI).
 - [ ] **M2.8 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
