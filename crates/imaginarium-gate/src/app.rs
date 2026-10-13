@@ -157,7 +157,12 @@ impl App {
         };
         let search_box = ui.add_with_children(Flex::row().width(320.0), &[search]);
         let mode_button = |ui: &mut Ui, text: &str, action: Box<dyn FnMut()>| {
-            ui.add(Button::new(text, TextStyle::new(13.0), button_colors, action))
+            ui.add(Button::new(
+                text,
+                TextStyle::new(13.0),
+                button_colors,
+                action,
+            ))
         };
         let cards_button = {
             let request = mode_request.clone();
