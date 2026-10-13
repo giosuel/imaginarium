@@ -382,6 +382,10 @@ impl View for Gate {
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
         self.app.set_frame(frame.paint, frame.render.encode);
+        self.app
+            .board
+            .borrow_mut()
+            .note_render_time(frame.render.textures);
         self.missing_textures += u64::from(frame.render.missing_textures);
         if self.first_frame.is_none() {
             self.first_frame = Some(*frame);
