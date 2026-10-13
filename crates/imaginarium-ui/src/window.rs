@@ -342,6 +342,13 @@ pub struct RunStats {
 
 thread_local! {
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    static SCALE_FACTOR: Cell<f64> = const { Cell::new(1.0) };
+}
+
+/// The window's scale factor (device pixels per logical pixel), for
+/// content that snaps to device pixels (canvas tiles).
+pub fn scale_factor() -> f64 {
+    SCALE_FACTOR.with(Cell::get)
 }
 
 /// Asks for a frame of the current thread's window. Effects call this when
@@ -488,6 +495,7 @@ impl<V: View> Shell<V> {
             f64::from(physical.height) / self.scale,
         );
         self.scene.clear();
+        SCALE_FACTOR.with(|scale| scale.set(self.scale));
         self.view.paint(&mut self.scene, size);
         let paint = start.elapsed();
         let outcome = renderer.render(
