@@ -2188,10 +2188,13 @@ dependencies = [
  "accesskit",
  "anyhow",
  "clap",
+ "imaginarium-commands",
+ "imaginarium-reactive",
  "imaginarium-render",
  "imaginarium-text",
  "imaginarium-ui",
  "serde_json",
+ "taffy",
 ]
 
 [[package]]

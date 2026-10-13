@@ -12,7 +12,7 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Affine, Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_text::{Fonts, TextBlock, TextStyle};
-use imaginarium_ui::{AccessTree, Input, Key, TextField, access_rect};
+use imaginarium_ui::{AccessTree, Clipboard, Input, Key, TextField, access_rect};
 
 use crate::content;
 
@@ -224,11 +224,17 @@ impl Board {
     }
 
     /// Handles input; `true` if the picture changed.
-    pub(crate) fn input(&mut self, fonts: &mut Fonts, input: &Input) -> bool {
+    pub(crate) fn input(
+        &mut self,
+        fonts: &mut Fonts,
+        clipboard: &mut Clipboard,
+        input: &Input,
+    ) -> bool {
         // The edited card's field sees input first, in world coordinates.
         if let Some((index, mut field)) = self.editing.take() {
             let bounds = self.body_rect(index);
-            let response = field.input(fonts, &self.world_input(input), bounds);
+            let response =
+                field.input_with_clipboard(fonts, &self.world_input(input), bounds, clipboard);
             self.editing = Some((index, field));
             if response.blurred {
                 self.stop_editing(fonts);
@@ -463,12 +469,14 @@ impl Board {
         }
     }
 
-    /// Adds the visible cards (and the edited card's field) under a
-    /// "Board" node.
-    pub(crate) fn access(&mut self, fonts: &mut Fonts, tree: &mut AccessTree, id: NodeId) {
-        let mut board = Node::new(Role::Canvas);
-        board.set_label("Board");
-        board.set_bounds(access_rect(self.viewport));
+    /// Adds the visible cards (and the edited card's field) to `tree`, with
+    /// ids from `base`; returns the cards' ids.
+    pub(crate) fn access_children(
+        &mut self,
+        fonts: &mut Fonts,
+        tree: &mut AccessTree,
+        base: u64,
+    ) -> Vec<NodeId> {
         let view = Rect::from_points(
             self.to_world(self.viewport.origin()),
             self.to_world(Point::new(self.viewport.x1, self.viewport.y1)),
@@ -476,7 +484,7 @@ impl Board {
         let camera = self.camera();
         let mut children = Vec::new();
         for index in self.visible_cards(view) {
-            let card_id = NodeId(CARD_NODES + index as u64);
+            let card_id = NodeId(base + CARD_NODES + index as u64);
             let mut card = Node::new(Role::Note);
             card.set_label(self.titles[index].clone());
             card.set_description(self.bodies[index].clone());
@@ -487,14 +495,13 @@ impl Board {
             if let Some((editing, field)) = &mut self.editing
                 && *editing == index
             {
-                let field_id = field.access(fonts, tree, EDIT_NODES, body, "Card text");
+                let field_id = field.access(fonts, tree, base + EDIT_NODES, body, "Card text");
                 card.set_children(vec![field_id]);
             }
             tree.push(card_id, card);
             children.push(card_id);
         }
-        board.set_children(children);
-        tree.push(id, board);
+        children
     }
 }
 
