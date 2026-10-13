@@ -134,7 +134,8 @@ struct Item {
 
 #[derive(Debug)]
 struct Tile {
-    texture: TextureKey,
+    /// `None`: nothing is in it, so there is nothing to draw.
+    texture: Option<TextureKey>,
     /// Its items changed since it was rendered.
     stale: bool,
     /// The frame it was last drawn in (for eviction).
@@ -369,6 +370,19 @@ impl Canvas {
     }
 
     /// The items touching `area`, bottom first.
+    /// Whether any item touches `area`.
+    fn any_item_in(&self, area: Rect) -> bool {
+        Self::cells(area).any(|cell| {
+            self.grid.get(&cell).is_some_and(|ids| {
+                ids.iter().any(|id| {
+                    self.items
+                        .get(id)
+                        .is_some_and(|item| item.bounds.intersect(area).area() > 0.0)
+                })
+            })
+        })
+    }
+
     fn items_in(&self, area: Rect) -> Vec<ItemId> {
         let mut seen = HashSet::new();
         let mut found: Vec<(u64, ItemId)> = Vec::new();
@@ -456,7 +470,7 @@ impl Canvas {
         };
         self.last_rendered.clear();
         let build_start = Instant::now();
-        let mut draws: Vec<(TileKey, TextureKey)> = Vec::with_capacity(keys.len());
+        let mut draws: Vec<(TileKey, Option<TextureKey>)> = Vec::with_capacity(keys.len());
         let mut invalid: Vec<TileKey> = Vec::new();
         for key in keys {
             match self.tiles.get_mut(&key) {
@@ -468,6 +482,25 @@ impl Canvas {
                 _ => invalid.push(key),
             }
         }
+        // Tiles with nothing in them need no texture: valid at once, for
+        // free (zoomed out, most of the screen can be empty).
+        invalid.retain(|key| {
+            if self.any_item_in(key.bounds()) {
+                return true;
+            }
+            if let Some(texture) = self.tiles.get(key).and_then(|tile| tile.texture) {
+                scene.free_texture(texture);
+            }
+            self.tiles.insert(
+                *key,
+                Tile {
+                    texture: None,
+                    stale: false,
+                    used: self.frame,
+                },
+            );
+            false
+        });
         // What the budget leaves over shows a stand-in, so render first
         // where there would be none (blank), then where it would be wrong
         // (a stale copy), then where it is only partial or blurry (another
@@ -484,19 +517,27 @@ impl Canvas {
         ranked.sort_by_key(|(rank, _)| *rank);
         let mut owed: Vec<TileKey> = Vec::new();
         let mut units = 0;
+        // Once a tile doesn't fit, the rest wait too (and their items
+        // aren't looked up).
+        let mut spent = false;
         for (_, key) in ranked {
+            if spent || stats.rendered >= self.budget {
+                owed.push(key);
+                continue;
+            }
             let items = self.items_in(key.bounds());
             let cost = TILE_UNITS + items.len();
-            let over_time = self.unit_cost * (units + cost) as u32 > self.render_budget;
-            if stats.rendered >= self.budget || (stats.rendered > 0 && over_time) {
+            if stats.rendered > 0 && self.unit_cost * (units + cost) as u32 > self.render_budget {
+                spent = true;
                 owed.push(key);
                 continue;
             }
             units += cost;
-            let texture = match self.tiles.get(&key) {
-                Some(tile) => tile.texture,
-                None => TextureKey::unique(),
-            };
+            let texture = self
+                .tiles
+                .get(&key)
+                .and_then(|tile| tile.texture)
+                .unwrap_or_else(TextureKey::unique);
             let mut tile_scene = Scene::new();
             // Document → level pixels → this tile's pixels.
             let to_tile = Affine::translate(Vec2::new(
@@ -513,12 +554,12 @@ impl Canvas {
             self.tiles.insert(
                 key,
                 Tile {
-                    texture,
+                    texture: Some(texture),
                     stale: false,
                     used: self.frame,
                 },
             );
-            draws.push((key, texture));
+            draws.push((key, Some(texture)));
             self.last_rendered.push(key);
             stats.rendered += 1;
         }
@@ -562,13 +603,17 @@ impl Canvas {
             for other in shown {
                 if let Some(tile) = self.tiles.get_mut(&other) {
                     tile.used = self.frame;
-                    scene.draw_texture(tile.texture, TILE, TILE, dest(&other));
+                    if let Some(texture) = tile.texture {
+                        scene.draw_texture(texture, TILE, TILE, dest(&other));
+                    }
                 }
             }
             scene.pop();
         }
         for (key, texture) in &draws {
-            scene.draw_texture(*texture, TILE, TILE, dest(key));
+            if let Some(texture) = texture {
+                scene.draw_texture(*texture, TILE, TILE, dest(key));
+            }
         }
         if self.show_updates {
             for key in &self.last_rendered {
@@ -665,7 +710,9 @@ impl Canvas {
         let mut evicted = 0;
         for (_, key) in old.into_iter().take(excess) {
             if let Some(tile) = self.tiles.remove(&key) {
-                scene.free_texture(tile.texture);
+                if let Some(texture) = tile.texture {
+                    scene.free_texture(texture);
+                }
                 evicted += 1;
             }
         }
@@ -935,7 +982,11 @@ mod tests {
             .owed
             > 0
         {}
-        let finer: HashSet<TextureKey> = canvas.tiles.values().map(|tile| tile.texture).collect();
+        let finer: HashSet<TextureKey> = canvas
+            .tiles
+            .values()
+            .filter_map(|tile| tile.texture)
+            .collect();
         // Zoomed out past half: a coarser level at once, one tile render
         // per frame.
         let later = start + Duration::from_secs(1);
@@ -962,6 +1013,42 @@ mod tests {
             })
             .count();
         assert!(drawn >= 4, "{drawn} finer tiles drawn");
+    }
+
+    #[test]
+    fn empty_tiles_need_no_texture() {
+        let mut canvas = Canvas::new().with_render_budget(UNLIMITED);
+        let mut boxes = Boxes {
+            bounds: HashMap::new(),
+            painted: Vec::new(),
+        };
+        let bounds = Rect::new(10.0, 10.0, 60.0, 60.0);
+        canvas.upsert(ItemId(1), 1, bounds);
+        boxes.bounds.insert(ItemId(1), bounds);
+        let now = Instant::now();
+        let view = viewport(Point::ZERO, 1.0);
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, &view, now, &mut boxes);
+        assert_eq!((stats.rendered, stats.owed), (1, 0), "{stats:?}");
+        assert_eq!(scene.texture_renders(), 1);
+        assert_eq!(
+            canvas.tiles.len(),
+            stats.visible,
+            "the empty ones are valid too"
+        );
+        // Without the item, its tile's texture goes and nothing renders.
+        canvas.remove(ItemId(1));
+        boxes.bounds.remove(&ItemId(1));
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, &view, now, &mut boxes);
+        assert_eq!(stats.rendered, 0);
+        assert_eq!(scene.texture_renders(), 0);
+        assert!(
+            scene
+                .texture_work()
+                .iter()
+                .any(|work| matches!(work, TextureWork::Free(_)))
+        );
     }
 
     #[test]
@@ -1048,7 +1135,11 @@ mod tests {
                 }
                 for (key, tile) in &canvas.tiles {
                     if !tile.stale {
-                        let shown = rendered.get(key).cloned().unwrap_or_default();
+                        // A tile without a texture shows nothing.
+                        let shown = match tile.texture {
+                            Some(_) => rendered.get(key).cloned().unwrap_or_default(),
+                            None => Vec::new(),
+                        };
                         proptest::prop_assert_eq!(&shown, &content_of(&canvas, *key), "tile {:?} is valid but stale", key);
                     }
                 }
