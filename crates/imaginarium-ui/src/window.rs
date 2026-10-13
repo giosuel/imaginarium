@@ -224,6 +224,11 @@ pub trait View {
     /// `size` logical pixels.
     fn paint(&mut self, scene: &mut Scene, size: Size);
 
+    /// The window is open and drawing on `gpu`.
+    fn opened(&mut self, gpu: &GpuInfo) {
+        let _ = gpu;
+    }
+
     /// Handles input. Return `true` if the content changed and needs a
     /// frame.
     fn input(&mut self, input: &Input) -> bool {
@@ -282,6 +287,9 @@ pub trait View {
 impl<V: View + ?Sized> View for &mut V {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         (**self).paint(scene, size);
+    }
+    fn opened(&mut self, gpu: &GpuInfo) {
+        (**self).opened(gpu);
     }
     fn input(&mut self, input: &Input) -> bool {
         (**self).input(input)
@@ -542,6 +550,7 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         self.physical = size;
         match WindowRenderer::new(window.clone(), size.width, size.height, &self.options.gpu) {
             Ok(renderer) => {
+                self.view.opened(renderer.info());
                 self.stats.gpu = Some(renderer.info().clone());
                 self.renderer = Some(renderer);
             }
