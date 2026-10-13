@@ -498,6 +498,36 @@ impl Canvas {
         stats
     }
 
+    /// Draws the visible items directly, without tiles: every item is
+    /// painted again each frame (for comparing with [`Canvas::frame`]).
+    pub fn draw_direct(
+        &mut self,
+        scene: &mut Scene,
+        viewport: &Viewport,
+        content: &mut dyn CanvasContent,
+    ) -> CanvasStats {
+        let scale = viewport.device_scale();
+        let camera = Affine::translate(viewport.screen.origin().to_vec2())
+            * Affine::scale(viewport.zoom)
+            * Affine::translate(-viewport.origin.to_vec2());
+        let build = Instant::now();
+        let mut stats = CanvasStats {
+            level: level_for(scale),
+            ..CanvasStats::default()
+        };
+        scene.push_clip(&viewport.screen);
+        for id in self.items_in(viewport.visible()) {
+            let mut item = Scene::new();
+            content.paint_item(id, &mut item, scale);
+            scene.append(&item, camera);
+            stats.items_painted += 1;
+        }
+        scene.set_transform(Affine::IDENTITY);
+        scene.pop();
+        stats.build = build.elapsed();
+        stats
+    }
+
     /// Evicts the least recently drawn tiles over capacity (never one drawn
     /// this frame).
     fn evict(&mut self, scene: &mut Scene) -> usize {
