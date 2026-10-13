@@ -181,6 +181,29 @@ pub struct WindowRenderer {
     glyph_atlas: bool,
     frames: u64,
     textures: Textures,
+    bitmap_fonts: BitmapFonts,
+}
+
+/// Which fonts have bitmap glyphs (color emoji in CBDT or sbix, EBDT), by
+/// font file and face: vello_gpu draws those only from its glyph atlas.
+#[derive(Debug, Default)]
+pub(crate) struct BitmapFonts {
+    known: std::collections::HashMap<(u64, u32), bool>,
+}
+
+impl BitmapFonts {
+    pub(crate) fn has_bitmaps(&mut self, font: &vello_common::peniko::FontData) -> bool {
+        *self
+            .known
+            .entry((font.data.id(), font.index))
+            .or_insert_with(|| {
+                skrifa::FontRef::from_index(font.data.data(), font.index).is_ok_and(|face| {
+                    [b"CBDT", b"sbix", b"EBDT"]
+                        .iter()
+                        .any(|tag| face.table_data(skrifa::Tag::new(tag)).is_some())
+                })
+            })
+    }
 }
 
 /// A texture kept for its owner, and its size.
@@ -188,6 +211,8 @@ pub(crate) type GpuTexture = (wgpu::Texture, u16, u16);
 
 /// Textures kept for their owners across frames (canvas tiles).
 struct Textures {
+    /// Their pixel format (the window's).
+    format: wgpu::TextureFormat,
     entries: std::collections::HashMap<TextureKey, GpuTexture>,
     bindings: vello_gpu::TextureBindings,
     /// Depth views by size, shared by textures of that size.
@@ -197,8 +222,9 @@ struct Textures {
 }
 
 impl Textures {
-    fn new() -> Self {
+    fn new(format: wgpu::TextureFormat) -> Self {
         Self {
+            format,
             entries: std::collections::HashMap::new(),
             bindings: vello_gpu::TextureBindings::new(),
             depths: std::collections::HashMap::new(),
@@ -214,10 +240,11 @@ impl Textures {
         gpu: &Gpu,
         renderer: &mut vello_gpu::Renderer,
         resources: &mut vello_gpu::Resources,
-        format: wgpu::TextureFormat,
+        bitmap_fonts: &mut BitmapFonts,
         glyph_atlas: bool,
         work: &[TextureWork],
     ) -> Result<u32, RenderError> {
+        let format = self.format;
         let mut renders = 0;
         for item in work {
             match item {
@@ -275,6 +302,8 @@ impl Textures {
                             context: &mut self.scene,
                             resources: &mut *resources,
                             glyph_atlas,
+                            bitmap_fonts: Some(&mut *bitmap_fonts),
+                            transform: Affine::IDENTITY,
                             textures: SceneTextures::None,
                             missing: 0,
                         },
@@ -393,7 +422,8 @@ impl WindowRenderer {
             info,
             glyph_atlas: options.glyph_atlas,
             frames: 0,
-            textures: Textures::new(),
+            textures: Textures::new(view_format),
+            bitmap_fonts: BitmapFonts::default(),
         })
     }
 
@@ -442,7 +472,7 @@ impl WindowRenderer {
             &self.gpu,
             &mut self.renderer,
             &mut self.resources,
-            self.view_format,
+            &mut self.bitmap_fonts,
             glyph_atlas,
             scene.texture_work(),
         )?;
@@ -472,6 +502,8 @@ impl WindowRenderer {
             context: &mut self.scene,
             resources: &mut self.resources,
             glyph_atlas,
+            bitmap_fonts: Some(&mut self.bitmap_fonts),
+            transform: Affine::IDENTITY,
             textures: SceneTextures::Bound(&self.textures.entries),
             missing: 0,
         };
@@ -577,12 +609,13 @@ impl OffscreenRenderer {
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(device, &size);
         let mut vello_scene = vello_gpu::Scene::new(w, h);
-        let mut textures = Textures::new();
+        let mut textures = Textures::new(format);
+        let mut bitmap_fonts = BitmapFonts::default();
         textures.process(
             &self.gpu,
             &mut renderer,
             &mut resources,
-            format,
+            &mut bitmap_fonts,
             false,
             scene.texture_work(),
         )?;
@@ -592,6 +625,8 @@ impl OffscreenRenderer {
                 context: &mut vello_scene,
                 resources: &mut resources,
                 glyph_atlas: false,
+                bitmap_fonts: Some(&mut bitmap_fonts),
+                transform: Affine::IDENTITY,
                 textures: SceneTextures::Bound(&textures.entries),
                 missing: 0,
             },

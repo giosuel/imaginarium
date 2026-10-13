@@ -360,6 +360,11 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) resources: &'a mut R,
     /// Draw glyphs from the backend's glyph atlas.
     pub(crate) glyph_atlas: bool,
+    /// The GPU's fonts with bitmap glyphs, which it can only draw from
+    /// its glyph atlas; `None` on the CPU, which draws them directly.
+    pub(crate) bitmap_fonts: Option<&'a mut crate::gpu::BitmapFonts>,
+    /// The transform in effect (for glyphs' size on the device).
+    pub(crate) transform: Affine,
     /// The textures the scene may draw.
     pub(crate) textures: Textures<'a>,
     /// Draws of textures that don't exist (skipped).
@@ -429,10 +434,21 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
     }
 }
 
+/// The largest glyph (pixels per em) vello_gpu 0.3 keeps in its glyph atlas
+/// (glifo's default `max_cached_font_size`, not configurable there).
+const MAX_ATLAS_GLYPH_SIZE: f32 = 128.0;
+
+/// A font size in device pixels under `transform`.
+fn device_size(size: f32, transform: Affine) -> f32 {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    size * (a * d - b * c).abs().sqrt() as f32
+}
+
 macro_rules! impl_sink {
     ($context:ty, $resources:ty) => {
         impl Sink for Target<'_, $context, $resources> {
             fn set_transform(&mut self, transform: Affine) {
+                self.transform = transform;
                 self.context.set_transform(transform);
             }
             fn set_color(&mut self, color: Color) {
@@ -465,16 +481,34 @@ macro_rules! impl_sink {
                 coords: &[i16],
                 glyphs: &[Glyph],
             ) {
-                // A glyph the backend can't draw (a bitmap format it lacks)
-                // is skipped; the rest of the run still draws.
-                let _ = self
+                // vello_gpu draws bitmap glyphs (color emoji) only from its
+                // glyph atlas, and panics on any other. The atlas takes
+                // glyphs up to MAX_ATLAS_GLYPH_SIZE pixels per em: bigger ones
+                // are cached at that size and scaled up. (Emoji bitmaps are
+                // about 109 pixels per em, so that loses nothing.) The
+                // 0.1 % stretch keeps the scale out of the font size, into
+                // which glifo folds uniform scales before it checks the
+                // limit.
+                let bitmaps = self
+                    .bitmap_fonts
+                    .as_deref_mut()
+                    .is_some_and(|fonts| fonts.has_bitmaps(font));
+                let run = self
                     .context
                     .glyph_run(self.resources, font)
-                    .font_size(size)
                     .hint(hint)
                     .normalized_coords(coords)
-                    .atlas_cache(self.glyph_atlas)
-                    .fill_glyphs(glyphs.iter().copied());
+                    .atlas_cache(self.glyph_atlas || bitmaps);
+                let run = if bitmaps && device_size(size, self.transform) > MAX_ATLAS_GLYPH_SIZE {
+                    let scale = f64::from(size / MAX_ATLAS_GLYPH_SIZE);
+                    run.font_size(MAX_ATLAS_GLYPH_SIZE)
+                        .glyph_transform(Affine::scale_non_uniform(scale, scale * 1.001))
+                } else {
+                    run.font_size(size)
+                };
+                // A glyph the backend can't draw otherwise is skipped; the
+                // rest of the run still draws.
+                let _ = run.fill_glyphs(glyphs.iter().copied());
             }
             fn draw_texture(&mut self, key: TextureKey, width: u16, height: u16, dest: &Rect) {
                 if width == 0 || height == 0 || dest.is_zero_area() {

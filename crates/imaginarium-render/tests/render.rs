@@ -277,3 +277,58 @@ fn drawing_a_missing_texture_draws_nothing() {
         .expect("a missing texture doesn't fail the frame");
     assert_eq!(compare(&empty, &on_gpu, 2).1, 0.0);
 }
+
+/// Color emoji are bitmap glyphs, which vello_gpu draws only from its glyph
+/// atlas and up to 128 pixels per em; any other bitmap glyph made it panic
+/// (the gate's first frame, drawn without the atlas, with an emoji font
+/// installed). They draw on both backends, without the atlas option and
+/// bigger than the atlas takes.
+#[test]
+fn bitmap_glyphs_draw_at_any_size() {
+    use imaginarium_render::peniko::{Blob, FontData};
+    use imaginarium_render::{Glyph, GlyphRun};
+    use skrifa::MetadataProvider;
+
+    const FONT: &[u8] = include_bytes!("fonts/EmojiRedSquare.ttf");
+    let font = FontData::new(Blob::new(std::sync::Arc::new(FONT)), 0);
+    let face = skrifa::FontRef::new(FONT).unwrap();
+    let id = face.charmap().map('\u{1F7E5}').unwrap().to_u32();
+    let mut gpu = OffscreenRenderer::new(&GpuOptions::default())
+        .map_err(|err| eprintln!("GPU skipped: {err}"))
+        .ok();
+    // 20 pixels per em, and 13 × 12 = 156 (over the atlas limit).
+    for (size, scale) in [(20.0_f32, 1.0), (13.0, 12.0)] {
+        let mut scene = Scene::new();
+        scene.set_transform(Affine::scale(scale));
+        scene.glyphs(
+            GlyphRun {
+                font: &font,
+                size,
+                coords: &[],
+                hint: false,
+                color: Color::BLACK,
+            },
+            [Glyph {
+                id,
+                x: 1.0,
+                y: size,
+            }],
+        );
+        // The square's middle, in device pixels.
+        let middle = ((1.0 + size / 2.0) * scale as f32) as usize;
+        let mut pixmaps = vec![(
+            "cpu",
+            CpuRenderer::new(CpuMode::Deterministic).render(&scene, 200, 200, Color::WHITE),
+        )];
+        if let Some(gpu) = &mut gpu {
+            pixmaps.push(("gpu", gpu.render(&scene, 200, 200, Color::WHITE).unwrap()));
+        }
+        for (backend, pixmap) in pixmaps {
+            let at = pixmap.data()[middle * 200 + middle];
+            assert!(
+                at.r > 180 && at.g < 120 && at.b < 120,
+                "{backend} at {size} × {scale}: {at:?}"
+            );
+        }
+    }
+}

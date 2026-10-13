@@ -67,6 +67,8 @@ impl CpuRenderer {
                 context: &mut context,
                 resources: &mut self.resources,
                 glyph_atlas: false,
+                bitmap_fonts: None,
+                transform: Affine::IDENTITY,
                 textures: Textures::Pixmaps(&self.textures),
                 missing: 0,
             },
