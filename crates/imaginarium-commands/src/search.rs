@@ -428,7 +428,12 @@ mod tests {
         // "tab" hits two word starts in "text box above" (t…a b), but is the
         // start of "table": the table wins.
         let mut index = SearchIndex::new();
-        index.insert(CommandId::new("a.text_box"), "Insert text box above", &[], "View");
+        index.insert(
+            CommandId::new("a.text_box"),
+            "Insert text box above",
+            &[],
+            "View",
+        );
         index.insert(CommandId::new("b.table"), "Insert table", &[], "Edit");
         assert_eq!(top(&index, "ins tab")[0], "b.table");
         assert_eq!(top(&index, "tab")[0], "b.table");
