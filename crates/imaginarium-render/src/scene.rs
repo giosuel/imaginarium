@@ -252,6 +252,16 @@ impl Scene {
         &self.textures
     }
 
+    /// Moves the texture work queued in this scene to the end of `to`'s.
+    ///
+    /// For scenes kept and appended again in later frames (a widget's
+    /// cached drawing): the work must be done once, in the frame that
+    /// first draws the scene. Appended again with its work, the scene
+    /// would render its textures again in every frame.
+    pub fn move_texture_work(&mut self, to: &mut Scene) {
+        to.textures.append(&mut self.textures);
+    }
+
     /// Clips what follows to `shape`, until the matching [`Scene::pop`].
     pub fn push_clip(&mut self, shape: &impl Shape) {
         self.open_layers += 1;
