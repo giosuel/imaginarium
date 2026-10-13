@@ -6,8 +6,10 @@
 //!
 //! # Pieces
 //! - [`Scene`]: recorded drawing commands (fills, strokes, clips, opacity
-//!   layers, transforms) in device pixels. Widgets and, later, canvas tiles
-//!   build scenes; both backends replay the same ones.
+//!   layers, transforms, [`GlyphRun`]s of [`Glyph`]s) in device pixels.
+//!   Widgets and, later, canvas tiles build scenes; both backends replay
+//!   the same ones. Glyph outlines are cached by the backend across
+//!   frames. Shaping and layout are `imaginarium-text`'s.
 //! - [`WindowRenderer`]: `vello_gpu` on `wgpu`, drawing into a window
 //!   surface. [`GpuOptions`] picks the GPU: the integrated one by default
 //!   ([`Power::Low`]), the discrete one, or one by name. [`GpuInfo`]
@@ -21,8 +23,7 @@
 //!   types, re-exported, so callers use exactly the versions Vello uses.
 //!
 //! # Not here (yet)
-//! - Display lists and the tile cache of the canvas (M2.5), text glyphs
-//!   (M2.3).
+//! - Display lists and the tile cache of the canvas (M2.5).
 //! - Windows and input: `imaginarium-ui` creates the window and hands only
 //!   its handle here, so this crate doesn't depend on `winit`.
 
@@ -36,6 +37,6 @@ pub use error::RenderError;
 pub use gpu::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer,
 };
-pub use scene::Scene;
+pub use scene::{GlyphRun, Scene};
 pub use vello_common::{kurbo, peniko};
-pub use vello_cpu::Pixmap;
+pub use vello_cpu::{Glyph, Pixmap};

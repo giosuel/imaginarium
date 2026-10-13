@@ -2,8 +2,11 @@
 
 //! A recorded frame: drawing commands that every backend replays.
 
+use std::ops::Range;
+
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
-use vello_common::peniko::Color;
+use vello_common::peniko::{Color, FontData};
+use vello_cpu::Glyph;
 
 /// Curves are flattened to this tolerance (in the scene's units) when a
 /// shape is turned into a path.
@@ -28,6 +31,34 @@ pub(crate) enum Command {
     PushClip(BezPath),
     PushOpacity(f32),
     Pop,
+    Glyphs {
+        font: FontData,
+        size: f32,
+        hint: bool,
+        color: Color,
+        /// Into [`Scene::coords`].
+        coords: Range<usize>,
+        /// Into [`Scene::glyphs`].
+        glyphs: Range<usize>,
+    },
+}
+
+/// The attributes shared by a run of glyphs (see [`Scene::glyphs`]).
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphRun<'a> {
+    /// The font file and the face in it.
+    pub font: &'a FontData,
+    /// The font size, in the scene's units.
+    pub size: f32,
+    /// Variable-font coordinates (weight, optical size, …), normalized to
+    /// −1…1 in 2.14 fixed point, as the font's axes are ordered.
+    pub coords: &'a [i16],
+    /// Snap outlines to the pixel grid vertically. Crisper UI text, but
+    /// only for text drawn without zoom or rotation: animated zoom with
+    /// hinting makes glyphs jump.
+    pub hint: bool,
+    /// The fill color.
+    pub color: Color,
 }
 
 /// Drawing commands for one frame (or one tile, or one widget), in the order
@@ -48,6 +79,10 @@ pub(crate) enum Command {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     commands: Vec<Command>,
+    /// The glyphs of all runs, one allocation per scene rather than per
+    /// run.
+    glyphs: Vec<Glyph>,
+    coords: Vec<i16>,
     open_layers: u32,
     /// The transform in effect at the end, restored after [`Scene::append`].
     current: Affine,
@@ -62,6 +97,8 @@ impl Scene {
     /// Removes everything, keeping the allocation for the next frame.
     pub fn clear(&mut self) {
         self.commands.clear();
+        self.glyphs.clear();
+        self.coords.clear();
         self.open_layers = 0;
         self.current = Affine::IDENTITY;
     }
@@ -103,6 +140,26 @@ impl Scene {
         });
     }
 
+    /// Fills a run of glyphs. Positions are in the scene's units: `x` along
+    /// the line, `y` the baseline (down is positive).
+    pub fn glyphs(&mut self, run: GlyphRun<'_>, glyphs: impl IntoIterator<Item = Glyph>) {
+        let first_glyph = self.glyphs.len();
+        self.glyphs.extend(glyphs);
+        if self.glyphs.len() == first_glyph {
+            return;
+        }
+        let first_coord = self.coords.len();
+        self.coords.extend_from_slice(run.coords);
+        self.commands.push(Command::Glyphs {
+            font: run.font.clone(),
+            size: run.size,
+            hint: run.hint,
+            color: run.color,
+            coords: first_coord..self.coords.len(),
+            glyphs: first_glyph..self.glyphs.len(),
+        });
+    }
+
     /// Clips what follows to `shape`, until the matching [`Scene::pop`].
     pub fn push_clip(&mut self, shape: &impl Shape) {
         self.open_layers += 1;
@@ -132,9 +189,27 @@ impl Scene {
     pub fn append(&mut self, other: &Scene, transform: Affine) {
         // `other` starts with the identity transform.
         self.commands.push(Command::Transform(transform));
+        let (glyph_base, coord_base) = (self.glyphs.len(), self.coords.len());
+        self.glyphs.extend_from_slice(&other.glyphs);
+        self.coords.extend_from_slice(&other.coords);
         for command in &other.commands {
             self.commands.push(match command {
                 Command::Transform(t) => Command::Transform(transform * *t),
+                Command::Glyphs {
+                    font,
+                    size,
+                    hint,
+                    color,
+                    coords,
+                    glyphs,
+                } => Command::Glyphs {
+                    font: font.clone(),
+                    size: *size,
+                    hint: *hint,
+                    color: *color,
+                    coords: coords.start + coord_base..coords.end + coord_base,
+                    glyphs: glyphs.start + glyph_base..glyphs.end + glyph_base,
+                },
                 other => other.clone(),
             });
         }
@@ -164,6 +239,21 @@ pub(crate) trait Sink {
     fn push_clip(&mut self, path: &BezPath);
     fn push_opacity(&mut self, opacity: f32);
     fn pop(&mut self);
+    fn fill_glyphs(
+        &mut self,
+        font: &FontData,
+        size: f32,
+        hint: bool,
+        coords: &[i16],
+        glyphs: &[Glyph],
+    );
+}
+
+/// A backend's drawing context with the resources its glyph caches live
+/// in.
+pub(crate) struct Target<'a, C, R> {
+    pub(crate) context: &'a mut C,
+    pub(crate) resources: &'a mut R,
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -188,6 +278,23 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
             Command::PushClip(path) => sink.push_clip(path),
             Command::PushOpacity(opacity) => sink.push_opacity(*opacity),
             Command::Pop => sink.pop(),
+            Command::Glyphs {
+                font,
+                size,
+                hint,
+                color,
+                coords,
+                glyphs,
+            } => {
+                sink.set_color(*color);
+                sink.fill_glyphs(
+                    font,
+                    *size,
+                    *hint,
+                    &scene.coords[coords.clone()],
+                    &scene.glyphs[glyphs.clone()],
+                );
+            }
         }
     }
     for _ in 0..scene.open_layers() {
@@ -196,36 +303,54 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
 }
 
 macro_rules! impl_sink {
-    ($target:ty) => {
-        impl Sink for $target {
+    ($context:ty, $resources:ty) => {
+        impl Sink for Target<'_, $context, $resources> {
             fn set_transform(&mut self, transform: Affine) {
-                <$target>::set_transform(self, transform);
+                self.context.set_transform(transform);
             }
             fn set_color(&mut self, color: Color) {
-                self.set_paint(color);
+                self.context.set_paint(color);
             }
             fn fill_rect(&mut self, rect: &Rect) {
-                <$target>::fill_rect(self, rect);
+                self.context.fill_rect(rect);
             }
             fn fill_path(&mut self, path: &BezPath) {
-                <$target>::fill_path(self, path);
+                self.context.fill_path(path);
             }
             fn stroke_path(&mut self, path: &BezPath, style: &Stroke) {
-                self.set_stroke(style.clone());
-                <$target>::stroke_path(self, path);
+                self.context.set_stroke(style.clone());
+                self.context.stroke_path(path);
             }
             fn push_clip(&mut self, path: &BezPath) {
-                self.push_clip_layer(path);
+                self.context.push_clip_layer(path);
             }
             fn push_opacity(&mut self, opacity: f32) {
-                self.push_opacity_layer(opacity);
+                self.context.push_opacity_layer(opacity);
             }
             fn pop(&mut self) {
-                self.pop_layer();
+                self.context.pop_layer();
+            }
+            fn fill_glyphs(
+                &mut self,
+                font: &FontData,
+                size: f32,
+                hint: bool,
+                coords: &[i16],
+                glyphs: &[Glyph],
+            ) {
+                // A glyph the backend can't draw (a bitmap format it lacks)
+                // is skipped; the rest of the run still draws.
+                let _ = self
+                    .context
+                    .glyph_run(self.resources, font)
+                    .font_size(size)
+                    .hint(hint)
+                    .normalized_coords(coords)
+                    .fill_glyphs(glyphs.iter().copied());
             }
         }
     };
 }
 
-impl_sink!(vello_cpu::RenderContext);
-impl_sink!(vello_gpu::Scene);
+impl_sink!(vello_cpu::RenderContext, vello_cpu::Resources);
+impl_sink!(vello_gpu::Scene, vello_gpu::Resources);

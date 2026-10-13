@@ -58,11 +58,18 @@ fn check_golden(name: &str, pixmap: Pixmap) {
         (pixmap.width(), pixmap.height()),
         (expected.width(), expected.height())
     );
+    // PNG stores straight alpha: the few pixels that aren't quite opaque
+    // come back off by one after the round trip through premultiplying.
     let differing = pixmap
         .data()
         .iter()
         .zip(expected.data())
-        .filter(|(a, b)| a != b)
+        .filter(|(a, b)| {
+            a.r.abs_diff(b.r) > 1
+                || a.g.abs_diff(b.g) > 1
+                || a.b.abs_diff(b.b) > 1
+                || a.a.abs_diff(b.a) > 1
+        })
         .count();
     assert_eq!(
         differing,

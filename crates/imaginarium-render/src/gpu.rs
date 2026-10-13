@@ -9,7 +9,7 @@ use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
 
 use crate::RenderError;
-use crate::scene::{Scene, replay};
+use crate::scene::{Scene, Target, replay};
 
 /// Which GPU to prefer on machines with more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -309,7 +309,14 @@ impl WindowRenderer {
         });
         let (w, h) = clamp_size(self.config.width, self.config.height);
         self.scene.reset_and_resize(w, h);
-        replay(scene, &mut self.scene, transform);
+        replay(
+            scene,
+            &mut Target {
+                context: &mut self.scene,
+                resources: &mut self.resources,
+            },
+            transform,
+        );
         let mut encoder = self
             .gpu
             .device
@@ -406,7 +413,14 @@ impl OffscreenRenderer {
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(device, &size);
         let mut vello_scene = vello_gpu::Scene::new(w, h);
-        replay(scene, &mut vello_scene, Affine::IDENTITY);
+        replay(
+            scene,
+            &mut Target {
+                context: &mut vello_scene,
+                resources: &mut resources,
+            },
+            Affine::IDENTITY,
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offscreen"),
         });

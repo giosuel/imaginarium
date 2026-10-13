@@ -8,7 +8,7 @@ use vello_cpu::{
     Level, Pixmap, RasterizerSettings, RenderContext, RenderMode, RenderSettings, Resources,
 };
 
-use crate::scene::{Scene, replay};
+use crate::scene::{Scene, Target, replay};
 
 /// How the CPU backend trades speed against reproducibility.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,7 +49,14 @@ impl CpuRenderer {
             CpuMode::Fast => RenderSettings::default(),
         };
         let mut context = RenderContext::new_with(width, height, settings);
-        replay(scene, &mut context, Affine::IDENTITY);
+        replay(
+            scene,
+            &mut Target {
+                context: &mut context,
+                resources: &mut self.resources,
+            },
+            Affine::IDENTITY,
+        );
         context.flush();
         let mut pixmap = Pixmap::new(width, height);
         let render_mode = match self.mode {
