@@ -180,7 +180,7 @@ too (its frames are in `manual`), worth sending after anything odd.
 
 ## Results
 
-The decision comes after the fix round's runs (below). Criteria are
+The decision is the owner's, after the fourth run (below). Criteria are
 judged on the integrated GPU (ADR-0007).
 
 ### First run (2026-10-13, manual session, M2.5 binary)
@@ -269,3 +269,54 @@ Window 566×674 for the integrated GPU, RTX 3050 Ti and no-tiles runs,
    report says why each idle frame was drawn; the scripted run waits for
    owed tiles before idling. On the VM: 0 frames, 0 % CPU.
 5. `--fullscreen`, the build in the report and at start.
+
+### Fourth run (2026-10-13, `--measure --fullscreen`, fix-3 binary)
+
+The window was 1132×1348 in all five runs (scale 1.0). That is twice the
+pixels of the third run's no-atlas and no-vsync runs and four times its
+iGPU run. Times are in ms.
+
+| | iGPU | dGPU | no atlas | no vsync | no tiles |
+|---|---|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **17.8** ✗ | 13.9 | 18.0 | 16.8 | 41.7 |
+| C1 shapes zoom, p99 (< 16) | **17.8** ✗ | 17.5 | 22.0 | 19.4 | 129 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **51 / 22 / 64** ✗ | 0 / 2 / 3 | 57 / 28 / 51 | 107 / 20 / 75 | 240 each |
+| C2 tiles per drag frame (≤ 4) | **7** ✗¹ | 11 | 10 | 10 | – |
+| C3 palette search, p95 (< 1) | **0.34** | 0.35 | 0.32 | 0.33 | 0.28 |
+| C6 cold start without the GPU's setup (< 400) | **314** | 275 | 347 | 286 | 282 |
+| C6 cold start, total | 835 | 438 | 358 | 298 | 291 |
+| C6 idle frames / CPU | **0 / 0.1 %** | 0 / 0.2 % | 0 / 0.1 % | 0 / 0.1 % | 0 / 0.1 % |
+| Cards pan, worst frame | 157 | 34 | 155 | 119 | 142 |
+
+¹ Not a measurement of the drag. See below.
+
+- **What the fix round fixed.**
+  - The cards pan doesn't freeze any more: its worst frame dropped from
+    about 1 s to 34 ms on the dGPU and 157 ms on the iGPU.
+  - Cold start passes in all five runs.
+  - Idle draws no frames at all, not even ones the window system asks
+    for.
+  - No crash, and no missing textures.
+- **Criterion 2:** the script starts the drag right after the zoom. At
+  that point about 190 tiles are still owed: `tiles_owed` peaks at
+  182–196 during the drag, because the time budget spreads them over
+  later frames. The drag's frames render those tiles as well. In the
+  third run, which had no budget, the same drag rendered at most 4 tiles
+  per frame. The script should wait until no tiles are owed before each
+  phase, as it already does before idling.
+- **Criterion 1:** two separate problems.
+  - **CPU time per frame.** It fits at the median (6–14 ms) on both GPUs.
+    The p99 is 17.5–17.8 ms, because at this window size encoding takes
+    4–5 ms and the tile work's 6 ms budget comes on top.
+  - **The iGPU can't keep up at this size.** One frame in four or five
+    misses vertical sync while panning and dragging. Without vertical
+    sync it reaches 50–60 frames per second, against about 190 at
+    1132×674 in the third run. The waits for the swapchain show that the
+    GPU is the limit: `acquire` p95 is 26 ms on the iGPU and 11.5 ms on
+    the dGPU. The report doesn't time the GPU itself.
+  - The dGPU holds 60 fps: at most 3 of 240 intervals are over 20 ms.
+- **One slow frame per board on the iGPU:** when a board first gets
+  tiles, one frame spends 100–144 ms on tile work (12–22 ms on the dGPU).
+  The cause isn't known yet.
+- The glyph atlas still pays for itself: encoding a shapes pan frame
+  takes 3.7 ms with it and 5.4 ms without it.

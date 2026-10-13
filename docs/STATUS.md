@@ -10,11 +10,12 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.7 Gate run**: the fix round is done
-  (`fix/m2.7-fix-round`, stacked on `fix/m2.7-tile-textures`). Next: the
-  owner runs the five `--measure --fullscreen` reports and the checklist
-  with the fix-3 binary, then the decision (keep our toolkit or GPUI).
-  Results so far in `docs/design/m2-gate.md` ("Third run", "Fix round").
+- **Next step:** **M2.7 Gate run**: the fourth run (fix-3 binary) is in,
+  `docs/design/m2-gate.md` ("Fourth run"). Criteria 3 and 6 pass.
+  Criterion 2 needs the script to settle before the drag. Criterion 1
+  fails on the iGPU at 1132×1348 (the GPU can't keep up; p99 17.8 ms).
+  Next: the checklist notes for criteria 4 and 5, then the owner's
+  decision (keep our toolkit or GPUI).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -803,8 +804,14 @@ app runs. Two owner exceptions for M2:
     for tile renders with finer stand-ins and textureless empty tiles, the
     GPU opened on its own thread (Vulkan only), idle frames by cause and
     no redraw for same-size resizes, `--fullscreen`, the build in the
-    report. ADR-0007 notes that the gate evaluates the renderer
-  of ADR-0003 too (a renderer failure has other fallbacks than GPUI).
+    report.
+  - Fourth run (fix 3): cold start without the GPU's setup 275–347 ms, idle
+    0 frames, palette 0.34 ms, no freeze, no crash. The drag phase starts
+    with about 190 tiles still owed from the zoom (a fault in the script).
+    The iGPU misses vertical sync in one frame in four or five at
+    1132×1348, and does 50–60 fps without vertical sync.
+  - The gate evaluates the renderer of ADR-0003 too. A renderer failure
+    has other fallbacks than GPUI.
 - [ ] **M2.8 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.
