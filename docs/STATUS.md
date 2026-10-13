@@ -10,7 +10,7 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.4 Widgets and layout** (see the M2 checklist below; the order changed on 2026-10-12).
+- **Next step:** **M2.5 Canvas** (tiles; see the M2 checklist below; the order changed on 2026-10-12).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -24,9 +24,10 @@ Last updated: 2026-10-13
   effects, scopes), `imaginarium-render` (scenes on `vello_gpu` and
   `vello_cpu`, glyphs), `imaginarium-text` (Parley: fonts, layout,
   editing), `imaginarium-ui` (window, input, IME, text field, AccessKit,
-  frame pipeline) and `imaginarium-gate` (the M2 gate app: a board with
-  text, search, in-place editing, measurements, `gate-report.json`). The
-  app only prints its version.
+  frame pipeline, the widget tree on Taffy with signals, widgets,
+  clipboard) and `imaginarium-gate` (the M2 gate app: a board with text,
+  search, in-place editing, a command palette, measurements,
+  `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -704,12 +705,36 @@ app runs. Two owner exceptions for M2:
     Hindi or emoji fonts (boxes or gaps there).
   - **Early test binary** sent to the owner with the checklist (criteria
     4–6 and the numbers so far), ahead of the plan (M2.4).
-- [ ] **M2.4 Widgets and layout** ← **next**: the minimal widget tree driven by
-  signals, Taffy layout, input routing and focus, the command palette over
-  2,000 commands (timed per keystroke through layout). Criterion 3. Also
-  the clipboard and Tab focus traversal (gaps in the M2.3 binary). Then
-  an updated test binary for the owner's laptop.
-- [ ] **M2.5 Canvas**: display lists, the 256-px tile cache, invalidation
+- [x] **M2.4 Widgets and layout** (done 2026-10-13):
+  - `imaginarium-ui`: the widget tree (`Ui`): an arena with generational
+    ids, Taffy 0.15 layout (leaves measure their text), a cached scene per
+    widget (a frame repaints only invalidated widgets), hit testing,
+    hover, pointer capture during presses, click-to-focus, bubbling,
+    Tab/Shift+Tab, accessibility from the widgets. Signals drive it:
+    `Ui::watch` ties a widget to what a closure reads, and the effect
+    invalidates only that widget (disposed with it). Widgets: `Flex`,
+    `Label` (fixed or from signals), `Button`, `TextInput`. Clipboard
+    (arboard, Wayland data-control) in text fields. Design:
+    `docs/design/ui-toolkit.md`.
+  - `imaginarium-commands`: word-prefix matches now rank above scattered
+    ones ("ins tab" → "Insert table"; found with the palette).
+  - Gate app: the window is a widget tree (toolbar, board, status line,
+    palette). Command palette (Ctrl+K) over 2,000 synthetic commands with
+    the real `SearchIndex`: a memo over the query signal, ↑/↓, Enter,
+    Escape, clicks, shortcut chips, accessibility (dialog, list box).
+    `--measure` adds 60 palette keystrokes.
+  - Measured on this VM (llvmpipe, release): palette keystroke: search
+    0.26 ms (p95 0.41 ms: **criterion 3 passes**), handling 0.40 ms,
+    Taffy layout 0.42 ms, paint 0.82 ms (5 of 20 widgets repainted),
+    encode 5.2 ms. Pan: paint 1.07 ms, encode 4.3 ms. Cold start 348 ms
+    (passes; the first frame skips the glyph atlas, whose fill cost 85 ms
+    there). Idle: 0 frames, 0 % CPU.
+  - Fixed on the way: labels shaped their text for every width Taffy
+    asked about (layout 1.26 → 0.42 ms); a timer's frame request could
+    wait for the next wake-up; per-frame timings in a signal would have
+    caused endless frames (they are read from a cell and refreshed with
+    `Ui::refresh`).
+- [ ] **M2.5 Canvas** ← **next**: display lists, the 256-px tile cache, invalidation
   and the compositor (`docs/design/rendering.md`) on the 10k-shape board,
   with pan, zoom, drag and a dirty-tile overlay. Criteria 1 and 2.
 - [ ] **M2.6 Gate binary**: complete `imaginarium-gate` (started in
