@@ -186,7 +186,8 @@ also keeps a browser (wasm) build possible.
   doesn't fit, the rest wait. Since M2.8, tile work also leaves room for
   the rest of the frame (painting, encoding, submitting;
   `Canvas::note_rest_of_frame`): it gets 12 ms minus that, between 1 and
-  6 ms. A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
+  6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
+  the VM's software GPU it waits 12–14 ms for the frame). A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
   full 6 ms on top made the p99 17.5–17.8 ms.
 - **Stand-ins:** a stale copy, the nearest coarser cached level (zooming
   in) or the nearest finer level's cached tiles (zooming out), clipped.
