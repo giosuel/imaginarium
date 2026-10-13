@@ -32,6 +32,11 @@ pub struct GpuOptions {
     pub adapter: Option<String>,
     /// Present without waiting for vertical sync (for measuring).
     pub no_vsync: bool,
+    /// Rasterize glyphs once into an atlas and draw them from there,
+    /// instead of building every glyph's strips each frame. About 3× less
+    /// encode time for text-heavy frames (measured in the M2 gate app);
+    /// Vello calls it experimental, so it can be turned off.
+    pub glyph_atlas: bool,
 }
 
 /// What the GPU is, for reports.
@@ -164,6 +169,7 @@ pub struct WindowRenderer {
     depth: wgpu::TextureView,
     scene: vello_gpu::Scene,
     info: GpuInfo,
+    glyph_atlas: bool,
 }
 
 impl WindowRenderer {
@@ -247,6 +253,7 @@ impl WindowRenderer {
             depth,
             scene: vello_gpu::Scene::new(w, h),
             info,
+            glyph_atlas: options.glyph_atlas,
         })
     }
 
@@ -314,6 +321,7 @@ impl WindowRenderer {
             &mut Target {
                 context: &mut self.scene,
                 resources: &mut self.resources,
+                glyph_atlas: self.glyph_atlas,
             },
             transform,
         );
@@ -418,6 +426,7 @@ impl OffscreenRenderer {
             &mut Target {
                 context: &mut vello_scene,
                 resources: &mut resources,
+                glyph_atlas: false,
             },
             Affine::IDENTITY,
         );

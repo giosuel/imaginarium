@@ -54,6 +54,7 @@ impl CpuRenderer {
             &mut Target {
                 context: &mut context,
                 resources: &mut self.resources,
+                glyph_atlas: false,
             },
             Affine::IDENTITY,
         );

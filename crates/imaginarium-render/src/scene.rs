@@ -254,6 +254,8 @@ pub(crate) trait Sink {
 pub(crate) struct Target<'a, C, R> {
     pub(crate) context: &'a mut C,
     pub(crate) resources: &'a mut R,
+    /// Draw glyphs from the backend's glyph atlas.
+    pub(crate) glyph_atlas: bool,
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -346,6 +348,7 @@ macro_rules! impl_sink {
                     .font_size(size)
                     .hint(hint)
                     .normalized_coords(coords)
+                    .atlas_cache(self.glyph_atlas)
                     .fill_glyphs(glyphs.iter().copied());
             }
         }
