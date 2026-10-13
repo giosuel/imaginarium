@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use imaginarium_render::kurbo::{Affine, Point, Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::{
-    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, RenderError, Scene, WindowRenderer,
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, RenderError, Scene,
+    WindowRenderer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
@@ -46,6 +47,8 @@ pub struct WindowOptions {
     pub gpu: GpuOptions,
     /// The color behind everything the view draws.
     pub background: Color,
+    /// Fill the screen (borderless) instead of opening at `size`.
+    pub fullscreen: bool,
 }
 
 impl Default for WindowOptions {
@@ -55,6 +58,7 @@ impl Default for WindowOptions {
             size: Size::new(1280.0, 800.0),
             gpu: GpuOptions::default(),
             background: Color::WHITE,
+            fullscreen: false,
         }
     }
 }
@@ -215,6 +219,44 @@ pub struct FrameInfo {
     pub scale: f64,
     /// The surface size in physical pixels.
     pub physical_size: (u32, u32),
+    /// Why it was drawn.
+    pub causes: FrameCauses,
+}
+
+/// Why a frame was drawn; several reasons can come together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameCauses {
+    /// The window system asked: the window was shown or exposed.
+    pub system: bool,
+    /// The window's size or scale factor changed.
+    pub resize: bool,
+    /// The view handled an input.
+    pub input: bool,
+    /// A view timer fired (a caret blink, the end of a zoom pause).
+    pub timer: bool,
+    /// The view or an effect asked ([`request_frame`]), or the last frame
+    /// asked for another ([`View::presented`]).
+    pub request: bool,
+    /// The screen reader asked for an action.
+    pub access: bool,
+}
+
+impl FrameCauses {
+    /// Whether the program caused it on its own (not the window system,
+    /// the user or the screen reader): what an idle window must not do.
+    pub fn by_itself(&self) -> bool {
+        self.timer || self.request
+    }
+}
+
+/// What made the shell ask for a frame.
+#[derive(Clone, Copy, Debug)]
+enum Cause {
+    Resize,
+    Input,
+    Timer,
+    Request,
+    Access,
 }
 
 /// What a window shows. Until the widget tree (M2.4), views implement this
@@ -338,9 +380,12 @@ pub struct RunStats {
     pub first_frame: Option<Duration>,
     /// Creating the window (part of the time to the first frame).
     pub window_created: Option<Duration>,
-    /// Opening the GPU and the window's surface (part of the time to the
-    /// first frame).
+    /// The window's wait for the GPU and its work on it (surface,
+    /// renderer): the GPU's share of the time to the first frame. The GPU
+    /// opens on a thread of its own meanwhile ([`GpuStart`]).
     pub gpu_opened: Option<Duration>,
+    /// Opening the GPU, step by step.
+    pub gpu_startup: Option<GpuStartup>,
     /// The GPU that drew them.
     pub gpu: Option<GpuInfo>,
 }
@@ -367,6 +412,18 @@ pub fn request_frame() {
 /// or [`View::should_close`]). Blocks the calling thread, which must be the
 /// main thread on some platforms. Pass `&mut view` to keep the view.
 pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError> {
+    let gpu = GpuStart::spawn(&options.gpu);
+    run_with_gpu(gpu, options, view)
+}
+
+/// [`run`], on a GPU that started opening earlier: call
+/// [`GpuStart::spawn`] first thing, so the drivers load while the program
+/// loads fonts and builds its view. Its options replace `options.gpu`.
+pub fn run_with_gpu(
+    gpu: GpuStart,
+    options: WindowOptions,
+    view: impl View,
+) -> Result<RunStats, UiError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|err| UiError::EventLoop(err.to_string()))?;
@@ -377,6 +434,8 @@ pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError>
         view,
         window: None,
         renderer: None,
+        gpu: Some(gpu),
+        causes: FrameCauses::default(),
         scene: Scene::new(),
         scale: 1.0,
         physical: PhysicalSize::new(0, 0),
@@ -405,6 +464,10 @@ struct Shell<V> {
     view: V,
     window: Option<Arc<Window>>,
     renderer: Option<WindowRenderer>,
+    /// The GPU opening meanwhile, until the first frame takes it.
+    gpu: Option<GpuStart>,
+    /// Why the next frame is drawn.
+    causes: FrameCauses,
     scene: Scene,
     scale: f64,
     /// The surface size in physical pixels, from `Resized` (asking the
@@ -432,7 +495,14 @@ impl<V: View> Shell<V> {
         event_loop.exit();
     }
 
-    fn request_redraw(&self) {
+    fn request_redraw(&mut self, cause: Cause) {
+        match cause {
+            Cause::Resize => self.causes.resize = true,
+            Cause::Input => self.causes.input = true,
+            Cause::Timer => self.causes.timer = true,
+            Cause::Request => self.causes.request = true,
+            Cause::Access => self.causes.access = true,
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -485,12 +555,12 @@ impl<V: View> Shell<V> {
 
     fn deliver(&mut self, input: Input) {
         if self.view.input(&input) {
-            self.request_redraw();
+            self.request_redraw(Cause::Input);
         }
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         let start = Instant::now();
@@ -503,6 +573,29 @@ impl<V: View> Shell<V> {
         SCALE_FACTOR.with(|scale| scale.set(self.scale));
         self.view.paint(&mut self.scene, size);
         let paint = start.elapsed();
+        if self.renderer.is_none() {
+            let gpu = self
+                .gpu
+                .take()
+                .unwrap_or_else(|| GpuStart::spawn(&self.options.gpu));
+            let opening = Instant::now();
+            match WindowRenderer::with_start(gpu, window.clone(), physical.width, physical.height) {
+                Ok(renderer) => {
+                    self.stats.gpu_opened = Some(opening.elapsed());
+                    self.stats.gpu_startup = Some(*renderer.startup());
+                    self.stats.gpu = Some(renderer.info().clone());
+                    self.view.opened(renderer.info());
+                    self.renderer = Some(renderer);
+                    // The view learned about the GPU after this frame's
+                    // layout: one more frame shows what it does with it.
+                    self.request_redraw(Cause::Request);
+                }
+                Err(err) => return self.fail(event_loop, err.into()),
+            }
+        }
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
         let outcome = renderer.render(
             &self.scene,
             self.options.background,
@@ -520,6 +613,10 @@ impl<V: View> Shell<V> {
             }
         };
         self.stats.frames += 1;
+        let mut causes = std::mem::take(&mut self.causes);
+        if causes == FrameCauses::default() {
+            causes.system = true;
+        }
         let now = Instant::now();
         if self.stats.first_frame.is_none() {
             self.stats.first_frame = Some(now - self.started);
@@ -531,9 +628,10 @@ impl<V: View> Shell<V> {
             at: now - self.started,
             scale: self.scale,
             physical_size: (physical.width, physical.height),
+            causes,
         };
         if self.view.presented(&frame) {
-            self.request_redraw();
+            self.request_redraw(Cause::Request);
         }
         // What is on screen changed: tell the screen reader.
         self.update_access();
@@ -553,7 +651,12 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
             .with_inner_size(LogicalSize::new(
                 self.options.size.width,
                 self.options.size.height,
-            ));
+            ))
+            .with_fullscreen(
+                self.options
+                    .fullscreen
+                    .then_some(winit::window::Fullscreen::Borderless(None)),
+            );
         let creating = Instant::now();
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -561,18 +664,9 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         };
         self.stats.window_created = Some(creating.elapsed());
         self.scale = window.scale_factor();
-        let size = window.inner_size();
-        self.physical = size;
-        let opening = Instant::now();
-        match WindowRenderer::new(window.clone(), size.width, size.height, &self.options.gpu) {
-            Ok(renderer) => {
-                self.stats.gpu_opened = Some(opening.elapsed());
-                self.view.opened(renderer.info());
-                self.stats.gpu = Some(renderer.info().clone());
-                self.renderer = Some(renderer);
-            }
-            Err(err) => return self.fail(event_loop, err.into()),
-        }
+        self.physical = window.inner_size();
+        // The renderer comes with the first frame, after its layout: the
+        // GPU keeps opening meanwhile.
         self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(
             event_loop,
             &window,
@@ -592,7 +686,7 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
             }
             accesskit_winit::WindowEvent::ActionRequested(request) => {
                 if self.view.accessibility_action(&request) {
-                    self.request_redraw();
+                    self.request_redraw(Cause::Access);
                 }
                 self.update_access();
             }
@@ -607,17 +701,22 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                // Compositors repeat the size (Hyprland on focus changes):
+                // nothing to draw then.
+                if size == self.physical {
+                    return;
+                }
                 self.physical = size;
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                self.request_redraw();
+                self.request_redraw(Cause::Resize);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // A move to a monitor with another scale (criterion 5). The
                 // new physical size follows as a `Resized` event.
                 self.scale = scale_factor;
-                self.request_redraw();
+                self.request_redraw(Cause::Resize);
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::CursorMoved { position, .. } => {
@@ -690,13 +789,13 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         let mut wake_at = self.view.wake_at();
         if wake_at.is_some_and(|at| at <= now) {
             if self.view.wake(now) {
-                self.request_redraw();
+                self.request_redraw(Cause::Timer);
             }
             wake_at = self.view.wake_at().filter(|at| *at > now);
         }
         // After the timer, which may have asked for a frame too.
         if FRAME_REQUESTED.with(|requested| requested.replace(false)) {
-            self.request_redraw();
+            self.request_redraw(Cause::Request);
         }
         // After the timer: it may have ended a scripted run.
         if self.view.should_close() {
