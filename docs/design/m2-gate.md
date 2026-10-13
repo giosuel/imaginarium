@@ -272,9 +272,12 @@ Window 566×674 for the integrated GPU, RTX 3050 Ti and no-tiles runs,
 
 ### Fourth run (2026-10-13, `--measure --fullscreen`, fix-3 binary)
 
-The window was fullscreen at 1132×1348 in all five runs (scale 1.0).
-That is twice the pixels of the third run's no-atlas and no-vsync runs,
-and four times its iGPU run. Times are in ms.
+The window was fullscreen in all five runs (scale 1.0). The reports say
+1132×1348, but that is the first frame's size: Hyprland draws a new
+window tiled before it makes it fullscreen. The phases ran at the
+screen's full size, which this report doesn't have. From M2.8 on, the
+report has the last frame's size, each phase's size, and the monitor.
+Times are in ms.
 
 | | iGPU | dGPU | no atlas | no vsync | no tiles |
 |---|---|---|---|---|---|

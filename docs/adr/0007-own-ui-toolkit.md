@@ -67,7 +67,7 @@ and spent on it); the criterion uses the latter.
 ## Gate result (owner decision, 2026-10-13)
 **We keep our toolkit.** The results are in `docs/design/m2-gate.md`. The
 decision rests on the fourth run, with the fix-3 binary on the gate
-laptop and a fullscreen window of 1132×1348.
+laptop and a fullscreen window.
 - Criteria 3 and 6 pass in every run.
 - Criterion 2 wasn't measured cleanly: the scripted drag started while
   the zoom's tiles were still owed. It is measured again after the gate.
