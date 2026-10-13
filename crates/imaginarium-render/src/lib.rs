@@ -31,6 +31,7 @@ pub mod canvas;
 mod cpu;
 mod error;
 mod gpu;
+mod gpu_timer;
 mod scene;
 
 pub use cpu::{CpuMode, CpuRenderer};
@@ -39,6 +40,7 @@ pub use gpu::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, OffscreenRenderer, Power,
     WindowRenderer,
 };
+pub use gpu_timer::GpuFrameTime;
 pub use scene::{GlyphRun, Scene, TextureKey};
 pub use vello_common::{kurbo, peniko};
 pub use vello_cpu::{Glyph, Pixmap};
