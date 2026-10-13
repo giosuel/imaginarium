@@ -759,8 +759,9 @@ app runs. Two owner exceptions for M2:
     start and end (scripted drag: 2 tile renders in 240 frames). The
     board's first frame is drawn without tiles (cold start 324–351 ms
     instead of 404–428 ms with 24 tile submissions on llvmpipe).
-  - Not yet (design §10): tile rendering on workers, margin prefetch, a
-    property test of invalidation.
+  - Property tests: no valid tile ever shows stale content (a planted
+    missing invalidation fails it), and panning invalidates nothing.
+  - Not yet (design §10): tile rendering on workers, margin prefetch.
   - Disk full during M2.5 (2026-10-13 ~01:55 UTC): accumulated Cargo
     output (another project's `~/.cache/somedesk-target*`, 77 GB; ours
     `target/`, 42 GB). Freed our `target/debug/incremental` (9.3 GB).
