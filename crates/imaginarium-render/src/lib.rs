@@ -27,6 +27,7 @@
 //! - Windows and input: `imaginarium-ui` creates the window and hands only
 //!   its handle here, so this crate doesn't depend on `winit`.
 
+pub mod canvas;
 mod cpu;
 mod error;
 mod gpu;
