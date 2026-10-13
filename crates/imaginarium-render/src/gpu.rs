@@ -548,11 +548,21 @@ impl WindowRenderer {
                 wgpu::PresentMode::AutoVsync
             },
             desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities
+            // Opaque where offered: the frame covers the window, and a
+            // compositor treats a window with alpha as see-through (it
+            // blends, maybe blurs, what is behind it every frame).
+            alpha_mode: if capabilities
                 .alpha_modes
-                .first()
-                .copied()
-                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+                .contains(&wgpu::CompositeAlphaMode::Opaque)
+            {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                capabilities
+                    .alpha_modes
+                    .first()
+                    .copied()
+                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+            },
             view_formats: if view_format == format {
                 Vec::new()
             } else {
