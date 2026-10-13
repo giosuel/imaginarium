@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 use imaginarium_render::kurbo::{Affine, Point, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{FrameOutcome, GpuInfo, GpuOptions, RenderError, Scene, WindowRenderer};
+use imaginarium_render::{
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, RenderError, Scene, WindowRenderer,
+};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -41,12 +43,6 @@ pub struct WindowOptions {
     pub gpu: GpuOptions,
     /// The color behind everything the view draws.
     pub background: Color,
-    /// Close the window after this many presented frames (tests,
-    /// screenshots, cold-start measurement).
-    pub exit_after_frames: Option<u64>,
-    /// Close the window this long after the first frame (idle
-    /// measurement).
-    pub exit_after: Option<Duration>,
 }
 
 impl Default for WindowOptions {
@@ -56,8 +52,6 @@ impl Default for WindowOptions {
             size: Size::new(1280.0, 800.0),
             gpu: GpuOptions::default(),
             background: Color::WHITE,
-            exit_after_frames: None,
-            exit_after: None,
         }
     }
 }
@@ -102,9 +96,11 @@ pub enum Input {
 pub struct FrameInfo {
     /// Frames presented so far, this one included.
     pub number: u64,
-    /// CPU time spent building and submitting it: the view's paint plus
-    /// encoding the scene for the GPU.
-    pub cpu_time: Duration,
+    /// The view building its scene (the toolkit's share of the frame).
+    pub paint: Duration,
+    /// The renderer's share: waiting for the window's texture, encoding
+    /// the scene and submitting it.
+    pub render: FrameTiming,
     /// When it was presented, since [`run`] was called.
     pub at: Duration,
     /// The window's scale factor (physical pixels per logical pixel).
@@ -133,6 +129,45 @@ pub trait View {
         let _ = frame;
         false
     }
+
+    /// When the view next wants to be woken without input (a caret blink,
+    /// the end of a measurement). `None`: only input wakes it.
+    fn wake_at(&mut self) -> Option<Instant> {
+        None
+    }
+
+    /// The time from [`View::wake_at`] arrived. Return `true` if the
+    /// content changed and needs a frame.
+    fn wake(&mut self, now: Instant) -> bool {
+        let _ = now;
+        false
+    }
+
+    /// Whether the window should close now (scripted runs).
+    fn should_close(&mut self) -> bool {
+        false
+    }
+}
+
+impl<V: View + ?Sized> View for &mut V {
+    fn paint(&mut self, scene: &mut Scene, size: Size) {
+        (**self).paint(scene, size);
+    }
+    fn input(&mut self, input: &Input) -> bool {
+        (**self).input(input)
+    }
+    fn presented(&mut self, frame: &FrameInfo) -> bool {
+        (**self).presented(frame)
+    }
+    fn wake_at(&mut self) -> Option<Instant> {
+        (**self).wake_at()
+    }
+    fn wake(&mut self, now: Instant) -> bool {
+        (**self).wake(now)
+    }
+    fn should_close(&mut self) -> bool {
+        (**self).should_close()
+    }
 }
 
 /// What a run of the window did.
@@ -157,13 +192,11 @@ pub fn request_frame() {
     FRAME_REQUESTED.with(|requested| requested.set(true));
 }
 
-/// Opens a window showing `view` and runs until it is closed (or an
-/// `exit_after…` option ends it). Blocks the calling thread, which must be
-/// the main thread on some platforms.
+/// Opens a window showing `view` and runs until it is closed (by the user
+/// or [`View::should_close`]). Blocks the calling thread, which must be the
+/// main thread on some platforms. Pass `&mut view` to keep the view.
 pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError> {
     let event_loop = EventLoop::new().map_err(|err| UiError::EventLoop(err.to_string()))?;
-    // Sleep until an event arrives: nothing is drawn unless something
-    // changed (gate criterion 6).
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut shell = Shell {
         options,
@@ -172,10 +205,10 @@ pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError>
         renderer: None,
         scene: Scene::new(),
         scale: 1.0,
+        physical: PhysicalSize::new(0, 0),
         pointer: Point::ZERO,
         zoom_modifier: false,
         started: Instant::now(),
-        first_frame_at: None,
         stats: RunStats::default(),
         error: None,
     };
@@ -195,10 +228,12 @@ struct Shell<V> {
     renderer: Option<WindowRenderer>,
     scene: Scene,
     scale: f64,
+    /// The surface size in physical pixels, from `Resized` (asking the
+    /// window costs a round trip to the X server).
+    physical: PhysicalSize<u32>,
     pointer: Point,
     zoom_modifier: bool,
     started: Instant,
-    first_frame_at: Option<Instant>,
     stats: RunStats,
     error: Option<UiError>,
 }
@@ -230,22 +265,21 @@ impl<V: View> Shell<V> {
             return;
         };
         let start = Instant::now();
-        let physical = window.inner_size();
-        renderer.resize(physical.width, physical.height);
+        let physical = self.physical;
         let size = Size::new(
             f64::from(physical.width) / self.scale,
             f64::from(physical.height) / self.scale,
         );
         self.scene.clear();
         self.view.paint(&mut self.scene, size);
+        let paint = start.elapsed();
         let outcome = renderer.render(
             &self.scene,
             self.options.background,
             Affine::scale(self.scale),
         );
-        let cpu_time = start.elapsed();
-        match outcome {
-            Ok(FrameOutcome::Presented) => {}
+        let render = match outcome {
+            Ok(FrameOutcome::Presented(timing)) => timing,
             Ok(FrameOutcome::Skipped) => {
                 window.request_redraw(); // try again when the surface is ready
                 return;
@@ -254,31 +288,21 @@ impl<V: View> Shell<V> {
                 self.fail(event_loop, err.into());
                 return;
             }
-        }
+        };
         self.stats.frames += 1;
         let now = Instant::now();
-        if self.first_frame_at.is_none() {
-            self.first_frame_at = Some(now);
+        if self.stats.first_frame.is_none() {
             self.stats.first_frame = Some(now - self.started);
-            if let Some(after) = self.options.exit_after {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(now + after));
-            }
         }
         let frame = FrameInfo {
             number: self.stats.frames,
-            cpu_time,
+            paint,
+            render,
             at: now - self.started,
             scale: self.scale,
             physical_size: (physical.width, physical.height),
         };
-        let again = self.view.presented(&frame);
-        if self
-            .options
-            .exit_after_frames
-            .is_some_and(|limit| self.stats.frames >= limit)
-        {
-            event_loop.exit();
-        } else if again {
+        if self.view.presented(&frame) {
             self.request_redraw();
         }
     }
@@ -301,6 +325,7 @@ impl<V: View> ApplicationHandler for Shell<V> {
         };
         self.scale = window.scale_factor();
         let size = window.inner_size();
+        self.physical = size;
         match WindowRenderer::new(window.clone(), size.width, size.height, &self.options.gpu) {
             Ok(renderer) => {
                 self.stats.gpu = Some(renderer.info().clone());
@@ -316,6 +341,7 @@ impl<V: View> ApplicationHandler for Shell<V> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                self.physical = size;
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
@@ -383,11 +409,24 @@ impl<V: View> ApplicationHandler for Shell<V> {
         if FRAME_REQUESTED.with(|requested| requested.replace(false)) {
             self.request_redraw();
         }
-        // The idle-measurement deadline passed: close.
-        if let (Some(first), Some(after)) = (self.first_frame_at, self.options.exit_after)
-            && first.elapsed() >= after
-        {
-            event_loop.exit();
+        let now = Instant::now();
+        let mut wake_at = self.view.wake_at();
+        if wake_at.is_some_and(|at| at <= now) {
+            if self.view.wake(now) {
+                self.request_redraw();
+            }
+            wake_at = self.view.wake_at().filter(|at| *at > now);
         }
+        // After the timer: it may have ended a scripted run.
+        if self.view.should_close() {
+            event_loop.exit();
+            return;
+        }
+        // Sleep until input arrives or the view's timer runs out: nothing
+        // is drawn unless something changed (gate criterion 6).
+        event_loop.set_control_flow(match wake_at {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 }

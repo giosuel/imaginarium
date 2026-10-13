@@ -9,9 +9,10 @@
 //!   scale factor.
 //! - **No frame without a reason:** a frame is drawn when the window
 //!   appears, is resized or moves to a monitor with another scale, when
-//!   [`View::input`] or [`View::presented`] asks for one, or when
-//!   [`request_frame`] was called (effects of `imaginarium-reactive` do
-//!   that). Otherwise the event loop sleeps (gate criterion 6).
+//!   [`View::input`], [`View::presented`] or the view's timer
+//!   ([`View::wake_at`]) asks for one, or when [`request_frame`] was called
+//!   (effects of `imaginarium-reactive` do that). Otherwise the event loop
+//!   sleeps (gate criterion 6).
 //! - [`Input`]: pointer, wheel and keys in logical pixels. [`FrameInfo`]
 //!   and [`RunStats`]: what the gate report measures.
 //!
