@@ -205,6 +205,12 @@ also keeps a browser (wasm) build possible.
     `missing_textures`), on both backends.
   - Property test: every texture a frame draws exists when the renderer
     draws it, with two canvases sharing one renderer.
+- **Color emoji on the GPU:** vello_gpu 0.3 draws bitmap glyphs (CBDT,
+  sbix, EBDT) only from its glyph atlas, up to 128 pixels per em, and
+  panics on any other. Runs of fonts with bitmap tables always use the
+  atlas on the GPU, and bigger runs are cached at 128 and scaled up (emoji
+  bitmaps are 109 pixels per em). Still unsupported: rotated or skewed
+  bitmap glyphs (the atlas refuses them), which nothing draws yet.
 - Not yet: rendering tiles on worker threads, prefetching the margin ring,
   and partial tile updates.
 

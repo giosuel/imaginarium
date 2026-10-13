@@ -184,3 +184,12 @@ To be filled in at M2.7.
   reported apart (`window_ms`, `gpu_ms`).
 - `--gpu low` got the NVIDIA GPU: the Intel Vulkan driver is probably
   missing (setup above).
+
+### Second run (2026-10-13, `--measure`, fix-1 binary)
+
+- **All five runs panicked** in vello_gpu: "pixmap image sources are not
+  supported by Vello GPU". Color emoji are bitmap glyphs, which vello_gpu
+  draws only from its glyph atlas; the first frame is drawn without it,
+  and a maximized window shows the emoji card in that frame. Fixed (fix 2,
+  `rendering.md` §10, "Color emoji on the GPU"); reproduced and checked on
+  the VM with Noto Color Emoji installed.
