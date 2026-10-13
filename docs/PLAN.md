@@ -102,6 +102,7 @@ about UI, networking or AI.
 
 ```
  apps        imaginarium-app (desktop)          imaginarium-hub (server)       imaginarium-cli (`imag`)
+             imaginarium-gate (M2 gate app, temporary)
  ─────────────────────────────────────────────────────────────────────────────────────────
  product     shell · canvas · ai-ui · admin-ui
  features    diagram · layout · paint · io-ooxml · io-odf · io-export · packages
@@ -125,6 +126,7 @@ about UI, networking or AI.
 | `imaginarium-render` / `-text` | Scene building, tiles, compositor; rich text layout and editing |
 | `imaginarium-ai*` / `-mcp` | Capabilities, jobs, tool bridge; provider adapters; local ONNX models; MCP server and client |
 | `imaginarium-hub` | Accounts (OPAQUE), workspaces, ACL enforcement, object store, WebSocket fan-out, admin API |
+| `imaginarium-gate` | The M2 gate app (ADR-0007): test content in the toolkit, measurements, `gate-report.json`. Removed or folded into benchmarks once the gate is decided. |
 
 ### 4.2 Data flow
 

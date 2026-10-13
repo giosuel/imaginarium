@@ -1619,6 +1619,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "imaginarium-gate"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "imaginarium-render",
+ "imaginarium-ui",
+ "serde_json",
+]
+
+[[package]]
 name = "imaginarium-io-native"
 version = "0.0.1"
 dependencies = [

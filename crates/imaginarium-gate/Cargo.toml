@@ -1,0 +1,25 @@
+[package]
+name = "imaginarium-gate"
+description = "The M2 gate app: measures the UI toolkit and renderer against the ADR-0007 criteria and writes gate-report.json."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "imaginarium-gate"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+imaginarium-render.workspace = true
+imaginarium-ui.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -110,6 +110,7 @@ pub(crate) const LAYERS: &[(&str, Layer)] = &[
     ("imaginarium-app", Layer::Apps),
     ("imaginarium-hub", Layer::Apps),
     ("imaginarium-cli", Layer::Apps),
+    ("imaginarium-gate", Layer::Apps),
     // tooling
     ("xtask", Layer::Tooling),
 ];
