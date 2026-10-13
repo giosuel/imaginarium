@@ -12,3 +12,10 @@ vello_cpu 0.3.0          # owner exception 2026-10-12 (M2), eligible 2026-10-16
 vello_gpu 0.3.0          # owner exception 2026-10-12 (M2), eligible 2026-10-16
 vello_gpu_shaders 0.3.0  # owner exception 2026-10-12 (M2), required by vello_gpu 0.3.0
 glifo 0.4.0              # owner exception 2026-10-12 (M2), required by vello_cpu 0.3.0 (glyphs)
+parley 0.12.0            # owner exception 2026-10-12 (M2), eligible 2026-10-23
+parley_engine 0.12.0     # owner exception 2026-10-12 (M2), required by parley 0.12.0
+parley_data 0.12.0       # owner exception 2026-10-12 (M2), required by parley 0.12.0
+parley_emoji 0.12.0      # owner exception 2026-10-12 (M2), required by parley 0.12.0
+fontique 0.12.0          # owner exception 2026-10-12 (M2), required by parley 0.12.0
+parlance 0.1.1           # owner exception 2026-10-12 (M2), parley 0.12.0 requires ^0.1.1
+objc2 0.6.5              # owner exception 2026-10-12 (M2), fontique 0.12.0 requires ^0.6.5 (macOS)

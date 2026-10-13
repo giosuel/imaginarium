@@ -33,10 +33,13 @@ imaginarium-reactive = { path = "crates/imaginarium-reactive" }
 imaginarium-render = { path = "crates/imaginarium-render" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
 imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
+imaginarium-text = { path = "crates/imaginarium-text" }
 imaginarium-ui = { path = "crates/imaginarium-ui" }
 
 # External crates are added here (with exact minor versions) when a
 # milestone first needs them, never speculatively.
+accesskit = "0.25.1"
+accesskit_winit = "0.34.1"
 anyhow = "1.0.104"
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
 blake3 = "1.8.7"
@@ -45,11 +48,15 @@ clap = { version = "4.6.7", default-features = false, features = ["derive", "err
 crc32c = "0.6.8"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 ed25519-dalek = { version = "3.0.0", features = ["alloc"] }
+# fontconfig is loaded at run time: builds need no fontconfig headers, and the
+# binary starts (without system fonts) where fontconfig is missing.
+fontique = { version = "0.12.0", features = ["fontconfig-dlopen"] }
 getrandom = "0.4.3"
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "hkdfsha2", "mlkem", "x25519"] }
 imbl = "7.0.2"
 loro = "1.16.2"
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "rand_core"] }
+parley = "0.12.0"
 peak_alloc = "0.3.0"
 pollster = "1.0.1"
 proptest = "1.11.0"
@@ -162,6 +169,8 @@ opt-level = 0
 [profile.dev.package.derive_more]
 opt-level = 0
 [profile.dev.package.derive_more-impl]
+opt-level = 0
+[profile.dev.package.displaydoc]
 opt-level = 0
 [profile.dev.package.document-features]
 opt-level = 0
@@ -285,6 +294,8 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.syn]
 opt-level = 0
+[profile.dev.package.synstructure]
+opt-level = 0
 [profile.dev.package.term]
 opt-level = 0
 [profile.dev.package.thiserror-impl]
@@ -319,8 +330,14 @@ opt-level = 0
 opt-level = 0
 [profile.dev.package.xml-rs]
 opt-level = 0
+[profile.dev.package.yoke-derive]
+opt-level = 0
 [profile.dev.package.zerocopy-derive]
 opt-level = 0
+[profile.dev.package.zerofrom-derive]
+opt-level = 0
 [profile.dev.package.zeroize_derive]
+opt-level = 0
+[profile.dev.package.zerovec-derive]
 opt-level = 0
 # END GENERATED: build-time-only crates
