@@ -12,7 +12,7 @@ Last updated: 2026-10-13
   `v0.0.1-m0`, `v0.0.2-m1`).
 - **Next step:** **M2.8 Canvas on the integrated GPU**. The M2 gate is
   decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
-  result"). Criterion 1 fails on the iGPU at the fullscreen 1132×1348,
+  result"). Criterion 1 fails on the iGPU with a fullscreen window,
   because the GPU can't keep up. Criterion 2 needs the script to settle
   before the drag. Start with GPU times in the gate report.
   `docs/design/m2-gate.md` has the runs and the decision.
@@ -808,8 +808,10 @@ app runs. Two owner exceptions for M2:
   - Fourth run (fix 3): cold start without the GPU's setup 275–347 ms, idle
     0 frames, palette 0.34 ms, no freeze, no crash. The drag phase starts
     with about 190 tiles still owed from the zoom (a fault in the script).
-    The iGPU misses vertical sync in one frame in four or five at
-    1132×1348, and does 50–60 fps without vertical sync.
+    The iGPU misses vertical sync in one frame in four or five
+    fullscreen, and does 50–60 fps without vertical sync. (The reported
+    1132×1348 is the first frame's size, before Hyprland made the window
+    fullscreen.)
   - The gate evaluates the renderer of ADR-0003 too. A renderer failure
     has other fallbacks than GPUI.
   - **Decision (owner, 2026-10-13): we keep our toolkit.** Criterion 1's
