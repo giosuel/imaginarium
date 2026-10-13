@@ -69,7 +69,11 @@ vello_common = "0.3.0"
 vello_cpu = "0.3.0"
 vello_gpu = "0.3.0"
 wgpu = "30.0.1"
-winit = "0.30.13"
+# Without `wayland-csd-adwaita`: its title text pulls in `ttf-parser`, which
+# is unmaintained (RUSTSEC-2026-0192). The fallback decorations on
+# compositors without server-side ones (GNOME) have no title text; the app
+# draws its own title bar later anyway.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 zeroize = { version = "1.9.0", features = ["derive"] }
 zstd = { version = "0.14.0", default-features = false }
 
