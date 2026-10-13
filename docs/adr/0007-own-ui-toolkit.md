@@ -1,6 +1,6 @@
 # 0007. Own UI toolkit on the Linebender stack
 
-- Status: Accepted (subject to the M2 prototype gate)
+- Status: Accepted (M2 gate decided 2026-10-13: we keep our toolkit)
 - Date: 2026-10-12 (gate procedure amended the same day, owner decision)
 - Supersedes: 0002
 
@@ -63,3 +63,20 @@ boot. The program opens the GPU on a thread of its own while it starts,
 and the gate report has both the total time to the first frame and
 `without_gpu_setup_ms` (the total minus what the window waited for the GPU
 and spent on it); the criterion uses the latter.
+
+## Gate result (owner decision, 2026-10-13)
+**We keep our toolkit.** The results are in `docs/design/m2-gate.md`. The
+decision rests on the fourth run, with the fix-3 binary on the gate
+laptop and a fullscreen window of 1132×1348.
+- Criteria 3 and 6 pass in every run.
+- Criterion 2 wasn't measured cleanly: the scripted drag started while
+  the zoom's tiles were still owed. It is measured again after the gate.
+- Criterion 1 fails on the integrated GPU. The GPU can't keep up at this
+  size, and the p99 frame time is 17.8 ms. The RTX 3050 Ti holds 60 fps.
+  The cause is in the canvas renderer: rendering the tiles and
+  compositing them through Vello (ADR-0003). A GPUI shell would keep that
+  code, so it is no reason to fall back. It is fixed in the next step
+  (M2.8) and judged again on the integrated GPU.
+- The manual checklist for criteria 4 and 5 (IME, screen reader, HiDPI)
+  hadn't been reported back when the decision was made. Its notes go in
+  the results when they come.

@@ -398,6 +398,9 @@ Decided (2026-10-13):
 - **The M2 gate's cold start** (criterion 6) is measured without the GPU's
   setup (drivers, device, surface, the renderer's pipelines), which costs
   any GPU toolkit the same (ADR-0007, amendment).
+- **The M2 gate is decided: we keep our toolkit** (ADR-0007, gate
+  result). Criterion 1 on the integrated GPU is a canvas renderer problem,
+  which falling back to GPUI wouldn't fix. It is the next step (M2.8).
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
