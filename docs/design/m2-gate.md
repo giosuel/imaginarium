@@ -19,7 +19,7 @@ GeForce RTX 3050 Laptop GPU, 32 GB RAM.
 |---|---|---|
 | 1. 10,000 shapes pan and zoom at ≥ 60 fps, p99 < 16 ms | Board of 2,000 text cards now; the 10k-shape canvas with tiles is M2.5 | partly, M2.2 |
 | 2. Dragging re-renders only dirty tiles | M2.5 | – |
-| 3. Palette: 2,000 commands, < 1 ms per keystroke | Search over 2,000 cards now; the command palette is M2.4 | partly, M2.3 |
+| 3. Palette: 2,000 commands, < 1 ms per keystroke | Command palette (Ctrl+K) over 2,000 commands: `palette.pass` | M2.4 |
 | 4. Text field with IME (CJK) and a screen reader | Search field and card editing; checklist below | M2.3 |
 | 5. HiDPI and mixed-DPI monitors | Checklist below | M2.2 |
 | 6. Idle CPU ≈ 0 %, cold start < 400 ms | `--measure`: `idle.pass`, `cold_start.pass` | M2.2 |
@@ -55,7 +55,9 @@ should stay visible and unobstructed.
 ./imaginarium-gate --measure --no-vsync --report gate-report-novsync.json   # how fast frames could be
 ```
 
-The report has, per phase, the toolkit's share of each frame (`paint`)
+The scripted run pans, types into the search field, types into the
+command palette, and idles. The report has, per phase, the toolkit's
+share of each frame (`paint`, and the widget tree's `layout`)
 apart from the renderer's (`encode`, `submit`), the wait for the
 swapchain (`acquire`, which is vertical sync when everything keeps up)
 and frame intervals. It also has typing (`typing.handle`: one keystroke
@@ -113,14 +115,27 @@ works, odd (what), or broken.
 16. Orca's flat review (Insert/KP keys) or the object navigation reads the
     visible cards' titles and text.
 
-**Idle and start (criterion 6)**
-17. Leave the window alone for a minute: `top -p "$(pidof imaginarium-gate)"`
-    shows about 0 % CPU.
-18. Does it open quickly? (The report has the number.)
+**Widgets and the command palette (criterion 3)**
+17. Ctrl+K (or the Commands button) opens the palette. Type `ins tab`:
+    "Insert table" is first; the footer shows the search time. ↑/↓ choose,
+    Enter runs (the status line says "ran: …"), Esc closes, a click on a
+    row runs it.
+18. Tab and Shift+Tab move the focus between the Commands button, the
+    search field and the board (focus rings). Enter or Space on the button
+    opens the palette.
+19. Copy and paste (Ctrl+C, Ctrl+X, Ctrl+V) in the search field and while
+    editing a card, also to and from other apps.
+20. With Orca: the palette is announced as a dialog, the results as a list
+    with options.
 
-**Known gaps (not bugs yet):** no clipboard (copy/paste comes with the
-widgets in M2.4), no Tab focus traversal, no pinch zoom, no context menus,
-and the board is one big scene (tiles come in M2.5).
+**Idle and start (criterion 6)**
+21. Leave the window alone for a minute: `top -p "$(pidof imaginarium-gate)"`
+    shows about 0 % CPU.
+22. Does it open quickly? (The report has the number.)
+
+**Known gaps (not bugs yet):** no pinch zoom, no context menus, no
+scrolling lists (the palette shows the best 10), and the board is one big
+scene (tiles come in M2.5).
 
 ## What to send back
 
