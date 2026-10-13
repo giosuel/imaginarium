@@ -196,13 +196,20 @@ impl Board {
         self.mode
     }
 
-    /// The renderer's time for the tile renders of the last frame, which
-    /// keeps the shown board's tile work within its time budget.
-    pub(crate) fn note_render_time(&mut self, renderer: std::time::Duration) {
-        match self.mode {
-            Mode::Cards => self.cards_canvas.note_render_time(renderer),
-            Mode::Shapes => self.shapes_canvas.note_render_time(renderer),
-        }
+    /// The renderer's time for the tile renders of the last frame and the
+    /// rest of that frame's time, which keep the shown board's tile work
+    /// within what a frame leaves for it.
+    pub(crate) fn note_render_time(
+        &mut self,
+        renderer: std::time::Duration,
+        rest: std::time::Duration,
+    ) {
+        let canvas = match self.mode {
+            Mode::Cards => &mut self.cards_canvas,
+            Mode::Shapes => &mut self.shapes_canvas,
+        };
+        canvas.note_render_time(renderer);
+        canvas.note_rest_of_frame(rest);
     }
 
     /// Shows the other board (each keeps its tiles).
