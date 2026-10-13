@@ -330,7 +330,7 @@ impl Gate {
             self.phase = Phase::Palette(self.palette_keys);
             self.palette_key();
         } else {
-            self.phase = Phase::Settle;
+            self.start_shapes();
         }
         true
     }
@@ -341,8 +341,8 @@ impl Gate {
             self.type_key();
             true
         } else {
-            self.start_idle();
-            false
+            // On to the palette and the shapes, whatever is left.
+            self.after_typing()
         }
     }
 }
