@@ -36,7 +36,8 @@ mod scene;
 pub use cpu::{CpuMode, CpuRenderer};
 pub use error::RenderError;
 pub use gpu::{
-    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer,
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, OffscreenRenderer, Power,
+    WindowRenderer,
 };
 pub use scene::{GlyphRun, Scene, TextureKey};
 pub use vello_common::{kurbo, peniko};
