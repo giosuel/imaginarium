@@ -483,6 +483,12 @@ impl Ui {
         }
     }
 
+    /// Marks `id` for layout and paint in the frame being drawn, without
+    /// asking for a frame (content that shows per-frame data, like timings).
+    pub fn refresh(&mut self, id: WidgetId) {
+        self.mark(id, true);
+    }
+
     /// The widget's box from the last layout.
     pub fn bounds(&self, id: WidgetId) -> Option<Rect> {
         self.node(id).map(|node| node.bounds)

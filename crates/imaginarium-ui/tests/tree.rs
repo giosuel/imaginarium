@@ -175,7 +175,11 @@ fn a_label_follows_its_signal() {
     ui.layout(&mut fonts, AREA);
     assert!(ui.bounds(text).unwrap().width() > narrow, "re-laid out");
     ui.paint(&mut fonts, &mut Scene::new());
-    assert_eq!(ui.stats().repainted, 1, "only the label (the row keeps its box)");
+    assert_eq!(
+        ui.stats().repainted,
+        1,
+        "only the label (the row keeps its box)"
+    );
     // Removing the label disposes its effect.
     let before = imaginarium_reactive::live_nodes_for_tests();
     ui.remove(text);

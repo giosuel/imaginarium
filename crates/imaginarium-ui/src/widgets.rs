@@ -247,12 +247,21 @@ impl Label {
         }
     }
 
+    /// The text laid out for `width`: shaped once per text, re-broken
+    /// (cheap) when only the width changes, as Taffy asks for several.
     fn block(&mut self, cx: &mut Cx<'_>, width: Option<f32>) -> &TextBlock {
         let text = self.text();
-        let stale = !matches!(&self.block, Some((t, w, _)) if *t == text && *w == width);
-        if stale {
-            let block = TextBlock::new(cx.fonts(), &text, &self.style, width);
-            self.block = Some((text, width, block));
+        match &mut self.block {
+            Some((shaped, laid_for, block)) if *shaped == text => {
+                if *laid_for != width {
+                    block.set_width(width);
+                    *laid_for = width;
+                }
+            }
+            _ => {
+                let block = TextBlock::new(cx.fonts(), &text, &self.style, width);
+                self.block = Some((text, width, block));
+            }
         }
         match &self.block {
             Some((_, _, block)) => block,
