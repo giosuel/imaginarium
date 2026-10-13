@@ -118,6 +118,8 @@ enum GpuChoice {
 const TYPED: &str = "quarterly planning review notes";
 /// What the scripted palette typing types.
 const COMMAND: &str = "insert table rotate image align left";
+/// In a manual session, a frame interval longer than this is a pause.
+const MANUAL_GAP: Duration = Duration::from_millis(100);
 
 /// Where the scripted run is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -176,6 +178,10 @@ struct Gate {
     idle_result: Option<IdleResult>,
     inputs: u64,
     inputs_during_idle: u64,
+    /// Every frame of a manual session, by board (cards, shapes).
+    manual: [Vec<CanvasSample>; 2],
+    /// Draws of textures that didn't exist (skipped; a tile cache bug).
+    missing_textures: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -376,6 +382,7 @@ impl View for Gate {
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
         self.app.set_frame(frame.paint, frame.render.encode);
+        self.missing_textures += u64::from(frame.render.missing_textures);
         if self.first_frame.is_none() {
             self.first_frame = Some(*frame);
         }
@@ -386,6 +393,19 @@ impl View for Gate {
         match self.phase {
             Phase::Start if !self.measure => {
                 self.phase = Phase::Manual;
+                false
+            }
+            Phase::Manual => {
+                // Frames come on demand: a long gap is a pause, not a
+                // slow frame.
+                let interval = if interval < MANUAL_GAP {
+                    interval
+                } else {
+                    Duration::ZERO
+                };
+                let sample = self.canvas_sample(frame, interval);
+                let board = self.app.board.borrow().mode() as usize;
+                self.manual[board].push(sample);
                 false
             }
             Phase::Start if self.pan_frames > 0 => {
@@ -572,7 +592,12 @@ fn canvas_report(samples: &[CanvasSample]) -> serde_json::Value {
         "paint": summary(field(|s| s.paint)),
         "textures": summary(field(|s| s.textures)),
         "encode": summary(field(|s| s.encode)),
-        "interval": summary(samples.iter().skip(1).map(|s| s.interval).collect()),
+        // Zero: the first frame, or one after a pause.
+        "interval": summary(samples.iter().map(|s| s.interval).filter(|i| !i.is_zero()).collect()),
+        // Frames that took longer than a 60 Hz refresh on the UI thread,
+        // and gaps that missed one.
+        "frames_over_16ms": samples.iter().filter(|s| s.frame > Duration::from_millis(16)).count(),
+        "intervals_over_20ms": samples.iter().filter(|s| s.interval > Duration::from_millis(20)).count(),
         "tiles_rendered": counts(|s| s.rendered),
         "tiles_owed": counts(|s| s.owed),
         "items_painted": counts(|s| s.items),
@@ -648,6 +673,8 @@ fn main() -> anyhow::Result<()> {
         idle_result: None,
         inputs: 0,
         inputs_during_idle: 0,
+        manual: [Vec::new(), Vec::new()],
+        missing_textures: 0,
     };
     // The time from exec to `main` (loading the binary and its libraries)
     // is measured separately from the time in `main`.
@@ -697,7 +724,7 @@ fn main() -> anyhow::Result<()> {
             .all(|sample| sample.rendered <= 4);
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
-        "milestone": "M2.5",
+        "milestone": "M2.7",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -719,6 +746,8 @@ fn main() -> anyhow::Result<()> {
             "first_frame_paint_ms": first.map(|frame| millis(frame.paint)),
             "first_frame_encode_ms": first.map(|frame| millis(frame.render.encode)),
             "fonts_ms": millis(fonts_time),
+            "window_ms": stats.window_created.map(millis),
+            "gpu_ms": stats.gpu_opened.map(millis),
             "font_families": gate.app.fonts.family_count(),
             // Criterion 6: cold start under 400 ms.
             "pass": stats.first_frame.map(|first| before_main.unwrap_or_default() + before_run + first < Duration::from_millis(400)),
@@ -745,6 +774,12 @@ fn main() -> anyhow::Result<()> {
             "layouts": gate.pan_layouts,
             "canvas": canvas_report(&gate.pan_canvas),
         },
+        // A manual session's frames, by board.
+        "manual": {
+            "cards": canvas_report(&gate.manual[0]),
+            "shapes": canvas_report(&gate.manual[1]),
+        },
+        "missing_textures": gate.missing_textures,
         "shapes": {
             "pan": canvas_report(&gate.shape_samples[0]),
             "zoom": canvas_report(&gate.shape_samples[1]),

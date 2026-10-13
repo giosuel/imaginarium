@@ -336,6 +336,11 @@ pub struct RunStats {
     pub frames: u64,
     /// From the call to [`run`] until the first frame was presented.
     pub first_frame: Option<Duration>,
+    /// Creating the window (part of the time to the first frame).
+    pub window_created: Option<Duration>,
+    /// Opening the GPU and the window's surface (part of the time to the
+    /// first frame).
+    pub gpu_opened: Option<Duration>,
     /// The GPU that drew them.
     pub gpu: Option<GpuInfo>,
 }
@@ -549,15 +554,19 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 self.options.size.width,
                 self.options.size.height,
             ));
+        let creating = Instant::now();
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => return self.fail(event_loop, UiError::Window(err.to_string())),
         };
+        self.stats.window_created = Some(creating.elapsed());
         self.scale = window.scale_factor();
         let size = window.inner_size();
         self.physical = size;
+        let opening = Instant::now();
         match WindowRenderer::new(window.clone(), size.width, size.height, &self.options.gpu) {
             Ok(renderer) => {
+                self.stats.gpu_opened = Some(opening.elapsed());
                 self.view.opened(renderer.info());
                 self.stats.gpu = Some(renderer.info().clone());
                 self.renderer = Some(renderer);
