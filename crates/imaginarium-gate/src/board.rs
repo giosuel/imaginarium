@@ -7,7 +7,7 @@
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Affine, Circle, Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_ui::Input;
+use imaginarium_ui::{Input, Key};
 
 const CARD: Size = Size::new(180.0, 112.0);
 const GAP: f64 = 28.0;
@@ -118,6 +118,7 @@ impl Board {
                 primary: true,
                 pressed,
                 position,
+                ..
             } => {
                 self.dragging = pressed.then_some(*position);
                 false
@@ -125,8 +126,8 @@ impl Board {
             Input::Scroll {
                 delta,
                 position,
-                zoom: true,
-            } => {
+                modifiers,
+            } if modifiers.command() => {
                 self.zoom_about((delta.y * 0.004).exp(), *position);
                 self.hover(self.card_at(*position));
                 true
@@ -138,7 +139,11 @@ impl Board {
                 self.hover(self.card_at(*position));
                 true
             }
-            Input::Key { key, pressed: true } if key == "0" => {
+            Input::Key {
+                key: Key::Character(key),
+                pressed: true,
+                ..
+            } if key == "0" => {
                 *self = Self::new(self.cards);
                 true
             }

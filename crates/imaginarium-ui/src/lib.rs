@@ -22,4 +22,7 @@
 
 mod window;
 
-pub use window::{FrameInfo, Input, RunStats, UiError, View, WindowOptions, request_frame, run};
+pub use window::{
+    FrameInfo, Ime, Input, Key, Modifiers, RunStats, UiError, View, WindowOptions, request_frame,
+    run,
+};
