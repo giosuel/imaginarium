@@ -53,3 +53,13 @@ back to **GPUI** for the shell.
 ## Consequences
 - We own the widget code. This is the main added cost.
 - Model, render, text and format crates stay independent of the toolkit.
+
+## Amendment: criterion 6's cold start (owner decision, 2026-10-13)
+Cold start is measured **without the GPU's setup**: loading the graphics
+drivers, opening the device, creating the window's surface and compiling
+the renderer's pipelines. That costs any GPU toolkit the same, GPUI
+included: 296–449 ms on the gate laptop, 727 ms on the first start after a
+boot. The program opens the GPU on a thread of its own while it starts,
+and the gate report has both the total time to the first frame and
+`without_gpu_setup_ms` (the total minus what the window waited for the GPU
+and spent on it); the criterion uses the latter.

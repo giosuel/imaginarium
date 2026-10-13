@@ -14,7 +14,7 @@ Template: `0000-template.md`. Statuses: Proposed, Accepted, Superseded by NNNN.
 | 0004 | Persistent document model with op log                | Superseded by 0009 |
 | 0005 | File formats: native container, OOXML, ODF           | Partially superseded by 0010 |
 | 0006 | Add-ons as WASM components + declarative packages    | Accepted (licensing per 0008) |
-| 0007 | Own UI toolkit on the Linebender stack               | Accepted (prototype gate) |
+| 0007 | Own UI toolkit on the Linebender stack               | Accepted (prototype gate; amended 2026-10-13) |
 | 0008 | AGPL-3.0-or-later, no proprietary add-ons            | Accepted |
 | 0009 | CRDT (Loro) document model + view model              | Accepted (confirmed by M1.5) |
 | 0010 | Native `.imag` encrypted object-pack format          | Accepted |
