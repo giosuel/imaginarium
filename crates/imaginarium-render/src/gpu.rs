@@ -145,14 +145,7 @@ impl GpuStart {
                 let loaded = started.elapsed();
                 let gpu = pollster::block_on(open(&instance, &wanted, None))?;
                 let opened = started.elapsed();
-                let renderer = vello_gpu::Renderer::new(
-                    &gpu.device,
-                    &vello_gpu::RenderTargetConfig {
-                        format: LIKELY_FORMAT,
-                        width: 1,
-                        height: 1,
-                    },
-                );
+                let renderer = new_renderer(&gpu.device, LIKELY_FORMAT, 1, 1);
                 Ok(OpenedGpu {
                     instance,
                     gpu,
@@ -233,6 +226,35 @@ async fn open(
         queue,
     })
 }
+
+/// A Vello renderer for targets of `format`.
+///
+/// Its glyph atlas (which takes the image atlas's settings) has pages of
+/// 2048² rather than Vello's 4096²: a page is created when a glyph first
+/// needs it, and wgpu clears the whole texture on its first use, which made
+/// the first frame with text stall for 70 ms on the VM (64 MB). A quarter
+/// of that holds the UI's and a board's glyphs; more pages come as needed.
+fn new_renderer(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u16,
+    height: u16,
+) -> (vello_gpu::Renderer, vello_gpu::Resources) {
+    let mut settings = vello_gpu::RenderSettings::default();
+    settings.memory_settings.image_atlas_config.atlas_size = (ATLAS_PAGE, ATLAS_PAGE);
+    vello_gpu::Renderer::new_with(
+        device,
+        &vello_gpu::RenderTargetConfig {
+            format,
+            width,
+            height,
+        },
+        settings,
+    )
+}
+
+/// The side of a glyph (and image) atlas page, in pixels.
+const ATLAS_PAGE: u16 = 2048;
 
 /// Vello works with `u16` sizes; a zero-sized surface is invalid.
 fn clamp_size(width: u32, height: u32) -> (u16, u16) {
@@ -614,14 +636,7 @@ impl WindowRenderer {
         let creating = Instant::now();
         let (renderer, resources) = match built {
             Some(built) if view_format == LIKELY_FORMAT => built,
-            _ => vello_gpu::Renderer::new(
-                &gpu.device,
-                &vello_gpu::RenderTargetConfig {
-                    format: view_format,
-                    width: w,
-                    height: h,
-                },
-            ),
+            _ => new_renderer(&gpu.device, view_format, w, h),
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(
             &gpu.device,
@@ -871,14 +886,7 @@ impl OffscreenRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let (mut renderer, mut resources) = vello_gpu::Renderer::new(
-            device,
-            &vello_gpu::RenderTargetConfig {
-                format,
-                width: w,
-                height: h,
-            },
-        );
+        let (mut renderer, mut resources) = new_renderer(device, format, w, h);
         let size = vello_gpu::RenderSize {
             width: w,
             height: h,
