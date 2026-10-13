@@ -20,9 +20,18 @@ const CELL: f64 = 512.0;
 /// A level switch waits for this pause in zooming…
 const ZOOM_PAUSE: Duration = Duration::from_millis(150);
 
-/// Time per frame for tile renders (`rendering.md` §6): with the rest of a
-/// frame (about 4 ms on the gate laptop), a frame stays well within 16 ms.
+/// Time per frame for tile renders (`rendering.md` §6) at most: with the
+/// rest of a small window's frame (about 4 ms on the gate laptop), a frame
+/// stays well within 16 ms.
 const RENDER_BUDGET: Duration = Duration::from_millis(6);
+
+/// What a whole frame on the UI thread may take, once the rest of the frame
+/// is known ([`Canvas::note_rest_of_frame`]): tile renders get what the rest
+/// leaves of it. Under a 60 Hz refresh, with room for misestimates.
+const FRAME_TARGET: Duration = Duration::from_millis(12);
+
+/// Tile renders' time per frame at least, however long the rest takes.
+const MIN_RENDER_BUDGET: Duration = Duration::from_millis(1);
 
 /// A tile's fixed cost (a GPU submission, the renderer's setup), in items:
 /// on the gate laptop a tile costs about as much as 50 items in it, and an
@@ -207,6 +216,8 @@ pub struct Canvas {
     /// The last frame's tile work, until the renderer's time for it comes:
     /// building time and units.
     pending: Option<(Duration, usize)>,
+    /// The last frame's time apart from tile work, if told.
+    rest: Option<Duration>,
     /// Tiles kept at most (256 KiB each).
     capacity: usize,
     level: Option<i32>,
@@ -237,6 +248,7 @@ impl Canvas {
             render_budget: RENDER_BUDGET,
             unit_cost: INITIAL_UNIT_COST,
             pending: None,
+            rest: None,
             capacity: 1_000,
             level: None,
             last_scale: 0.0,
@@ -276,6 +288,24 @@ impl Canvas {
         // Halfway to the new sample: quick to follow a change of content,
         // steady across frames of similar tiles.
         self.unit_cost = (self.unit_cost + sample) / 2;
+    }
+
+    /// Tells the canvas how long the frame it drew last took apart from
+    /// tile work (painting, encoding and submitting it), so that later
+    /// frames' tile work fits in what the rest of a frame leaves: a big
+    /// window's frame leaves less.
+    pub fn note_rest_of_frame(&mut self, rest: Duration) {
+        self.rest = Some(rest);
+    }
+
+    /// The time for this frame's tile renders.
+    fn frame_render_budget(&self) -> Duration {
+        match self.rest {
+            Some(rest) => self
+                .render_budget
+                .min(FRAME_TARGET.saturating_sub(rest).max(MIN_RENDER_BUDGET)),
+            None => self.render_budget,
+        }
     }
 
     /// The number of items.
@@ -519,6 +549,7 @@ impl Canvas {
         let mut units = 0;
         // Once a tile doesn't fit, the rest wait too (and their items
         // aren't looked up).
+        let render_budget = self.frame_render_budget();
         let mut spent = false;
         for (_, key) in ranked {
             if spent || stats.rendered >= self.budget {
@@ -527,7 +558,7 @@ impl Canvas {
             }
             let items = self.items_in(key.bounds());
             let cost = TILE_UNITS + items.len();
-            if stats.rendered > 0 && self.unit_cost * (units + cost) as u32 > self.render_budget {
+            if stats.rendered > 0 && self.unit_cost * (units + cost) as u32 > render_budget {
                 spent = true;
                 owed.push(key);
                 continue;
@@ -969,6 +1000,31 @@ mod tests {
         canvas.invalidate_all();
         let fast = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
         assert!(fast.rendered > slow.rendered, "{fast:?}");
+    }
+
+    #[test]
+    fn tile_work_gets_what_the_rest_of_the_frame_leaves() {
+        let (canvas, mut boxes) = board(2_000);
+        let mut canvas = canvas.with_render_budget(RENDER_BUDGET);
+        let now = Instant::now();
+        let view = viewport(Point::ZERO, 1.0);
+        let mut rendered = |rest: Option<Duration>| {
+            if let Some(rest) = rest {
+                canvas.note_rest_of_frame(rest);
+            }
+            canvas.invalidate_all();
+            canvas
+                .frame(&mut Scene::new(), &view, now, &mut boxes)
+                .rendered
+        };
+        let unknown = rendered(None);
+        // A light frame leaves the whole budget.
+        assert_eq!(rendered(Some(Duration::from_millis(2))), unknown);
+        // A heavy one leaves less: fewer tiles.
+        let heavy = rendered(Some(Duration::from_millis(10)));
+        assert!(heavy >= 1 && heavy < unknown, "{heavy} of {unknown}");
+        // One over the whole frame still renders a tile.
+        assert!(rendered(Some(Duration::from_millis(30))) >= 1);
     }
 
     #[test]
