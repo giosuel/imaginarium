@@ -73,6 +73,18 @@ and frame intervals. It also has typing (`typing.handle`: one keystroke
 including searching all cards), idle CPU and frames (`idle.pass`), cold
 start (`cold_start.pass`), the GPU, the machine and peak memory.
 
+Since M2.8, each canvas phase also reports:
+- `gpu`: the GPU's own time, from timestamp queries. It has the frame's
+  scene, its tile renders, and the span from the first render to the
+  last. `--no-gpu-times` turns the queries off.
+- `acquire`: the swapchain wait.
+- `physical_size`: the window's size.
+- `settled_before`: the wait for owed tiles before the phase. Each shapes
+  phase starts once none are owed.
+- `slowest_textures`: the parts of the phase's slowest tile frame.
+
+`monitor` has the screen, and `window` is the last frame's size.
+
 How criterion 6 is judged:
 - **Cold start** without the GPU's setup (owner decision, ADR-0007
   amendment): `cold_start.without_gpu_setup_ms` is the time to the first
@@ -323,6 +335,28 @@ Times are in ms.
   The cause isn't known yet.
 - The glyph atlas still pays for itself: encoding a shapes pan frame
   takes 3.7 ms with it and 5.4 ms without it.
+
+## M2.8 run (the canvas on the integrated GPU)
+
+What changed since the fourth run (`rendering.md` §10, "Since M2.8"):
+- Clips no longer make Vello layers. On the VM this halved the GPU's
+  time per frame.
+- Glyph atlas pages are a quarter the size, for the first tile frame
+  with text.
+- The window surface is opaque.
+- Tile work gets what the rest of the frame leaves.
+- The script settles before each shapes phase, and the report times the
+  GPU.
+
+Three runs, fullscreen, integrated GPU first:
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+```
+
+Results: to come.
 
 ## Decision (owner, 2026-10-13)
 

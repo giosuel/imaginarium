@@ -16,6 +16,16 @@ Last updated: 2026-10-13
   because the GPU can't keep up. Criterion 2 needs the script to settle
   before the drag. Start with GPU times in the gate report.
   `docs/design/m2-gate.md` has the runs and the decision.
+  Done on `perf/m2.8-canvas-igpu`, which is stacked on the decision PR:
+  - clips without Vello layers (the GPU's time per frame halved on the VM);
+  - 2048² glyph atlas pages;
+  - an opaque window surface;
+  - tile work fitted to the rest of the frame;
+  - the script settles before each shapes phase;
+  - GPU times, the monitor and per-phase sizes in the report.
+
+  Next: the owner's three runs ("M2.8 run" in `m2-gate.md`). Then decide
+  whether tiles need their own compositor pass.
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -829,6 +839,10 @@ app runs. Two owner exceptions for M2:
     of the frame.
   - Find the slow first tile frame per board on the iGPU (100–144 ms).
   - The owner measures again: criteria 1 and 2 on the iGPU, fullscreen.
+  - Done so far (2026-10-13): everything above except the compositor and
+    the first-frame cause on the iGPU. On the VM the first text tile frame
+    stalled in wgpu's clear of a 64 MB atlas page; it is now a 16 MB
+    page.
 - [ ] **M2.9 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.
