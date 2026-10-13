@@ -35,7 +35,9 @@ pub struct GpuOptions {
     /// Rasterize glyphs once into an atlas and draw them from there,
     /// instead of building every glyph's strips each frame. About 3× less
     /// encode time for text-heavy frames (measured in the M2 gate app);
-    /// Vello calls it experimental, so it can be turned off.
+    /// Vello calls it experimental, so it can be turned off. Filling the
+    /// atlas makes the frame that first uses it slower, so the first frame
+    /// (cold start) is drawn without it.
     pub glyph_atlas: bool,
 }
 
@@ -170,6 +172,7 @@ pub struct WindowRenderer {
     scene: vello_gpu::Scene,
     info: GpuInfo,
     glyph_atlas: bool,
+    frames: u64,
 }
 
 impl WindowRenderer {
@@ -254,6 +257,7 @@ impl WindowRenderer {
             scene: vello_gpu::Scene::new(w, h),
             info,
             glyph_atlas: options.glyph_atlas,
+            frames: 0,
         })
     }
 
@@ -321,7 +325,7 @@ impl WindowRenderer {
             &mut Target {
                 context: &mut self.scene,
                 resources: &mut self.resources,
-                glyph_atlas: self.glyph_atlas,
+                glyph_atlas: self.glyph_atlas && self.frames > 0,
             },
             transform,
         );
@@ -353,6 +357,7 @@ impl WindowRenderer {
         let encoded = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
         self.gpu.queue.present(texture);
+        self.frames += 1;
         Ok(FrameOutcome::Presented(FrameTiming {
             acquire: acquired - start,
             encode: encoded - acquired,
