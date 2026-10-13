@@ -4,14 +4,14 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-12
+Last updated: 2026-10-13
 
 ## Current position
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.2 Window and frame pipeline** (see the M2 checklist below; the order changed on 2026-10-12).
-- **Code status:** Cargo workspace with 12 crates. Working: `xtask` (repo
+- **Next step:** **M2.3 Text and the text field** (see the M2 checklist below; the order changed on 2026-10-12).
+- **Code status:** Cargo workspace with 15 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -20,8 +20,11 @@ Last updated: 2026-10-12
   (encryption, keyrings, signatures, ACL chain) and `imaginarium-model`
   (the document on Loro, view model, undo), `imaginarium-io-native`
   (`.imag` files as documents), `imaginarium-cli` (`imag inspect`,
-  `verify`, `export-json`) and `imaginarium-reactive` (signals, memos,
-  effects, scopes). The app only prints its version.
+  `verify`, `export-json`), `imaginarium-reactive` (signals, memos,
+  effects, scopes), `imaginarium-render` (scenes on `vello_gpu` and
+  `vello_cpu`), `imaginarium-ui` (window, input, frame pipeline) and
+  `imaginarium-gate` (the M2 gate app: a board, measurements,
+  `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -578,8 +581,7 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
     isn't the bottleneck.
   - **Order:** M2.1 needs none of these crates. M2.2 starts with the CPU
     backend and the tile cache, so the GPU backend starts on `vello_gpu`
-    0.3. M2.3 waits for parley 0.12 (10-23) if it would otherwise start
-    on 0.11.
+    0.3. M2.3 uses parley 0.12 (owner exception, see below).
 - [x] **M2.1 `imaginarium-reactive`** (done 2026-10-12): `Signal`,
   `Trigger`, `Memo` (lazy, cut off by `PartialEq`), `Effect`, `Scope`,
   `batch`, `untrack`, `on_cleanup`. No dependencies outside `std`.
@@ -615,14 +617,58 @@ app runs. Two owner exceptions for M2:
   M2; one review of all M2 code before the tag. Tests first, property
   tests and all checks before every PR still apply.
 
-- [ ] **M2.2 Window and frame pipeline** ← **next**: a winit window, the
-  `imaginarium-render` minimal "one scene per frame" on `vello_gpu`/wgpu
-  (and the `vello_cpu` backend for golden images), a frame scheduler that
-  sleeps when nothing changes, scale-factor and DPI handling. Gate
-  criteria 5 and 6. In parallel: compare `imaginarium-reactive` with
-  `sycamore-reactive` and `reactive_graph` on our property tests and
-  benchmarks; switch before M2.4 if one is clearly better.
-- [ ] **M2.3 Text and the text field**: `imaginarium-text` on Parley 0.12
+- [x] **M2.2 Window and frame pipeline** (done 2026-10-13):
+  - `imaginarium-render`: a `Scene` (fills, strokes, clips, opacity
+    layers, transforms, `append`) that both backends replay.
+    `WindowRenderer` (`vello_gpu` 0.3 on wgpu 30, low/high-power GPU or
+    an adapter by name, vsync on/off) reports per frame the swapchain
+    wait, the encode (Vello builds its strips on the CPU) and the submit.
+    `CpuRenderer` (`vello_cpu`, a deterministic mode for golden images)
+    and `OffscreenRenderer` (GPU into a pixmap). Tests: a CPU golden
+    image, repeatability, GPU output = CPU output within antialiasing
+    (passes on lavapipe; skipped without a GPU, e.g. in CI).
+  - `imaginarium-ui`: winit 0.30 with `ControlFlow::Wait`. A `View`
+    paints one scene per frame in logical pixels, drawn at the scale
+    factor. Frames only on resize, scale change, handled input,
+    `request_frame()` (for effects) or the view's timer
+    (`View::wake_at`, also the caret blink in M2.3). Input: pointer,
+    wheel (Ctrl/⌘ = zoom), keys.
+  - `imaginarium-gate` (apps, temporary): a board of 2,000 cards with a
+    toolbar; wheel/drag pans, Ctrl + wheel zooms about the pointer, hover
+    outlines. `--measure` times a scripted pan, then idles 10 s and
+    checks criterion 6. Writes `gate-report.json` (cold start, paint vs
+    encode vs submit vs swapchain wait, frame intervals, idle CPU and
+    frames, GPU, machine, peak RSS). `--gpu low|high`, `--adapter`,
+    `--no-vsync`, `--frames N`.
+  - Measured on this VM (llvmpipe, Xvfb, release): paint 0.41 ms, encode
+    1.57 ms per frame (mean, ~50 cards and 640 grid dots on screen);
+    llvmpipe rasterizes in `submit` (24 ms), so frame intervals mean
+    nothing here. Idle: 0 frames, 0.0–0.2 % CPU over 5 s (one 10 ms tick
+    at most). Main to first frame 262–297 ms (mostly wgpu/Vulkan setup on
+    llvmpipe).
+  - Found on the way: asking an X11 window for its size costs a server
+    round trip (it tripled the paint time; the size now comes from
+    `Resized`). winit's default Wayland fallback decorations pull in the
+    unmaintained `ttf-parser` (RUSTSEC-2026-0192); we use the variant
+    without title text.
+  - **Reactive library comparison (decision: keep ours).** A separate
+    agent ran our tests, properties and benchmarks against
+    `sycamore-reactive` 0.9.3 and `reactive_graph` 0.2.15 (Leptos):
+    - Correctness: sycamore fails 6 of 27 tests (eager memos, no
+      re-run after writing its own source, poisoned after a panic,
+      hidden cycles) and one property. Leptos' synchronous effects are
+      not glitch-free, lose updates through memos (also in a batch,
+      which every frame is), deadlock on a cycle, and fail two
+      properties.
+    - Fan-out per write: 10k effects take ours 1.76 ms, sycamore 53 ms,
+      Leptos 393 ms. Both candidates are quadratic (20k: 3.3 ms vs
+      211 ms vs 1.6 s).
+    - Ours has no dependencies and builds in 1.3 CPU-s; Leptos'
+      `reactive_graph` is 33 crates and 30 CPU-s, with `Send + Sync`
+      bounds and process-global state.
+    - The cost of keeping ours: ~1,250 lines to maintain, guarded by the
+      tests and property tests.
+- [ ] **M2.3 Text and the text field** ← **next**: `imaginarium-text` on Parley 0.12
   (fonts, layout cache, glyphs through Vello), a text field on
   `PlainEditor` with IME, the AccessKit tree. Criterion 4.
 - [ ] **M2.4 Widgets and layout**: the minimal widget tree driven by
@@ -632,7 +678,8 @@ app runs. Two owner exceptions for M2:
 - [ ] **M2.5 Canvas**: display lists, the 256-px tile cache, invalidation
   and the compositor (`docs/design/rendering.md`) on the 10k-shape board,
   with pan, zoom, drag and a dirty-tile overlay. Criteria 1 and 2.
-- [ ] **M2.6 Gate binary** `imaginarium-gate`: scripted scenarios,
+- [ ] **M2.6 Gate binary**: complete `imaginarium-gate` (started in
+  M2.2, grows with each step): scripted scenarios for every criterion,
   `gate-report.json` (renderer and toolkit numbers apart, `--backend
   gpu|cpu`, integrated and discrete GPU), a manual checklist.
 - [ ] **M2.7 Gate run** on the owner's laptop: results in
