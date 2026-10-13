@@ -20,7 +20,12 @@
 //! The widget tree, layout, focus, text input with IME and accessibility
 //! come in M2.3 and M2.4.
 
+mod access;
+mod text_field;
 mod window;
+
+pub use access::{AccessTree, ROOT, rect as access_rect};
+pub use text_field::{FieldResponse, TextField};
 
 pub use window::{
     FrameInfo, Ime, Input, Key, Modifiers, RunStats, UiError, View, WindowOptions, request_frame,

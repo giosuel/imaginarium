@@ -4,6 +4,8 @@
 //! frame out, and no frame at all when nothing changed.
 
 use std::cell::Cell;
+
+use crate::access::AccessTree;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +17,7 @@ use imaginarium_render::{
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::NamedKey;
 use winit::window::{Window, WindowId};
 
@@ -261,6 +263,20 @@ pub trait View {
     fn ime_area(&mut self) -> Option<Rect> {
         None
     }
+
+    /// Describes the content for screen readers: adds nodes to `tree`
+    /// (ids from 1; bounds in logical pixels). Called after frames while a
+    /// screen reader listens.
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        let _ = tree;
+    }
+
+    /// A screen reader asks for something (focus, click, select text, …).
+    /// Return `true` if the content changed and needs a frame.
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        let _ = request;
+        false
+    }
 }
 
 impl<V: View + ?Sized> View for &mut V {
@@ -284,6 +300,24 @@ impl<V: View + ?Sized> View for &mut V {
     }
     fn ime_area(&mut self) -> Option<Rect> {
         (**self).ime_area()
+    }
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        (**self).accessibility(tree);
+    }
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        (**self).accessibility_action(request)
+    }
+}
+
+/// Events from other threads into the event loop.
+#[derive(Debug)]
+enum UserEvent {
+    Access(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Access(event)
     }
 }
 
@@ -313,8 +347,11 @@ pub fn request_frame() {
 /// or [`View::should_close`]). Blocks the calling thread, which must be the
 /// main thread on some platforms. Pass `&mut view` to keep the view.
 pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError> {
-    let event_loop = EventLoop::new().map_err(|err| UiError::EventLoop(err.to_string()))?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|err| UiError::EventLoop(err.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
     let mut shell = Shell {
         options,
         view,
@@ -327,6 +364,9 @@ pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError>
         modifiers: Modifiers::default(),
         clicks: ClickCounter::default(),
         ime: None,
+        proxy,
+        access: None,
+        access_initial: false,
         started: Instant::now(),
         stats: RunStats::default(),
         error: None,
@@ -356,6 +396,11 @@ struct Shell<V> {
     /// The input method's state as last told to the window: `None` off,
     /// otherwise on with this caret area.
     ime: Option<Rect>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// The screen reader bridge; idle until a screen reader asks.
+    access: Option<accesskit_winit::Adapter>,
+    /// The next tree update must be a full one.
+    access_initial: bool,
     started: Instant,
     stats: RunStats,
     error: Option<UiError>,
@@ -397,6 +442,25 @@ impl<V: View> Shell<V> {
             );
         }
         self.ime = area;
+    }
+
+    /// Sends the view's accessibility tree, if a screen reader listens.
+    fn update_access(&mut self) {
+        let Some(adapter) = &mut self.access else {
+            return;
+        };
+        let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
+        let initial = self.access_initial;
+        let mut sent = false;
+        adapter.update_if_active(|| {
+            sent = true;
+            let mut tree = AccessTree::default();
+            view.accessibility(&mut tree);
+            tree.into_update(title, scale, initial)
+        });
+        if sent {
+            self.access_initial = false;
+        }
     }
 
     fn deliver(&mut self, input: Input) {
@@ -450,15 +514,20 @@ impl<V: View> Shell<V> {
         if self.view.presented(&frame) {
             self.request_redraw();
         }
+        // What is on screen changed: tell the screen reader.
+        self.update_access();
     }
 }
 
-impl<V: View> ApplicationHandler for Shell<V> {
+impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
+        // Invisible until the accessibility adapter is attached, as
+        // AccessKit requires (on Windows and macOS).
         let attributes = Window::default_attributes()
+            .with_visible(false)
             .with_title(self.options.title.clone())
             .with_inner_size(LogicalSize::new(
                 self.options.size.width,
@@ -478,11 +547,37 @@ impl<V: View> ApplicationHandler for Shell<V> {
             }
             Err(err) => return self.fail(event_loop, err.into()),
         }
+        self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        ));
+        window.set_visible(true);
         window.request_redraw();
         self.window = Some(window);
     }
 
+    fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Access(event) = event;
+        match event.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                self.access_initial = true;
+                self.update_access();
+            }
+            accesskit_winit::WindowEvent::ActionRequested(request) => {
+                if self.view.accessibility_action(&request) {
+                    self.request_redraw();
+                }
+                self.update_access();
+            }
+            accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if let (Some(access), Some(window)) = (&mut self.access, &self.window) {
+            access.process_event(window, &event);
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {

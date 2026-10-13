@@ -149,6 +149,12 @@ impl Editor {
         (selection.anchor().index(), selection.focus().index())
     }
 
+    /// Selects from byte `anchor` to byte `focus` (a screen reader moving
+    /// the caret). Offsets that aren't character boundaries are ignored.
+    pub fn select_bytes(&mut self, fonts: &mut Fonts, anchor: usize, focus: usize) {
+        self.driver(fonts).select_byte_range(anchor, focus);
+    }
+
     /// Whether an input method is composing.
     pub fn is_composing(&self) -> bool {
         self.editor.is_composing()
