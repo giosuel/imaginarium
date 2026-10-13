@@ -19,3 +19,4 @@ parley_emoji 0.12.0      # owner exception 2026-10-12 (M2), required by parley 0
 fontique 0.12.0          # owner exception 2026-10-12 (M2), required by parley 0.12.0
 parlance 0.1.1           # owner exception 2026-10-12 (M2), parley 0.12.0 requires ^0.1.1
 objc2 0.6.5              # owner exception 2026-10-12 (M2), fontique 0.12.0 requires ^0.6.5 (macOS)
+taffy 0.15.0             # owner exception 2026-10-12 (M2), eligible 2026-10-26
