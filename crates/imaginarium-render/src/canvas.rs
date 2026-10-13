@@ -741,6 +741,86 @@ mod tests {
         assert!(far.evicted > 0);
     }
 
+    /// The items a tile shows: what it would paint, by id and bounds.
+    fn content_of(canvas: &Canvas, key: TileKey) -> Vec<(ItemId, [i64; 4])> {
+        let mut items: Vec<(ItemId, [i64; 4])> = canvas
+            .items_in(key.bounds())
+            .into_iter()
+            .filter_map(|id| {
+                let b = canvas.items.get(&id)?.bounds;
+                Some((id, [b.x0, b.y0, b.x1, b.y1].map(|v| (v * 1000.0) as i64)))
+            })
+            .collect();
+        items.sort();
+        items
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// No change ever leaves a valid tile showing stale content: after
+        /// any mix of inserts, moves, removals and frames at any viewport,
+        /// every tile not marked stale shows what it would show if it were
+        /// rendered now.
+        #[test]
+        fn valid_tiles_never_show_stale_content(
+            ops in proptest::collection::vec(
+                (0u8..4, 0u64..40, -300.0f64..900.0, -300.0f64..900.0, 4.0f64..200.0, 0.25f64..3.0),
+                1..60,
+            )
+        ) {
+            let mut canvas = Canvas::new().with_limits(64, 10_000);
+            let mut boxes = Boxes { bounds: HashMap::new(), painted: Vec::new() };
+            let mut rendered: HashMap<TileKey, Vec<(ItemId, [i64; 4])>> = HashMap::new();
+            let now = Instant::now();
+            for (step, (op, id, x, y, size, zoom)) in ops.into_iter().enumerate() {
+                let id = ItemId(id);
+                match op {
+                    0 | 1 => {
+                        let bounds = Rect::new(x, y, x + size, y + size * 0.7);
+                        canvas.upsert(id, id.0, bounds);
+                        boxes.bounds.insert(id, bounds);
+                    }
+                    2 => {
+                        canvas.remove(id);
+                        boxes.bounds.remove(&id);
+                    }
+                    _ => {
+                        let view = Viewport {
+                            origin: Point::new(x, y),
+                            zoom,
+                            screen: Rect::new(0.0, 0.0, 800.0, 600.0),
+                            scale_factor: 1.0,
+                        };
+                        // Frames far apart, so the zoom pause never holds a level.
+                        let at = now + Duration::from_secs(step as u64);
+                        let stats = canvas.frame(&mut Scene::new(), &view, at, &mut boxes);
+                        for key in &canvas.last_rendered {
+                            rendered.insert(*key, content_of(&canvas, *key));
+                        }
+                        proptest::prop_assert_eq!(stats.owed, 0);
+                    }
+                }
+                for (key, tile) in &canvas.tiles {
+                    if !tile.stale {
+                        let shown = rendered.get(key).cloned().unwrap_or_default();
+                        proptest::prop_assert_eq!(&shown, &content_of(&canvas, *key), "tile {:?} is valid but stale", key);
+                    }
+                }
+            }
+        }
+
+        /// Panning never invalidates a tile.
+        #[test]
+        fn panning_invalidates_nothing(dx in -2_000.0f64..2_000.0, dy in -2_000.0f64..2_000.0) {
+            let (mut canvas, mut boxes) = board(500);
+            let now = Instant::now();
+            canvas.frame(&mut Scene::new(), &viewport(Point::ZERO, 1.0), now, &mut boxes);
+            canvas.frame(&mut Scene::new(), &viewport(Point::new(dx, dy), 1.0), now, &mut boxes);
+            proptest::prop_assert!(canvas.tiles.values().all(|tile| !tile.stale));
+        }
+    }
+
     #[test]
     fn item_at_finds_the_topmost() {
         let mut canvas = Canvas::new();

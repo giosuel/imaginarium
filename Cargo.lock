@@ -2248,6 +2248,7 @@ name = "imaginarium-render"
 version = "0.0.1"
 dependencies = [
  "pollster",
+ "proptest",
  "thiserror 2.0.21",
  "vello_common",
  "vello_cpu",
