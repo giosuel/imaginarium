@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use accesskit::{Node, NodeId, Role};
-use imaginarium_render::Scene;
 use imaginarium_render::canvas::{Canvas, CanvasContent, CanvasStats, ItemId, Viewport};
 use imaginarium_render::kurbo::{Affine, Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
+use imaginarium_render::{Scene, TileWorkers};
 use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use imaginarium_ui::{AccessTree, Clipboard, Input, Key, TextField, access_rect};
 
@@ -124,10 +124,20 @@ pub(crate) struct Board {
 }
 
 impl Board {
-    /// A board of `cards` cards, laid out in a roughly 16:10 grid.
-    pub(crate) fn new(cards: usize, shape_count: usize, tiles: bool) -> Self {
+    /// A board of `cards` cards, laid out in a roughly 16:10 grid. Its
+    /// tiles render on `workers` if given, else in the frame.
+    pub(crate) fn new(
+        cards: usize,
+        shape_count: usize,
+        tiles: bool,
+        workers: Option<TileWorkers>,
+    ) -> Self {
         let columns = ((cards as f64 * 1.6).sqrt().ceil() as usize).max(1);
-        let mut cards_canvas = Canvas::new();
+        let canvas = || match &workers {
+            Some(workers) => Canvas::new().with_workers(workers.clone()),
+            None => Canvas::new(),
+        };
+        let mut cards_canvas = canvas();
         for index in 0..cards {
             cards_canvas.upsert(
                 ItemId(index as u64),
@@ -136,7 +146,7 @@ impl Board {
             );
         }
         let shapes = shapes::generate(shape_count);
-        let mut shapes_canvas = Canvas::new();
+        let mut shapes_canvas = canvas();
         for (index, shape) in shapes.iter().enumerate() {
             shapes_canvas.upsert(ItemId(index as u64), shape.z, shape.bounds());
         }
@@ -951,7 +961,7 @@ mod tests {
     use super::*;
 
     fn board() -> Board {
-        let mut board = Board::new(100, 100, true);
+        let mut board = Board::new(100, 100, true, None);
         board.viewport = Rect::new(0.0, 44.0, 1280.0, 800.0);
         board
     }

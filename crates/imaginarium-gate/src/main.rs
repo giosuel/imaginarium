@@ -45,7 +45,9 @@ use clap::{Parser, ValueEnum};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{GpuFrameTime, GpuInfo, GpuOptions, GpuStart, Power};
+use imaginarium_render::{
+    CpuMode, GpuFrameTime, GpuInfo, GpuOptions, GpuStart, Power, TileWorkers,
+};
 use imaginarium_text::Fonts;
 use imaginarium_ui::{AccessTree, FrameCauses, FrameInfo, Input, View, WindowOptions};
 
@@ -110,6 +112,10 @@ struct Args {
     /// timing it changes nothing).
     #[arg(long)]
     no_gpu_times: bool,
+    /// Threads that render tiles (on the CPU). 0: the frame renders them
+    /// on the GPU, as before M2.8. Default: half the cores, at most 8.
+    #[arg(long)]
+    tile_threads: Option<usize>,
     /// Where to write the report.
     #[arg(long, default_value = "gate-report.json")]
     report: PathBuf,
@@ -295,6 +301,15 @@ struct CanvasSample {
     /// Of `textures`: creating textures, and submitting the renders.
     textures_create: Duration,
     textures_submit: Duration,
+    /// With tile threads: tiles back from them, still with them after the
+    /// frame, and their time for those back.
+    arrived: usize,
+    in_flight: usize,
+    worker_time: Duration,
+    /// Of `textures`: uploading tiles, and tile pages made in the frame.
+    textures_upload: Duration,
+    pages_made: u32,
+    pages: u32,
 }
 
 /// One scripted palette keystroke and the frame after it.
@@ -367,6 +382,12 @@ impl Gate {
             number: frame.number,
             textures_create: frame.render.textures_create,
             textures_submit: frame.render.textures_submit,
+            arrived: canvas.arrived,
+            in_flight: canvas.in_flight,
+            worker_time: canvas.worker_time,
+            textures_upload: frame.render.textures_upload,
+            pages_made: frame.render.tile_pages_made,
+            pages: frame.render.tile_pages,
         }
     }
 
@@ -703,6 +724,9 @@ fn canvas_report(
             "total": values.iter().sum::<usize>(),
         })
     };
+    let arrived: usize = samples.iter().map(|s| s.arrived).sum();
+    let worker_ms_per_tile = (arrived > 0)
+        .then(|| millis(samples.iter().map(|s| s.worker_time).sum::<Duration>()) / arrived as f64);
     serde_json::json!({
         "frame": summary(field(|s| s.frame)),
         "frame_p99_ms": percentile(field(|s| s.frame), 0.99).map(millis),
@@ -725,7 +749,10 @@ fn canvas_report(
                 "textures_ms": millis(s.textures),
                 "create_ms": millis(s.textures_create),
                 "submit_ms": millis(s.textures_submit),
+                "upload_ms": millis(s.textures_upload),
                 "rendered": s.rendered,
+                "arrived": s.arrived,
+                "pages_made": s.pages_made,
                 "gpu_textures_ms": gpu.get(&s.number).map(|t| millis(t.textures)),
             })),
         // Zero: the first frame, or one after a pause.
@@ -734,8 +761,20 @@ fn canvas_report(
         // and gaps that missed one.
         "frames_over_16ms": samples.iter().filter(|s| s.frame > Duration::from_millis(16)).count(),
         "intervals_over_20ms": samples.iter().filter(|s| s.interval > Duration::from_millis(20)).count(),
+        // Tiles whose items were painted (and rendered in the frame, or
+        // handed to the tile threads).
         "tiles_rendered": counts(|s| s.rendered),
         "tiles_owed": counts(|s| s.owed),
+        // With tile threads: tiles back and uploaded, tiles still with
+        // them, the threads' time per tile, the upload time per frame.
+        "tiles_arrived": counts(|s| s.arrived),
+        "tiles_in_flight": counts(|s| s.in_flight),
+        "worker_ms_per_tile": worker_ms_per_tile,
+        "upload": summary(field(|s| s.textures_upload)),
+        // Pages made in a frame because none was ready (each can stall
+        // it), and pages at the phase's end.
+        "tile_pages_made": samples.iter().map(|s| s.pages_made).sum::<u32>(),
+        "tile_pages": samples.last().map(|s| s.pages),
         "items_painted": counts(|s| s.items),
         // At the phase's end: the window can change size meanwhile (a
         // compositor making it fullscreen after the first frame).
@@ -811,6 +850,10 @@ fn main() -> anyhow::Result<()> {
     let fonts_started = Instant::now();
     let fonts = Fonts::new();
     let fonts_time = fonts_started.elapsed();
+    let tile_threads = args
+        .tile_threads
+        .unwrap_or_else(TileWorkers::default_threads);
+    let workers = (tile_threads > 0).then(|| TileWorkers::new(tile_threads, CpuMode::Fast));
     let mut gate = Gate {
         app: App::new(
             fonts,
@@ -818,6 +861,7 @@ fn main() -> anyhow::Result<()> {
             args.shapes,
             args.commands,
             !args.no_tiles,
+            workers.clone(),
         ),
         palette_keys: args.palette_keys,
         palette: Vec::new(),
@@ -919,7 +963,7 @@ fn main() -> anyhow::Result<()> {
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
         "build": BUILD,
-        "milestone": "M2.7",
+        "milestone": "M2.8",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -980,6 +1024,8 @@ fn main() -> anyhow::Result<()> {
             "shapes": gate.app.board.borrow().shape_count(),
             "commands": args.commands,
             "tiles": !args.no_tiles,
+            // 0: tiles render in the frame, on the GPU.
+            "tile_threads": workers.as_ref().map_or(0, TileWorkers::threads),
         },
         "pan": {
             // The toolkit's share: the view building its scene.

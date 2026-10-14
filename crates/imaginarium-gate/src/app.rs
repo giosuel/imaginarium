@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use imaginarium_reactive::{Signal, memo, signal};
-use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_render::peniko::Color;
+use imaginarium_render::{Scene, TileWorkers};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Button, ButtonColors, Flex, Input, InputColors, Key, Label, TextInput, TreeStats,
@@ -65,10 +65,11 @@ impl App {
         shapes: usize,
         commands: usize,
         tiles: bool,
+        workers: Option<TileWorkers>,
     ) -> Self {
         let _ = &mut fonts;
         let mut ui = Ui::new();
-        let board = Rc::new(RefCell::new(Board::new(cards, shapes, tiles)));
+        let board = Rc::new(RefCell::new(Board::new(cards, shapes, tiles, workers)));
         // Requests from the toolbar's mode buttons, applied by the app
         // (they need the fonts).
         let mode_request: Rc<Cell<Option<Mode>>> = Rc::new(Cell::new(None));
