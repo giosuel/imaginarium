@@ -36,15 +36,20 @@ several threads"), and ADR-0003 puts background work on a pool.
    - The UI thread paints a tile's items into a scene and hands it over.
    - Frames show stand-ins until the tile's pixels come back, usually by
      the next frame, and upload them then (`Scene::upload_texture`).
+   - For tiles nothing can stand in for, the frame that hands them over
+     waits up to 4 ms for them instead (amended 2026-10-14, after the
+     owner's second run).
    - The GPU still composites the tiles and draws everything else.
 2. **On the GPU, uploaded tiles share pages**: 2048² textures holding 64
    tiles each, so a frame draws a page's tiles with one binding. Pages
-   are made ahead of need, and cleared, on a thread of their own.
+   are made ahead of need, and cleared, on a thread of their own, as
+   soon as the canvas hands tiles to the workers.
 3. **The pool is the canvas's own.** It isn't the general rayon pool of
    ADR-0003, which doesn't exist yet. Tile threads live as long as the
    window, and each keeps its own `vello_cpu` context and glyph cache.
-   The queue is first in, first out, with at most 4 tiles per thread at
-   once, so it follows what is on screen.
+   The queue is first in, first out, with at most 8 tiles per thread at
+   once (4 until the owner's second run), so it follows what is on
+   screen.
 4. **Without workers, tiles render in the frame on the GPU**, as before.
    This applies when none could start, or later in a browser build.
 
@@ -59,7 +64,8 @@ several threads"), and ADR-0003 puts background work on a pool.
 - **Tiles arrive a frame later.** A tile shows from the frame after the
   one that painted its items. Until then, a stand-in shows: a stale copy
   or another level. For an item being moved, the drag lift already draws
-  it live.
+  it live. Where there is no stand-in, the frame waits for the tile, up
+  to 4 ms.
 - **Memory.** Tile pages take GPU memory in 16 MB steps. Each worker
   keeps its own glyph cache.
 - **CPU use.** While tiles fill, the workers use their threads. When
