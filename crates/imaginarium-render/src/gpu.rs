@@ -216,6 +216,13 @@ async fn open(
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("imaginarium"),
             required_features,
+            // Smaller memory blocks (8 to 64 MB rather than 128 to 256 MB).
+            // A block's memory may be backed only when a submission first
+            // uses it, and an integrated GPU's driver then allocates and
+            // clears it in that submission: the bigger the block, the
+            // longer that frame (the gate laptop's Intel GPU stalled in
+            // single submissions for 58-117 ms).
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         })
         .await
