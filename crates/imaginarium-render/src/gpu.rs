@@ -245,7 +245,9 @@ async fn open(
 /// 2048² rather than Vello's 4096²: a page is created when a glyph first
 /// needs it, and wgpu clears the whole texture on its first use, which made
 /// the first frame with text stall for 70 ms on the VM (64 MB). A quarter
-/// of that holds the UI's and a board's glyphs; more pages come as needed.
+/// of that holds the UI's and a board's glyphs; more pages come as needed,
+/// up to 32 (Vello's 8 of 4096² hold as much). A full atlas draws glyphs
+/// directly, which vello_gpu can't do for bitmap glyphs (color emoji).
 fn new_renderer(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -254,6 +256,7 @@ fn new_renderer(
 ) -> (vello_gpu::Renderer, vello_gpu::Resources) {
     let mut settings = vello_gpu::RenderSettings::default();
     settings.memory_settings.image_atlas_config.atlas_size = (ATLAS_PAGE, ATLAS_PAGE);
+    settings.memory_settings.image_atlas_config.max_atlases = ATLAS_PAGES;
     vello_gpu::Renderer::new_with(
         device,
         &vello_gpu::RenderTargetConfig {
@@ -267,6 +270,8 @@ fn new_renderer(
 
 /// The side of a glyph (and image) atlas page, in pixels.
 const ATLAS_PAGE: u16 = 2048;
+/// Glyph atlas pages at most: 512 MB, as many glyphs as Vello's default.
+const ATLAS_PAGES: usize = 32;
 
 /// Vello works with `u16` sizes; a zero-sized surface is invalid.
 fn clamp_size(width: u32, height: u32) -> (u16, u16) {
