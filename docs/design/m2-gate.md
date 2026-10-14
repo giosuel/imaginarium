@@ -702,7 +702,76 @@ M2.8 is done (the owner, 2026-10-14: rendering the next level ahead only
 if still needed). And, in the same session if possible, the manual
 checklist's items for criteria 4 and 5.
 
-Results: to come.
+### Results (2026-10-14, "M2.8 test 5 (ae7cd45)")
+
+All three ran fullscreen at 3456×2160, with 8 tile threads. Times are in
+ms.
+
+| | iGPU | dGPU | iGPU, no vsync |
+|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **7.4** | 9.0 | 7.1 |
+| C1 shapes zoom, p99 (< 16) | **12.8** | 11.7 | 12.4 |
+| C1 zoom frames over 16 ms, of 240 | **0** | 0 | 1 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **0 / 1 / 0** | 1 / 0 / 0 | 1 / 1 / 0 |
+| C2 tiles per drag frame (≤ 4) | **3** | 3 | 3 |
+| C3 palette search, p95 (< 1) | **0.32** | 0.37 | 0.39 |
+| C6 cold start without the GPU's setup (< 400) | **337** | 208 | 227 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.4 % | 0 / 0.1 % |
+| Zoom: blank tiles / frames with any | **1 / 1** | 0 / 0 | 0 / 0 |
+| Cards board opening: covered / complete, frames | **25 / 26** | 21 / 23 | 21 / 23 |
+| The same in ms | **688 / 704** | 342 / 375 | 338 / 353 |
+| Cards: slowest frame | **244** | 22 | 74 |
+| Peak memory (RSS), MB | 196 | 416 | 208 |
+
+- **The zoom bug is fixed in all three runs** (owner). The stand-ins'
+  extra draws cost nothing visible: the zoom's encode p95 is 3.3 ms on
+  the iGPU (4.6 in run 4).
+- **Criterion 1 passes in all three runs**, as in run 4.
+- **Owner:** the no-vsync run showed fewer frames and more motion blur.
+  That is the mode, not a regression: without vsync the gate draws as
+  fast as it can (the zoom about 120 frames a second) and takes the
+  integrated GPU from the compositor, so frames reach the screen
+  unevenly. The app always waits for vsync; the mode measures headroom.
+- **Owner:** in all runs, something froze shortly before the command
+  palette opened. The report didn't show it: the typing phase recorded
+  only painting and encoding. It was the search: the script types one
+  character per frame, and each keystroke made every visible card tile
+  render again (cards the search misses were dimmed in the tiles), more
+  than a frame can render. The board showed stale tiles until the
+  typing stopped. Fixed since: the dimming is a veil over the tiles,
+  and the report has the run's longest frame intervals in any
+  phase (`longest_intervals`) and the typing's tile renders.
+- **The cards board on the iGPU with vsync** (the first start after a
+  boot again: the Vulkan driver took 937 ms): 244 ms as it opened (215 of
+  it encode) and 136 ms at the pan's frame 198 (120 in encode, 12 in
+  building). Since run 4, every iGPU run has a hitch at that frame, of
+  12–15 ms in uploads otherwise; on the dGPU none. On the VM the same
+  frame spends about 15 ms replaying a few runs of text: likely glyphs
+  drawn again after glifo's cache evicted them (it evicts glyphs unused
+  for 64 frames, every 64 frames; the status line's numbers move the
+  text after them). The 120 ms isn't explained. For M3, with the cards'
+  opening.
+- No word yet on the manual checklist (criteria 4 and 5).
+
+## M2.8: done (2026-10-14)
+
+Criterion 1 passes on the integrated GPU, fullscreen at 3456×2160, in
+runs 4 and 5 (shapes pan p99 7.4–8.8 ms, zoom 12.8–13.5 ms), and on the
+dGPU. Criteria 2, 3 and 6 pass in every run. Zooming in no longer makes
+shapes disappear (owner, run 5).
+
+Left for M3 (the canvas):
+- covering the fill as a board opens (the owner: maybe an animation),
+  and the cards' painting on the UI thread (text layout), which limits
+  it;
+- the cards board's slow frames on the iGPU (its first frame, and frame
+  198 of the pan);
+- rendering the next level ahead while zooming in, if needed;
+- a window-wide memory budget for tile pages (22 pages, 352 MB, at the
+  end of a run).
+
+The search fix and the new report fields come with the next build; the
+gate's last run is part of M2.9.
 
 ## Decision (owner, 2026-10-13)
 

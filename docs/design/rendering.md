@@ -230,8 +230,11 @@ and other levels comes later, on the same workers.
   bound as external textures of the frame; the CPU backend keeps pixmaps,
   so golden images cover it. A tile drawn at 1:1 on whole device pixels
   equals drawing its items directly (tested).
-- **Overlays** (hover outlines, the edited card, selection outlines) are
-  drawn live on top and never dirty tiles. A **drag lifts** the selected
+- **Overlays** (hover outlines, the edited card, selection outlines, the
+  search's dimming) are drawn live on top and never dirty tiles. State
+  that changes with every keystroke or pointer move belongs there: a
+  search that dimmed cards in the tiles made every visible tile render
+  again per keystroke (M2.8). A **drag lifts** the selected
   shapes out of the tiles: their tiles render once without them, the
   shapes are drawn live while they move, and they go back into the tiles
   when the drag ends.

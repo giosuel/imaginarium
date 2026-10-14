@@ -10,8 +10,9 @@ Last updated: 2026-10-14
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.8 Canvas on the integrated GPU**. The M2 gate is
-  decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
+- **Next step:** **M2.9 Wrap-up** (see "Next" at the end of this item).
+  **M2.8, the canvas on the integrated GPU, is done (2026-10-14).** The M2
+  gate is decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
   result"). Criterion 1 fails on the iGPU with a fullscreen window,
   because the GPU can't keep up. Criterion 2 needs the script to settle
   before the drag. Start with GPU times in the gate report.
@@ -69,15 +70,21 @@ Last updated: 2026-10-14
   at the corner, though half-octave levels straddle up to four. Done
   since: stand-ins cover the whole tile, or the tile counts as blank.
 
-  Next: the owner's seventh set of runs ("M2.8 run 5" in `m2-gate.md`),
-  and the manual checklist for criteria 4 and 5 (not reported yet). If
-  shapes no longer disappear while zooming in, M2.8 is done and M2.9
-  follows. Rendering the next level ahead while zooming in only if still
-  needed (owner, 2026-10-14). For M3 (canvas): covering
-  the fill as a board opens (the owner: maybe an animation; still
-  similar in run 3, not the biggest deal), the cards board's slow first
-  frame (52 ms, 39 of it in encode, on the iGPU), and a window-wide
-  memory budget for tile pages (22 pages, 352 MB, at the end of run 3).
+  The owner's fifth runs (2026-10-14, "M2.8 run 5"): the zoom bug is
+  fixed in all three, and criterion 1 passes in all three again (iGPU
+  zoom p99 12.8 ms). **M2.8 is done** ("M2.8: done" in `m2-gate.md`).
+  The owner saw a freeze before the palette opened: the search re-rendered
+  every visible card tile per keystroke. Done since: the search dims over
+  the tiles; the report has the longest frame intervals of the run.
+
+  Next: **M2.9 Wrap-up**: the review of all M2 code, developer docs on the
+  website, a last gate run (with the search fix, and the manual checklist
+  for criteria 4 and 5, not reported yet), the tag `v0.0.3-m2`. For M3
+  (canvas), from M2.8: covering the fill as a board opens (the owner: maybe
+  an animation) and the cards' text layout on the UI thread that limits
+  it; the cards board's slow frames on the iGPU (its first frame, and the
+  pan's frame 198); rendering the next level ahead while zooming in, if
+  needed; a window-wide memory budget for tile pages (22 pages, 352 MB).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -879,8 +886,8 @@ app runs. Two owner exceptions for M2:
   - **Decision (owner, 2026-10-13): we keep our toolkit.** Criterion 1's
     failure is in the canvas renderer, which a GPUI shell would keep. The
     checklist notes for criteria 4 and 5 hadn't come in yet.
-- [ ] **M2.8 Canvas on the integrated GPU** (the gate's follow-up). The
-  steps:
+- [x] **M2.8 Canvas on the integrated GPU** (done 2026-10-14; the gate's
+  follow-up). The steps:
   - The script settles before each shapes phase, so criterion 2 is
     measured on its own.
   - The report times the GPU and records the monitor's size and scale.
