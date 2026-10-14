@@ -50,12 +50,25 @@ Last updated: 2026-10-14
     painting twice;
   - blank tiles and fill times in the report.
 
-  Next: the owner's fifth set of runs, with the manual checklist for
-  criteria 4 and 5 in the same session ("M2.8 run 3" in `m2-gate.md`).
-  If they hold, M2.8 is done and M2.9 follows. For M3 (canvas): covering
-  the fill as a board opens (the owner: maybe an animation), and a
-  window-wide memory budget for tile pages (21 pages, 336 MB, at the
-  end of run 2).
+  The owner's third runs (2026-10-14, "M2.8 run 3"): zooming out is fine
+  now, but **criterion 1 misses on the iGPU in the zoom** (p99 19.3 ms;
+  the owner: zooming in is a bit laggy). Up to 57 tiles came back in one
+  frame and were all uploaded (13 ms), and building overshot its budget
+  (9.2 ms against 6). Done since, on the same branch:
+  - uploads take half a frame's tile time at most, by their measured
+    cost, and 16 tiles at most; the others wait for the next frame;
+  - the clock stops building where the estimate of a tile's cost is
+    wrong;
+  - the slowest frames' parts, parked tiles and the upload cost per tile
+    in the report.
+
+  Next: the owner's sixth set of runs ("M2.8 run 4" in `m2-gate.md`),
+  and the manual checklist for criteria 4 and 5 (not reported yet). If
+  they hold, M2.8 is done and M2.9 follows. For M3 (canvas): covering
+  the fill as a board opens (the owner: maybe an animation; still
+  similar in run 3, not the biggest deal), the cards board's slow first
+  frame (52 ms, 39 of it in encode, on the iGPU), and a window-wide
+  memory budget for tile pages (22 pages, 352 MB, at the end of run 3).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),

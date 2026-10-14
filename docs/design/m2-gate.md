@@ -523,6 +523,96 @@ and 5 (HiDPI, text, input method, screen reader), and watching 5a: is
 zooming out on the shapes still glitchy, and how does the board fill as
 it opens?
 
+### Results (2026-10-14, "M2.8 test 3 (c23c2d4)")
+
+All three ran fullscreen at 3456×2160, with 8 tile threads. Times are in
+ms.
+
+| | iGPU | dGPU | iGPU, no vsync |
+|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **10.0** | 7.4 | 6.7 |
+| C1 shapes zoom, p99 (< 16) | **19.3 ✗** | 13.5 | 13.6 |
+| C1 zoom frames over 16 ms, of 240 | **4** | 0 | 1 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **2 / 8 / 2** | 0 / 2 / 0 | 1 / 1 / 0 |
+| C2 tiles per drag frame (≤ 4) | **3** | 3 | 3 |
+| C3 palette search, p95 (< 1) | **0.32** | 0.33 | 0.41 |
+| C6 cold start without the GPU's setup (< 400) | **308** | 278 | 267 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.3 % | 0 / 0.1 % |
+| GPU time per shapes pan frame, median | 8.5 | 1.0 | 8.6 |
+| Cards board opening: covered / complete, frames | **16 / 18** | 14 / 15 | 17 / 19 |
+| The same in ms | **318 / 351** | 243 / 260 | 315 / 336 |
+| Tiles filling the screen before the shapes pan: frames / ms | **7 / 133** | 6 / 116 | 6 / 74 |
+| Zoom: tiles owed per frame, mean | **15** | 12 | 11 |
+| Zoom: blank tiles / frames with any | **39 / 6** | 3 / 1 | 0 / 0 |
+| Slowest tile work in a frame: cards / zoom | **5 / 13** | 5 / 6 | 3 / 6 |
+| Peak memory (RSS), MB | 220 | 437 | 230 |
+
+- **Criterion 1 misses on the iGPU in the zoom**: p99 19.3 ms (11.0 in
+  run 2), and zoom p99 is up about 2.6 ms in the other two runs too. The
+  owner felt it: zooming in on the shapes was a bit laggy.
+  - **Uploads came in bursts.** With 8 tiles per thread, up to 57 tiles
+    came back in one frame (32 in run 2), and the frame uploaded them
+    all: 13 ms. Uploads weren't in any frame's budget: they counted only
+    in the time per tile, as tile work the frame before.
+  - **A burst costs more per tile**: 0.23 ms against 0.08 ms on average
+    (and 0.08 ms in the no-vsync run's 64-tile frame). Likely the
+    driver backing fresh staging memory for the burst; not confirmed.
+  - **Building overshot its budget**: up to 9.2 ms against 6, as the
+    estimate of a tile's cost was low (57 tiles built in one frame).
+    Run 2's double-counting bug had hidden this by halving the budget.
+  - **The UI thread was about 20 % slower than in run 2** on identical
+    work (the shapes pan: painting 1.21 against 1.00 ms per frame,
+    encoding 2.12 against 1.83), maybe a power setting. The other two
+    runs weren't. That alone doesn't explain the zoom.
+- **Zooming out is fine** (owner). In the zoom, 39 blank tiles in 6
+  frames on the iGPU, none without vsync.
+- **No tile page was made in a frame** in any phase, and none was being
+  made when the slowest uploads ran (`pages_coming` 0).
+- **The cards board's first frame is still slow**: 52 ms, now in encode
+  (39 ms; 7.5 ms on the dGPU), not in making a page. The board covers
+  the screen after 16 frames (318 ms). Owner: similar to before, not the
+  biggest deal.
+- No word yet on the manual checklist (criteria 4 and 5) with this run.
+- GPU memory: 22 tile pages at the end, 352 MB.
+
+## M2.8 run 4: uploads within the frame's budget
+
+What changed since run 3:
+- **Uploads take part of a frame's tile time**: half of it at most, by
+  their measured cost per tile, and 16 tiles at most. Tiles that come
+  back beyond that wait (`parked`) for the next frame, the current
+  level's first. Building gets what the uploads leave.
+- **The clock stops building** when the estimate of a tile's cost is
+  wrong: a frame builds no further tile once its time is spent.
+- **Waiting for tiles nothing stands in for** counts their uploads in
+  the wait's time.
+- Parked tiles count against the 8 per thread, so the workers don't get
+  far ahead of the uploads.
+
+On the VM (llvmpipe, a 1920×1200 window at scale 1.5, 4 tile threads;
+its frames take 30–40 ms in llvmpipe's submit, so only the tile work
+compares):
+- zoom: at most 16 uploads in a frame (32 before), the slowest 4.2 ms
+  (6.7 before); up to 28 tiles parked;
+- the cards board's opening: the slowest upload 6.0 ms (9.5 before).
+
+The report adds per canvas phase:
+- `slowest_frames`: the five slowest frames on the UI thread, with their
+  parts (painting, building, waiting, uploads, encode, submit) and tile
+  counts;
+- `tiles_parked`, and `upload_ms_per_tile`.
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+```
+
+If they hold, M2.8 is done. Then, in the same session if possible, the
+manual checklist's items for criteria 4 and 5 (HiDPI, text, input
+method, screen reader), and watching: is zooming in on the shapes still
+laggy?
+
 Results: to come.
 
 ## Decision (owner, 2026-10-13)

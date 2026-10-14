@@ -167,14 +167,19 @@ Since M2.8, tiles render on **tile worker threads** with `vello_cpu`
    isn't shared between threads.
 2. A worker renders the scene into a pixmap and sends it back.
 3. Until then, frames show a stand-in. The frame after the tile comes
-   back uploads it (`Scene::upload_texture`) and draws it.
+   back uploads it (`Scene::upload_texture`) and draws it. Uploads take
+   half the frame's tile time at most, by their measured cost per tile
+   (`Canvas::note_render_time`), and 16 tiles at most. The others wait
+   for the next frame, the current level's first; building gets what
+   the uploads leave. On the gate laptop's Intel GPU, a frame that
+   uploaded all 57 tiles that came back took 13 ms for it.
 4. A tile nothing can stand in for (newly in view, or every tile when a
    board opens) would show blank until then. For those, the frame that
    hands them over waits up to 4 ms, within what the rest of the frame
-   leaves of 12 ms, and draws the ones back by then
-   (`Canvas::with_blank_wait`).
-5. Each thread has at most 8 tiles at once, so the queue follows what is
-   on screen.
+   leaves of 12 ms (their uploads included), and draws the ones back by
+   then (`Canvas::with_blank_wait`).
+5. Each thread has at most 8 tiles at once, counting those back and
+   waiting to be uploaded, so the queue follows what is on screen.
 6. On the GPU, uploaded tiles share pages of 64. The canvas says how many
    new tiles are coming (`Scene::expect_uploads`), so pages are made on a
    thread of their own while the workers render.
@@ -201,7 +206,8 @@ and other levels comes later, on the same workers.
   (the gate laptop: about 12 µs per unit, in panning and zooming alike),
   and follows the renderer's measured time for the last frame's tiles
   (`Canvas::note_render_time`, from `FrameTiming::textures`). Once a tile
-  doesn't fit, the rest wait. Since M2.8, tile work also leaves room for
+  doesn't fit, the rest wait; and since M2.8 the clock stops building
+  where the estimate is wrong. Since M2.8, tile work also leaves room for
   the rest of the frame (painting, encoding, submitting;
   `Canvas::note_rest_of_frame`, which leaves out the canvas's own part):
   it gets 12 ms minus that, between 1 and 6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
