@@ -46,8 +46,8 @@ const WORKER_TILE_UNITS: usize = 8;
 
 /// Tiles the workers may have at once, per thread: enough to keep them
 /// busy until the next frame, few enough that the queue follows what is
-/// on screen.
-const FLIGHTS_PER_THREAD: usize = 4;
+/// on screen (8 shapes tiles are about 3 ms of a thread's work).
+const FLIGHTS_PER_THREAD: usize = 8;
 
 /// The time per unit before any tile work was measured.
 const INITIAL_UNIT_COST: Duration = Duration::from_micros(12);
