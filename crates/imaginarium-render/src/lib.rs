@@ -33,6 +33,7 @@ mod error;
 mod gpu;
 mod gpu_timer;
 mod scene;
+mod tile_pages;
 
 pub use cpu::{CpuMode, CpuRenderer};
 pub use error::RenderError;

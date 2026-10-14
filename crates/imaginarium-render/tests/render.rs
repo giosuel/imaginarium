@@ -411,3 +411,98 @@ fn bitmap_glyphs_draw_at_any_size() {
         }
     }
 }
+
+/// A pixmap of `width × height` filled with `color`, as a worker thread
+/// would hand over a rendered tile.
+fn solid(width: u16, height: u16, color: Color) -> std::sync::Arc<Pixmap> {
+    let mut scene = Scene::new();
+    scene.fill(
+        &Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+        color,
+    );
+    std::sync::Arc::new(CpuRenderer::new(CpuMode::Deterministic).render(
+        &scene,
+        width,
+        height,
+        Color::TRANSPARENT,
+    ))
+}
+
+/// Uploaded textures (tiles rendered elsewhere) draw like rendered ones,
+/// on both backends: tile-sized ones, which share pages on the GPU, and
+/// others.
+#[test]
+fn uploaded_textures_draw_like_rendered_ones() {
+    let content = std::sync::Arc::new(CpuRenderer::new(CpuMode::Deterministic).render(
+        &sample(),
+        256,
+        256,
+        Color::TRANSPARENT,
+    ));
+    let (tile, other, small) = (
+        TextureKey::unique(),
+        TextureKey::unique(),
+        TextureKey::unique(),
+    );
+    let mut scene = Scene::new();
+    scene.upload_texture(tile, content.clone());
+    scene.upload_texture(other, solid(256, 256, css::GOLD));
+    scene.upload_texture(small, solid(40, 30, css::TEAL));
+    assert_eq!(scene.texture_uploads(), 3);
+    scene.draw_texture(tile, 256, 256, Rect::new(0.0, 0.0, 256.0, 256.0));
+    scene.draw_texture(other, 256, 256, Rect::new(256.0, 0.0, 512.0, 256.0));
+    scene.draw_texture(small, 40, 30, Rect::new(10.0, 260.0, 50.0, 290.0));
+    let mut direct = Scene::new();
+    direct.append(&sample(), Affine::IDENTITY);
+    direct.fill(&Rect::new(256.0, 0.0, 512.0, 256.0), css::GOLD);
+    direct.fill(&Rect::new(10.0, 260.0, 50.0, 290.0), css::TEAL);
+    let expected = CpuRenderer::new(CpuMode::Deterministic).render(&direct, 512, 300, background());
+    let on_cpu = CpuRenderer::new(CpuMode::Deterministic).render(&scene, 512, 300, background());
+    let (max, share) = compare(&expected, &on_cpu, 2);
+    assert!(share == 0.0, "CPU: {share} of pixels differ (max {max})");
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
+        Err(err) => {
+            eprintln!("GPU part skipped: {err}");
+            return;
+        }
+    };
+    let on_gpu = gpu.render(&scene, 512, 300, background()).unwrap();
+    let (max, share) = compare(&expected, &on_gpu, 2);
+    assert!(share == 0.0, "GPU: {share} of pixels differ (max {max})");
+}
+
+/// A tile drawn scaled is filtered with its own texels only, not with its
+/// neighbours' in the GPU's shared page.
+#[test]
+fn a_scaled_tile_keeps_to_its_own_texels() {
+    let (red, blue) = (TextureKey::unique(), TextureKey::unique());
+    let mut scene = Scene::new();
+    // Uploaded together: neighbouring slots of a page.
+    scene.upload_texture(red, solid(256, 256, css::RED));
+    scene.upload_texture(blue, solid(256, 256, css::BLUE));
+    // Twice its size and off whole pixels: filtered at every edge.
+    scene.draw_texture(red, 256, 256, Rect::new(0.25, 0.25, 512.25, 512.25));
+    let mut renders = vec![(
+        "cpu",
+        CpuRenderer::new(CpuMode::Deterministic).render(&scene, 520, 520, background()),
+    )];
+    let opened = open_gpu();
+    match opened {
+        Ok((_one_at_a_time, mut gpu)) => {
+            renders.push(("gpu", gpu.render(&scene, 520, 520, background()).unwrap()));
+        }
+        Err(err) => eprintln!("GPU part skipped: {err}"),
+    }
+    for (backend, pixmap) in renders {
+        for y in 1..512 {
+            for x in 1..512 {
+                let at = pixmap.data()[y * 520 + x];
+                assert!(
+                    at.b < 8 && at.r > 247,
+                    "{backend}: ({x}, {y}) is {at:?}, not red"
+                );
+            }
+        }
+    }
+}

@@ -107,6 +107,9 @@ impl CpuRenderer {
                         self.draw(scene, (*width).max(1), (*height).max(1), Color::TRANSPARENT);
                     self.textures.insert(*key, Arc::new(pixmap));
                 }
+                TextureWork::Upload { key, pixmap } => {
+                    self.textures.insert(*key, Arc::clone(&pixmap.0));
+                }
             }
         }
         self.draw(scene, width, height, background)

@@ -933,7 +933,7 @@ mod tests {
             .iter()
             .filter_map(|work| match work {
                 TextureWork::Free(key) => Some(*key),
-                TextureWork::Render { .. } => None,
+                TextureWork::Render { .. } | TextureWork::Upload { .. } => None,
             })
             .collect();
         scene
@@ -1250,7 +1250,7 @@ mod tests {
                         canvases[which].frame(&mut scene, &view, at, &mut boxes[which]);
                         for work in scene.texture_work() {
                             match work {
-                                TextureWork::Render { key, .. } => {
+                                TextureWork::Render { key, .. } | TextureWork::Upload { key, .. } => {
                                     alive.insert(*key);
                                 }
                                 TextureWork::Free(key) => {

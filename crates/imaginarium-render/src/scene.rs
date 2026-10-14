@@ -7,9 +7,10 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use vello_common::geometry::RectU16;
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use vello_common::paint::{Image, ImageSource};
-use vello_common::peniko::{Color, FontData, ImageSampler};
+use vello_common::peniko::{Color, FontData, ImageQuality, ImageSampler};
 use vello_cpu::{Glyph, Pixmap};
 
 /// Curves are flattened to this tolerance (in the scene's units) when a
@@ -89,8 +90,23 @@ pub(crate) enum TextureWork {
         height: u16,
         scene: Scene,
     },
+    /// Makes `pixmap` texture `key`'s pixels, creating or resizing it.
+    Upload {
+        key: TextureKey,
+        pixmap: SharedPixmap,
+    },
     /// Releases texture `key`.
     Free(TextureKey),
+}
+
+/// A pixmap a scene shares; scenes compare it by identity.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedPixmap(pub(crate) Arc<Pixmap>);
+
+impl PartialEq for SharedPixmap {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// The attributes shared by a run of glyphs (see [`Scene::glyphs`]).
@@ -225,6 +241,17 @@ impl Scene {
         });
     }
 
+    /// Makes `pixmap` texture `key`'s pixels (premultiplied, as Vello
+    /// renders them), before this scene is drawn: content rendered
+    /// elsewhere, such as canvas tiles rendered on worker threads. The
+    /// texture stays until [`Scene::free_texture`].
+    pub fn upload_texture(&mut self, key: TextureKey, pixmap: Arc<Pixmap>) {
+        self.textures.push(TextureWork::Upload {
+            key,
+            pixmap: SharedPixmap(pixmap),
+        });
+    }
+
     /// Draws texture `key` (`width × height` texels) into `dest`, in the
     /// current transform. A texture drawn at 1:1 on whole device pixels is
     /// copied exactly.
@@ -247,6 +274,14 @@ impl Scene {
         self.textures
             .iter()
             .filter(|work| matches!(work, TextureWork::Render { .. }))
+            .count()
+    }
+
+    /// Texture uploads queued by this scene.
+    pub fn texture_uploads(&self) -> usize {
+        self.textures
+            .iter()
+            .filter(|work| matches!(work, TextureWork::Upload { .. }))
             .count()
     }
 
@@ -377,15 +412,23 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) missing: u32,
 }
 
+/// Where a texture's texels are on the GPU: a texture bound for the frame,
+/// and the region of it (all of it, or a slot of a tile page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub(crate) id: vello_common::TextureId,
+    pub(crate) region: RectU16,
+}
+
 /// The textures a backend can draw.
 pub(crate) enum Textures<'a> {
     /// None (inside a texture's own content).
     None,
     /// The CPU backend's pixmaps.
     Pixmaps(&'a HashMap<TextureKey, Arc<Pixmap>>),
-    /// The GPU's, bound by key at render time. Drawing a key without a
+    /// The GPU's, bound at render time. Drawing a texture without a
     /// binding would fail the whole frame.
-    Bound(&'a HashMap<TextureKey, crate::gpu::GpuTexture>),
+    Bound(&'a HashMap<TextureKey, Placed>),
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -471,6 +514,26 @@ const MAX_ATLAS_GLYPH_SIZE: f32 = 128.0;
 fn device_size(size: f32, transform: Affine) -> f32 {
     let [a, b, c, d, _, _] = transform.as_coeffs();
     size * (a * d - b * c).abs().sqrt() as f32
+}
+
+/// How to sample a texture whose texels map to device pixels by
+/// `texels`: one texel per pixel on whole pixels needs no filtering, and the
+/// nearest texel is the same as filtering there. On the GPU that is one
+/// load per pixel instead of four (canvas tiles cover the window).
+fn sampling(texels: Affine) -> ImageQuality {
+    let [a, b, c, d, x, y] = texels.as_coeffs();
+    let near = |value: f64, to: f64| (value - to).abs() < 1e-6;
+    if near(a, 1.0)
+        && near(d, 1.0)
+        && near(b, 0.0)
+        && near(c, 0.0)
+        && near(x, x.round())
+        && near(y, y.round())
+    {
+        ImageQuality::Low
+    } else {
+        ImageQuality::Medium
+    }
 }
 
 macro_rules! impl_sink {
@@ -560,35 +623,34 @@ macro_rules! impl_sink {
                             return;
                         }
                     },
-                    Textures::Bound(bound) if bound.contains_key(&key) => {
-                        ImageSource::external_texture(
-                            vello_common::TextureId(key.id()),
-                            vello_common::geometry::RectU16 {
-                                x0: 0,
-                                y0: 0,
-                                x1: width,
-                                y1: height,
-                            },
-                            true,
-                        )
-                    }
-                    Textures::Bound(_) | Textures::None => {
+                    Textures::Bound(bound) => match bound.get(&key) {
+                        Some(placed) => {
+                            ImageSource::external_texture(placed.id, placed.region, true)
+                        }
+                        None => {
+                            self.missing += 1;
+                            return;
+                        }
+                    },
+                    Textures::None => {
                         self.missing += 1;
                         return;
                     }
                 };
+                // Texels to the destination rectangle.
+                let texels = Affine::translate(dest.origin().to_vec2())
+                    * Affine::scale_non_uniform(
+                        dest.width() / f64::from(width),
+                        dest.height() / f64::from(height),
+                    );
                 self.context.set_paint(Image {
                     image,
-                    sampler: ImageSampler::default(),
+                    sampler: ImageSampler {
+                        quality: sampling(self.transform * texels),
+                        ..ImageSampler::default()
+                    },
                 });
-                // Texels to the destination rectangle.
-                self.context.set_paint_transform(
-                    Affine::translate(dest.origin().to_vec2())
-                        * Affine::scale_non_uniform(
-                            dest.width() / f64::from(width),
-                            dest.height() / f64::from(height),
-                        ),
-                );
+                self.context.set_paint_transform(texels);
                 self.context.fill_rect(dest);
                 self.context.reset_paint_transform();
             }
