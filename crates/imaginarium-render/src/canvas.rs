@@ -49,6 +49,12 @@ const WORKER_TILE_UNITS: usize = 8;
 /// on screen (8 shapes tiles are about 3 ms of a thread's work).
 const FLIGHTS_PER_THREAD: usize = 8;
 
+/// With workers, how long a frame waits at most for the tiles it handed
+/// over that nothing can stand in for: a worker renders one in about a
+/// millisecond, so they show in this frame instead of blank until the
+/// next. Within [`FRAME_TARGET`].
+const BLANK_WAIT: Duration = Duration::from_millis(4);
+
 /// The time per unit before any tile work was measured.
 const INITIAL_UNIT_COST: Duration = Duration::from_micros(12);
 
@@ -198,6 +204,8 @@ pub struct CanvasStats {
     /// Visible tiles shown by a stand-in (a stale copy or another level),
     /// to be rendered in a following frame.
     pub owed: usize,
+    /// Of `owed`: tiles with no stand-in at all, left blank this frame.
+    pub blank: usize,
     /// Items painted into tiles this frame.
     pub items_painted: usize,
     /// Tiles in the cache.
@@ -215,6 +223,9 @@ pub struct CanvasStats {
     pub worker_time: Duration,
     /// With workers: tiles they failed to render, left empty.
     pub failed: usize,
+    /// With workers: waiting for tiles nothing stood in for (part of the
+    /// frame, like `build`).
+    pub waited: Duration,
 }
 
 /// The tile workers a canvas hands its tiles to, and the tiles they have.
@@ -256,9 +267,11 @@ pub struct Canvas {
     pending: Option<(Duration, usize)>,
     /// The last frame's time apart from tile work, if told.
     rest: Option<Duration>,
-    /// The last frame's own tile work on the UI thread (painting tiles'
-    /// items), which [`Canvas::note_rest_of_frame`]'s time includes.
+    /// The last frame's own tile work on the UI thread (building and
+    /// waiting), which [`Canvas::note_rest_of_frame`]'s time includes.
     last_tile_work: Duration,
+    /// How long a frame waits at most for tiles nothing stands in for.
+    blank_wait: Duration,
     /// A tile's fixed cost, in units.
     tile_units: usize,
     /// Renders tiles off the UI thread, if set.
@@ -295,6 +308,7 @@ impl Canvas {
             pending: None,
             rest: None,
             last_tile_work: Duration::ZERO,
+            blank_wait: BLANK_WAIT,
             tile_units: TILE_UNITS,
             workers: None,
             capacity: 1_000,
@@ -334,6 +348,15 @@ impl Canvas {
         self
     }
 
+    /// Sets how long a frame waits at most for the tiles it hands to the
+    /// workers that nothing can stand in for (default 4 ms, and never past
+    /// what the rest of the frame leaves of 12 ms). Zero shows them blank
+    /// until a later frame.
+    pub fn with_blank_wait(mut self, wait: Duration) -> Self {
+        self.blank_wait = wait;
+        self
+    }
+
     /// Tiles the workers are rendering.
     pub fn in_flight(&self) -> usize {
         self.workers
@@ -369,7 +392,7 @@ impl Canvas {
     /// thread (painting, encoding and submitting it), so that later
     /// frames' tile work fits in what the rest of a frame leaves: a big
     /// window's frame leaves less. The canvas's own share of it (painting
-    /// tiles' items) doesn't count.
+    /// tiles' items, waiting for workers) doesn't count.
     pub fn note_rest_of_frame(&mut self, frame: Duration) {
         self.rest = Some(frame.saturating_sub(self.last_tile_work));
     }
@@ -494,46 +517,82 @@ impl Canvas {
     /// Takes the tiles the workers finished: they are uploaded with this
     /// frame's scene.
     fn receive(&mut self, scene: &mut Scene, stats: &mut CanvasStats) {
-        let Some(workers) = &mut self.workers else {
-            return;
-        };
-        while let Ok(done) = workers.done.try_recv() {
-            let Some(flight) = workers.flights.remove(&done.key) else {
-                continue;
-            };
-            if flight.tag != done.tag {
-                workers.flights.insert(done.key, flight);
-                continue;
-            }
-            stats.worker_time += done.took;
-            let old = self.tiles.get(&done.key).and_then(|tile| tile.texture);
-            let texture = match done.pixmap {
-                Some(pixmap) => {
-                    let texture = old.unwrap_or_else(TextureKey::unique);
-                    scene.upload_texture(texture, pixmap);
-                    stats.arrived += 1;
-                    self.last_rendered.push(done.key);
-                    Some(texture)
-                }
-                // Empty rather than tried again in every frame; a change
-                // to its items tries again.
-                None => {
-                    if let Some(old) = old {
-                        scene.free_texture(old);
-                    }
-                    stats.failed += 1;
-                    None
-                }
-            };
-            self.tiles.insert(
-                done.key,
-                Tile {
-                    texture,
-                    stale: flight.stale && texture.is_some(),
-                    used: self.frame,
-                },
-            );
+        while let Some(done) = self
+            .workers
+            .as_ref()
+            .and_then(|workers| workers.done.try_recv().ok())
+        {
+            self.accept(done, scene, stats);
         }
+    }
+
+    /// Waits until `deadline` at most for the tiles in `awaited` to come
+    /// back from the workers, taking the others that come meanwhile.
+    fn wait_for(
+        &mut self,
+        awaited: &mut HashSet<TileKey>,
+        deadline: Instant,
+        scene: &mut Scene,
+        stats: &mut CanvasStats,
+    ) {
+        while !awaited.is_empty() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Some(done) = self
+                .workers
+                .as_ref()
+                .and_then(|workers| workers.done.recv_timeout(left).ok())
+            else {
+                return;
+            };
+            let key = done.key;
+            if self.accept(done, scene, stats) {
+                awaited.remove(&key);
+            }
+        }
+    }
+
+    /// Takes a tile back from the workers and uploads it, unless it is an
+    /// earlier render's (`false`).
+    fn accept(&mut self, done: Done, scene: &mut Scene, stats: &mut CanvasStats) -> bool {
+        let Some(workers) = &mut self.workers else {
+            return false;
+        };
+        let Some(flight) = workers.flights.remove(&done.key) else {
+            return false;
+        };
+        if flight.tag != done.tag {
+            workers.flights.insert(done.key, flight);
+            return false;
+        }
+        stats.worker_time += done.took;
+        let old = self.tiles.get(&done.key).and_then(|tile| tile.texture);
+        let texture = match done.pixmap {
+            Some(pixmap) => {
+                let texture = old.unwrap_or_else(TextureKey::unique);
+                scene.upload_texture(texture, pixmap);
+                stats.arrived += 1;
+                self.last_rendered.push(done.key);
+                Some(texture)
+            }
+            // Empty rather than tried again in every frame; a change
+            // to its items tries again.
+            None => {
+                if let Some(old) = old {
+                    scene.free_texture(old);
+                }
+                stats.failed += 1;
+                None
+            }
+        };
+        self.tiles.insert(
+            done.key,
+            Tile {
+                texture,
+                stale: flight.stale && texture.is_some(),
+                used: self.frame,
+            },
+        );
+        true
     }
 
     /// The items touching `area`, bottom first.
@@ -693,7 +752,9 @@ impl Canvas {
         // aren't looked up).
         let render_budget = self.frame_render_budget();
         let mut spent = false;
-        for (_, key) in ranked {
+        // Handed to the workers with nothing to stand in for them.
+        let mut blanks: HashSet<TileKey> = HashSet::new();
+        for (rank, key) in ranked {
             // A tile the workers have shows a stand-in until it is back;
             // when they have enough to do, the rest wait for the next frame.
             let waiting = self.workers.as_ref().is_some_and(|workers| {
@@ -736,6 +797,9 @@ impl Canvas {
                     reply: workers.reply.clone(),
                 });
                 workers.flights.insert(key, Flight { tag, stale: false });
+                if rank == 0 {
+                    blanks.insert(key);
+                }
                 owed.push(key);
                 continue;
             }
@@ -757,7 +821,34 @@ impl Canvas {
             self.last_rendered.push(key);
         }
         stats.build = build_start.elapsed();
-        self.last_tile_work = stats.build;
+        if !blanks.is_empty() {
+            // They would be blank until a later frame: wait a little for
+            // them instead, within what the rest of the frame leaves.
+            let left = self.rest.map_or(self.blank_wait, |rest| {
+                self.blank_wait
+                    .min(FRAME_TARGET.saturating_sub(rest + stats.build))
+            });
+            let waiting = Instant::now();
+            if !left.is_zero() {
+                self.wait_for(&mut blanks, waiting + left, scene, &mut stats);
+            }
+            stats.waited = waiting.elapsed();
+            // Tiles back by now (these or others) are drawn as cached.
+            owed.retain(|key| {
+                let out = self
+                    .workers
+                    .as_ref()
+                    .is_some_and(|workers| workers.flights.contains_key(key));
+                match self.tiles.get(key) {
+                    Some(tile) if !out && !tile.stale => {
+                        draws.push((*key, tile.texture));
+                        false
+                    }
+                    _ => true,
+                }
+            });
+        }
+        self.last_tile_work = stats.build + stats.waited;
         stats.owed = owed.len();
         self.pending = (stats.rendered > 0).then_some((stats.build, units));
         if self.workers.is_some() {
@@ -799,7 +890,10 @@ impl Canvas {
         // count as drawn, so this frame's eviction keeps them.
         for key in &owed {
             let shown = match self.stand_in(*key) {
-                None => continue,
+                None => {
+                    stats.blank += 1;
+                    continue;
+                }
                 Some(StandIn::Stale) => vec![*key],
                 Some(StandIn::Coarser(parent)) => vec![parent],
                 Some(StandIn::Finer(children)) => children,
@@ -1373,26 +1467,28 @@ mod tests {
         let mut alive = HashSet::new();
         let frames = frames_until_settled(&mut canvas, &view, &mut boxes, &mut alive);
         let first = &frames[0];
+        // Some may be back within the frame's wait for blank tiles.
         assert!(
-            first.rendered > 0 && first.in_flight == first.rendered,
+            first.rendered > 0 && first.arrived + first.in_flight == first.rendered,
             "{first:?}"
         );
         assert_eq!(first.reused, 0);
         let arrived: usize = frames.iter().map(|stats| stats.arrived).sum();
         let handed: usize = frames.iter().map(|stats| stats.rendered).sum();
-        let last = frames.last().map(|stats| stats.reused);
         assert_eq!(arrived, handed);
-        assert_eq!(last, Some(first.visible));
         assert_eq!(canvas.in_flight(), 0);
-        // Nothing changed: nothing more to do.
+        // Nothing changed: nothing more to do, all from the cache.
         let again = canvas.frame(&mut Scene::new(), &view, Instant::now(), &mut boxes);
         assert_eq!((again.rendered, again.owed), (0, 0));
+        assert_eq!(again.reused, first.visible);
     }
 
     #[test]
     fn frames_say_how_many_tiles_the_workers_will_send() {
         let (canvas, mut boxes) = board(2_000);
-        let mut canvas = canvas.with_workers(TileWorkers::new(2, CpuMode::Deterministic));
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(2, CpuMode::Deterministic))
+            .with_blank_wait(Duration::ZERO);
         let view = viewport(Point::ZERO, 1.0);
         let expected = |scene: &Scene| {
             scene
@@ -1406,14 +1502,57 @@ mod tests {
         };
         let mut scene = Scene::new();
         let first = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
-        // Nothing is cached yet: every owed tile needs room.
+        // Nothing is cached yet: every owed tile is blank and needs room.
         assert!(first.owed > 0);
+        assert_eq!(first.blank, first.owed);
         assert_eq!(expected(&scene), vec![first.owed]);
+        assert_eq!(first.arrived, 0);
         frames_until_settled(&mut canvas, &view, &mut boxes, &mut HashSet::new());
         let mut scene = Scene::new();
         let settled = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
-        assert_eq!(settled.owed, 0);
+        assert_eq!((settled.owed, settled.blank), (0, 0));
         assert!(expected(&scene).is_empty());
+    }
+
+    #[test]
+    fn a_frame_waits_for_the_tiles_nothing_stands_in_for() {
+        let (canvas, mut boxes) = board(2_000);
+        // Enough threads for every visible tile at once.
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(4, CpuMode::Deterministic))
+            .with_blank_wait(Duration::from_secs(60))
+            .with_render_budget(UNLIMITED);
+        let view = viewport(Point::ZERO, 1.0);
+        let mut scene = Scene::new();
+        let first = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
+        // Everything came back within the frame and is drawn from it.
+        assert!(first.rendered > 0);
+        assert_eq!(
+            (first.arrived, first.rendered, first.owed, first.blank),
+            (first.visible, first.visible, 0, 0)
+        );
+        assert!(first.waited > Duration::ZERO);
+        let uploaded: HashSet<TextureKey> = scene
+            .texture_work()
+            .iter()
+            .filter_map(|work| match work {
+                TextureWork::Upload { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        let drawn: Vec<TextureKey> = scene
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                Command::DrawTexture { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn.len(), first.rendered);
+        assert!(drawn.iter().all(|key| uploaded.contains(key)));
+        // Told how long the frame took, the canvas leaves out its own part.
+        canvas.note_rest_of_frame(first.build + first.waited + Duration::from_millis(3));
+        assert_eq!(canvas.rest, Some(Duration::from_millis(3)));
     }
 
     #[test]
