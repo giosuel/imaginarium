@@ -19,11 +19,16 @@
 //! - [`CpuRenderer`]: `vello_cpu` into a pixmap. [`CpuMode::Deterministic`]
 //!   gives the same bytes on every machine, for golden-image tests in CI,
 //!   which has no GPU.
+//! - [`canvas`]: items on an infinite canvas, drawn through a cache of
+//!   tiles per zoom level. [`TileWorkers`] render its tiles with
+//!   `vello_cpu` on threads of their own, and frames upload them
+//!   ([`Scene::upload_texture`]).
 //! - [`kurbo`] (geometry) and [`peniko`] (colors, brushes): Vello's own
 //!   types, re-exported, so callers use exactly the versions Vello uses.
 //!
 //! # Not here (yet)
-//! - Display lists and the tile cache of the canvas (M2.5).
+//! - Retained display lists per item: the canvas asks its content to paint
+//!   an item when a tile needs it.
 //! - Windows and input: `imaginarium-ui` creates the window and hands only
 //!   its handle here, so this crate doesn't depend on `winit`.
 
@@ -34,6 +39,7 @@ mod gpu;
 mod gpu_timer;
 mod scene;
 mod tile_pages;
+mod tile_workers;
 
 pub use cpu::{CpuMode, CpuRenderer};
 pub use error::RenderError;
@@ -43,5 +49,6 @@ pub use gpu::{
 };
 pub use gpu_timer::GpuFrameTime;
 pub use scene::{GlyphRun, Scene, TextureKey};
+pub use tile_workers::TileWorkers;
 pub use vello_common::{kurbo, peniko};
 pub use vello_cpu::{Glyph, Pixmap};
