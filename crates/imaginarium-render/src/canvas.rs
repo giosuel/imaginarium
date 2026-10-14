@@ -58,6 +58,15 @@ const BLANK_WAIT: Duration = Duration::from_millis(4);
 /// The time per unit before any tile work was measured.
 const INITIAL_UNIT_COST: Duration = Duration::from_micros(12);
 
+/// With workers: tiles uploaded per frame at most, whatever their measured
+/// cost says (4 MiB of pixels). A burst costs more per tile than the
+/// average: in the gate's run 3 on an Intel GPU, a frame's 57 uploads took
+/// 0.23 ms each, other frames' 0.08 ms.
+const MAX_UPLOADS: usize = 16;
+
+/// With workers: the time to upload a tile before any upload was measured.
+const INITIAL_UPLOAD_COST: Duration = Duration::from_micros(100);
+
 /// An item on the canvas, chosen by the caller (a node id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub u64);
@@ -216,9 +225,12 @@ pub struct CanvasStats {
     pub build: Duration,
     /// With workers: tiles that came back and are uploaded with this frame.
     pub arrived: usize,
-    /// With workers: tiles still being rendered after this frame (some of
-    /// `owed`).
+    /// With workers: tiles still with them after this frame, or back and
+    /// waiting to be uploaded (some of `owed`).
     pub in_flight: usize,
+    /// With workers: tiles back from them that wait for a later frame's
+    /// uploads (some of `in_flight`).
+    pub parked: usize,
     /// With workers: their time for the tiles that `arrived`.
     pub worker_time: Duration,
     /// With workers: tiles they failed to render, left empty.
@@ -234,7 +246,11 @@ struct Workers {
     pool: TileWorkers,
     reply: mpsc::Sender<Done>,
     done: mpsc::Receiver<Done>,
+    /// Tiles being rendered, or back and waiting in `parked`.
     flights: HashMap<TileKey, Flight>,
+    /// Tiles back from the workers that a frame had no time to upload, in
+    /// the order they came.
+    parked: Vec<Done>,
     next_tag: u64,
 }
 
@@ -244,6 +260,20 @@ struct Flight {
     tag: u64,
     /// Its items changed since it was handed over: it comes back stale.
     stale: bool,
+}
+
+impl Workers {
+    /// Keeps a tile that came back for a frame to upload, unless it is an
+    /// earlier render's or no longer wanted.
+    fn park(&mut self, done: Done) {
+        if self
+            .flights
+            .get(&done.key)
+            .is_some_and(|flight| flight.tag == done.tag)
+        {
+            self.parked.push(done);
+        }
+    }
 }
 
 /// Items on an infinite canvas, drawn through a tile cache.
@@ -265,6 +295,12 @@ pub struct Canvas {
     /// The last frame's tile work, until the renderer's time for it comes:
     /// building time and units.
     pending: Option<(Duration, usize)>,
+    /// With workers: the estimated time to upload a tile, from
+    /// [`Canvas::note_render_time`].
+    upload_cost: Duration,
+    /// With workers: the tiles the last frame uploaded, until the
+    /// renderer's time for them comes.
+    last_uploads: usize,
     /// The last frame's time apart from tile work, if told.
     rest: Option<Duration>,
     /// The last frame's own tile work on the UI thread (building and
@@ -306,6 +342,8 @@ impl Canvas {
             render_budget: RENDER_BUDGET,
             unit_cost: INITIAL_UNIT_COST,
             pending: None,
+            upload_cost: INITIAL_UPLOAD_COST,
+            last_uploads: 0,
             rest: None,
             last_tile_work: Duration::ZERO,
             blank_wait: BLANK_WAIT,
@@ -331,8 +369,9 @@ impl Canvas {
     /// Renders tiles on `workers` instead of in the frame: a frame paints a
     /// tile's items and hands it over, and shows stand-ins until it comes
     /// back (usually by the next frame) to be uploaded. Rendering tiles
-    /// then takes nothing from the frame. Without workers (none could
-    /// start), tiles render in the frame.
+    /// then takes nothing from the frame; uploading them takes up to half
+    /// its tile time (16 tiles at most), and the others wait for the next.
+    /// Without workers (none could start), tiles render in the frame.
     pub fn with_workers(mut self, workers: TileWorkers) -> Self {
         if workers.threads() > 0 {
             let (reply, done) = mpsc::channel();
@@ -341,6 +380,7 @@ impl Canvas {
                 reply,
                 done,
                 flights: HashMap::new(),
+                parked: Vec::new(),
                 next_tag: 0,
             });
             self.tile_units = WORKER_TILE_UNITS;
@@ -357,7 +397,8 @@ impl Canvas {
         self
     }
 
-    /// Tiles the workers are rendering.
+    /// Tiles the workers are rendering, or rendered and a frame is yet to
+    /// upload.
     pub fn in_flight(&self) -> usize {
         self.workers
             .as_ref()
@@ -372,17 +413,29 @@ impl Canvas {
     }
 
     /// Tells the canvas how long the renderer took for the tile renders of
-    /// the frame it drew last ([`crate::FrameTiming::textures`]), so it can
-    /// keep later frames' tile work within the time budget. Without it, the
-    /// canvas assumes a mid-range laptop.
+    /// the frame it drew last ([`crate::FrameTiming::textures`]; with
+    /// workers, uploading the tiles that came back), so it can keep later
+    /// frames' tile work within the time budget. Without it, the canvas
+    /// assumes a mid-range laptop.
     pub fn note_render_time(&mut self, renderer: Duration) {
+        let uploads = std::mem::take(&mut self.last_uploads);
+        if self.workers.is_some() && uploads > 0 {
+            let sample = renderer / uploads as u32;
+            self.upload_cost = (self.upload_cost + sample) / 2;
+        }
         let Some((build, units)) = self.pending.take() else {
             return;
         };
         if units == 0 {
             return;
         }
-        let sample = (build + renderer) / units as u32;
+        // With workers the renderer's time is the uploads, measured apart.
+        let work = if self.workers.is_some() {
+            build
+        } else {
+            build + renderer
+        };
+        let sample = work / units as u32;
         // Halfway to the new sample: quick to follow a change of content,
         // steady across frames of similar tiles.
         self.unit_cost = (self.unit_cost + sample) / 2;
@@ -514,24 +567,63 @@ impl Canvas {
             .flat_map(|workers| workers.flights.iter_mut())
     }
 
-    /// Takes the tiles the workers finished: they are uploaded with this
-    /// frame's scene.
-    fn receive(&mut self, scene: &mut Scene, stats: &mut CanvasStats) {
-        while let Some(done) = self
-            .workers
-            .as_ref()
-            .and_then(|workers| workers.done.try_recv().ok())
-        {
-            self.accept(done, scene, stats);
+    /// Takes the tiles the workers finished, to upload as many as a frame
+    /// has time for ([`Canvas::upload_parked`]).
+    fn receive(&mut self) {
+        let Some(workers) = &mut self.workers else {
+            return;
+        };
+        while let Ok(done) = workers.done.try_recv() {
+            workers.park(done);
+        }
+    }
+
+    /// How many tiles uploading takes about `time`: at least one, and at
+    /// most [`MAX_UPLOADS`].
+    fn uploads_within(&self, time: Duration) -> usize {
+        let fits = time.as_nanos() / self.upload_cost.as_nanos().max(1);
+        usize::try_from(fits)
+            .unwrap_or(usize::MAX)
+            .clamp(1, MAX_UPLOADS)
+    }
+
+    /// Uploads `count` of the parked tiles at most with this frame's
+    /// scene: those of `level` first, then the others in the order they
+    /// came.
+    fn upload_parked(
+        &mut self,
+        level: i32,
+        count: usize,
+        scene: &mut Scene,
+        stats: &mut CanvasStats,
+    ) {
+        let Some(workers) = &mut self.workers else {
+            return;
+        };
+        let mut parked = std::mem::take(&mut workers.parked);
+        parked.sort_by_key(|done| done.key.level != level);
+        let start = stats.arrived;
+        let mut rest = Vec::new();
+        for done in parked {
+            if stats.arrived - start < count {
+                self.accept(done, scene, stats);
+            } else {
+                rest.push(done);
+            }
+        }
+        if let Some(workers) = &mut self.workers {
+            workers.parked = rest;
         }
     }
 
     /// Waits until `deadline` at most for the tiles in `awaited` to come
-    /// back from the workers, taking the others that come meanwhile.
+    /// back from the workers and uploads them. Each upload's estimated time
+    /// comes off the wait, since the frame spends it too. The others that
+    /// come meanwhile are parked.
     fn wait_for(
         &mut self,
         awaited: &mut HashSet<TileKey>,
-        deadline: Instant,
+        mut deadline: Instant,
         scene: &mut Scene,
         stats: &mut CanvasStats,
     ) {
@@ -545,8 +637,20 @@ impl Canvas {
                 return;
             };
             let key = done.key;
+            if !awaited.contains(&key) {
+                if let Some(workers) = &mut self.workers {
+                    workers.park(done);
+                }
+                continue;
+            }
+            let uploads = stats.arrived;
             if self.accept(done, scene, stats) {
                 awaited.remove(&key);
+            }
+            if stats.arrived > uploads {
+                deadline = deadline
+                    .checked_sub(self.upload_cost)
+                    .unwrap_or_else(Instant::now);
             }
         }
     }
@@ -695,7 +799,12 @@ impl Canvas {
             ..CanvasStats::default()
         };
         self.last_rendered.clear();
-        self.receive(scene, &mut stats);
+        // Uploads first, as they show finished work, in half the frame's
+        // tile time at most, so that tiles still get built.
+        let budget = self.frame_render_budget();
+        self.receive();
+        self.upload_parked(level, self.uploads_within(budget / 2), scene, &mut stats);
+        let uploading = self.upload_cost * stats.arrived as u32;
         let build_start = Instant::now();
         let mut draws: Vec<(TileKey, Option<TextureKey>)> = Vec::with_capacity(keys.len());
         let mut invalid: Vec<TileKey> = Vec::new();
@@ -750,7 +859,7 @@ impl Canvas {
         let mut units = 0;
         // Once a tile doesn't fit, the rest wait too (and their items
         // aren't looked up).
-        let render_budget = self.frame_render_budget();
+        let render_budget = budget.saturating_sub(uploading);
         let mut spent = false;
         // Handed to the workers with nothing to stand in for them.
         let mut blanks: HashSet<TileKey> = HashSet::new();
@@ -830,29 +939,38 @@ impl Canvas {
             // them instead, within what the rest of the frame leaves.
             let left = self.rest.map_or(self.blank_wait, |rest| {
                 self.blank_wait
-                    .min(FRAME_TARGET.saturating_sub(rest + stats.build))
+                    .min(FRAME_TARGET.saturating_sub(rest + uploading + stats.build))
             });
             let waiting = Instant::now();
             if !left.is_zero() {
                 self.wait_for(&mut blanks, waiting + left, scene, &mut stats);
             }
             stats.waited = waiting.elapsed();
-            // Tiles back by now (these or others) are drawn as cached.
-            owed.retain(|key| {
-                let out = self
-                    .workers
-                    .as_ref()
-                    .is_some_and(|workers| workers.flights.contains_key(key));
-                match self.tiles.get(key) {
-                    Some(tile) if !out && !tile.stale => {
-                        draws.push((*key, tile.texture));
-                        false
-                    }
-                    _ => true,
-                }
-            });
         }
+        // Time left over: more of the tiles that came back.
+        let used = self.upload_cost * stats.arrived as u32 + stats.build + stats.waited;
+        if budget > used && stats.arrived < MAX_UPLOADS {
+            let more = self
+                .uploads_within(budget - used)
+                .min(MAX_UPLOADS - stats.arrived);
+            self.upload_parked(level, more, scene, &mut stats);
+        }
+        // Tiles back by now are drawn as cached.
+        owed.retain(|key| {
+            let out = self
+                .workers
+                .as_ref()
+                .is_some_and(|workers| workers.flights.contains_key(key));
+            match self.tiles.get(key) {
+                Some(tile) if !out && !tile.stale => {
+                    draws.push((*key, tile.texture));
+                    false
+                }
+                _ => true,
+            }
+        });
         self.last_tile_work = stats.build + stats.waited;
+        self.last_uploads = stats.arrived;
         stats.owed = owed.len();
         self.pending = (stats.rendered > 0).then_some((stats.build, units));
         if self.workers.is_some() {
@@ -930,6 +1048,10 @@ impl Canvas {
         stats.evicted = self.evict(scene);
         stats.cached = self.tiles.len();
         stats.in_flight = self.in_flight();
+        stats.parked = self
+            .workers
+            .as_ref()
+            .map_or(0, |workers| workers.parked.len());
         stats
     }
 
@@ -1418,9 +1540,38 @@ mod tests {
         items
     }
 
+    /// A frame with workers, keeping track of which textures exist in
+    /// `alive`: every texture it draws must have been uploaded by then.
+    fn tracked_frame(
+        canvas: &mut Canvas,
+        view: &Viewport,
+        boxes: &mut Boxes,
+        alive: &mut HashSet<TextureKey>,
+    ) -> CanvasStats {
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, view, Instant::now(), boxes);
+        assert_eq!(scene.texture_renders(), 0, "nothing renders in the frame");
+        for work in scene.texture_work() {
+            match work {
+                TextureWork::Upload { key, .. } => {
+                    alive.insert(*key);
+                }
+                TextureWork::Free(key) => {
+                    alive.remove(key);
+                }
+                TextureWork::Render { .. } | TextureWork::Expect(_) => {}
+            }
+        }
+        for command in scene.commands() {
+            if let Command::DrawTexture { key, .. } = command {
+                assert!(alive.contains(key), "{key:?} is drawn but wasn't uploaded");
+            }
+        }
+        stats
+    }
+
     /// Frames until no tile is owed (the workers have sent them all back),
-    /// keeping track of which textures exist: every texture a frame draws
-    /// must have been uploaded by then. Returns the frames' stats.
+    /// as [`tracked_frame`]s. Returns the frames' stats.
     fn frames_until_settled(
         canvas: &mut Canvas,
         view: &Viewport,
@@ -1430,25 +1581,7 @@ mod tests {
         let started = Instant::now();
         let mut frames = Vec::new();
         loop {
-            let mut scene = Scene::new();
-            let stats = canvas.frame(&mut scene, view, Instant::now(), boxes);
-            assert_eq!(scene.texture_renders(), 0, "nothing renders in the frame");
-            for work in scene.texture_work() {
-                match work {
-                    TextureWork::Upload { key, .. } => {
-                        alive.insert(*key);
-                    }
-                    TextureWork::Free(key) => {
-                        alive.remove(key);
-                    }
-                    TextureWork::Render { .. } | TextureWork::Expect(_) => {}
-                }
-            }
-            for command in scene.commands() {
-                if let Command::DrawTexture { key, .. } = command {
-                    assert!(alive.contains(key), "{key:?} is drawn but wasn't uploaded");
-                }
-            }
+            let stats = tracked_frame(canvas, view, boxes, alive);
             let settled = stats.owed == 0;
             frames.push(stats);
             if settled {
@@ -1578,6 +1711,46 @@ mod tests {
             screen: Rect::new(0.0, 0.0, 2560.0, 1600.0),
             ..viewport(Point::ZERO, 1.0)
         }
+    }
+
+    #[test]
+    fn frames_upload_a_few_tiles_each_and_the_others_wait() {
+        let (canvas, mut boxes) = board(5_000);
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(4, CpuMode::Deterministic))
+            .with_blank_wait(Duration::ZERO);
+        let view = big_viewport();
+        let mut alive = HashSet::new();
+        let first = tracked_frame(&mut canvas, &view, &mut boxes, &mut alive);
+        assert!(first.rendered > MAX_UPLOADS, "{first:?}");
+        // Every tile is back by now; a frame takes what it has time for.
+        std::thread::sleep(Duration::from_millis(200));
+        let next = tracked_frame(&mut canvas, &view, &mut boxes, &mut alive);
+        assert!(next.arrived >= 1 && next.arrived <= MAX_UPLOADS, "{next:?}");
+        assert!(next.parked > 0 && next.parked <= next.in_flight, "{next:?}");
+        let frames = frames_until_settled(&mut canvas, &view, &mut boxes, &mut alive);
+        assert!(frames.iter().all(|stats| stats.arrived <= MAX_UPLOADS));
+        assert_eq!(canvas.in_flight(), 0);
+    }
+
+    #[test]
+    fn uploads_follow_what_they_cost() {
+        let (canvas, mut boxes) = board(5_000);
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(4, CpuMode::Deterministic))
+            .with_blank_wait(Duration::ZERO)
+            .with_render_budget(RENDER_BUDGET);
+        let view = big_viewport();
+        let now = Instant::now();
+        canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        std::thread::sleep(Duration::from_millis(200));
+        let cheap = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        assert!(cheap.arrived > 4, "{cheap:?}");
+        // The renderer took 5 ms for each: about one per frame from now.
+        canvas.note_render_time(Duration::from_millis(5) * cheap.arrived as u32);
+        std::thread::sleep(Duration::from_millis(200));
+        let dear = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        assert!(dear.arrived >= 1 && dear.arrived <= 2, "{dear:?}");
     }
 
     #[test]
