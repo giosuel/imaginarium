@@ -154,6 +154,11 @@ pub struct Scene {
     open_layers: u32,
     /// The transform in effect at the end, restored after [`Scene::append`].
     current: Affine,
+    /// Under every transform set while [`Scene::paint_with`] runs.
+    base: Affine,
+    /// The layers open when [`Scene::paint_with`] began, which a pop in it
+    /// can't end.
+    floor: u32,
 }
 
 impl Scene {
@@ -170,6 +175,8 @@ impl Scene {
         self.textures.clear();
         self.open_layers = 0;
         self.current = Affine::IDENTITY;
+        self.base = Affine::IDENTITY;
+        self.floor = 0;
     }
 
     /// The number of drawing commands.
@@ -184,8 +191,8 @@ impl Scene {
 
     /// Sets the transform for the commands that follow.
     pub fn set_transform(&mut self, transform: Affine) {
-        self.current = transform;
-        self.commands.push(Command::Transform(transform));
+        self.current = self.base * transform;
+        self.commands.push(Command::Transform(self.current));
     }
 
     /// Fills `shape` with `color`.
@@ -323,7 +330,7 @@ impl Scene {
     /// Ends the latest [`Scene::push_clip`] or [`Scene::push_opacity`].
     /// Extra pops are ignored.
     pub fn pop(&mut self) {
-        if self.open_layers > 0 {
+        if self.open_layers > self.floor {
             self.open_layers -= 1;
             self.commands.push(Command::Pop);
         }
@@ -332,6 +339,7 @@ impl Scene {
     /// Appends `other`'s commands, drawn with `transform` applied after
     /// their own (for composing widgets or tiles).
     pub fn append(&mut self, other: &Scene, transform: Affine) {
+        let transform = self.base * transform;
         // `other` starts with the identity transform.
         self.commands.push(Command::Transform(transform));
         let (glyph_base, coord_base) = (self.glyphs.len(), self.coords.len());
@@ -364,6 +372,43 @@ impl Scene {
             self.commands.push(Command::Pop);
         }
         self.commands.push(Command::Transform(self.current));
+    }
+
+    /// Lets `paint` draw into this scene with `transform` under all it
+    /// draws, as if it drew a scene of its own that is then appended with
+    /// `transform` ([`Scene::append`]), without the copy: its transforms
+    /// apply after `transform`, its pops can't end layers opened before,
+    /// and layers it leaves open close at its end.
+    ///
+    /// ```
+    /// use imaginarium_render::{Scene, kurbo::{Affine, Rect}, peniko::Color};
+    ///
+    /// let mut tile = Scene::new();
+    /// tile.paint_with(Affine::scale(2.0), |item| {
+    ///     item.push_clip(&Rect::new(0.0, 0.0, 10.0, 10.0));
+    ///     item.fill(&Rect::new(1.0, 1.0, 4.0, 4.0), Color::BLACK);
+    /// });
+    /// let mut item = Scene::new();
+    /// item.push_clip(&Rect::new(0.0, 0.0, 10.0, 10.0));
+    /// item.fill(&Rect::new(1.0, 1.0, 4.0, 4.0), Color::BLACK);
+    /// let mut appended = Scene::new();
+    /// appended.append(&item, Affine::scale(2.0));
+    /// assert_eq!(tile, appended);
+    /// ```
+    pub fn paint_with<R>(&mut self, transform: Affine, paint: impl FnOnce(&mut Self) -> R) -> R {
+        let (base, floor, current) = (self.base, self.floor, self.current);
+        self.base = base * transform;
+        self.floor = self.open_layers;
+        self.set_transform(Affine::IDENTITY);
+        let painted = paint(self);
+        while self.open_layers > self.floor {
+            self.pop();
+        }
+        self.base = base;
+        self.floor = floor;
+        self.current = current;
+        self.commands.push(Command::Transform(current));
+        painted
     }
 
     pub(crate) fn commands(&self) -> &[Command] {
@@ -660,3 +705,68 @@ macro_rules! impl_sink {
 
 impl_sink!(vello_cpu::RenderContext, vello_cpu::Resources);
 impl_sink!(vello_gpu::Scene, vello_gpu::Resources);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An item that sets its own transform, draws glyphs, pops more than
+    /// it pushed and leaves a layer open.
+    fn item(scene: &mut Scene, font: &FontData) {
+        scene.pop();
+        scene.push_opacity(0.5);
+        scene.fill(&Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+        scene.set_transform(Affine::translate((3.0, 1.0)));
+        scene.push_clip(&Rect::new(0.0, 0.0, 2.0, 2.0));
+        scene.pop();
+        scene.glyphs(
+            GlyphRun {
+                font,
+                size: 12.0,
+                coords: &[1, 2],
+                hint: false,
+                color: Color::WHITE,
+            },
+            [Glyph {
+                id: 7,
+                x: 1.0,
+                y: 2.0,
+            }],
+        );
+    }
+
+    /// A scene with a layer open and a transform of its own.
+    fn started() -> Scene {
+        let mut scene = Scene::new();
+        scene.push_clip(&Rect::new(0.0, 0.0, 100.0, 100.0));
+        scene.set_transform(Affine::rotate(0.1));
+        scene.fill(&Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        scene
+    }
+
+    #[test]
+    fn painting_in_place_is_appending_without_the_copy() {
+        let font = FontData::new(vello_common::peniko::Blob::new(Arc::new([0u8; 4])), 0);
+        let transform = Affine::scale(2.0) * Affine::translate((5.0, 0.0));
+        let mut drawn = Scene::new();
+        item(&mut drawn, &font);
+        let mut appended = started();
+        appended.append(&drawn, transform);
+        appended.append(&drawn, transform);
+        let mut painted = started();
+        painted.paint_with(transform, |scene| item(scene, &font));
+        painted.paint_with(transform, |scene| item(scene, &font));
+        assert_eq!(painted, appended);
+        assert_eq!(painted.open_layers, 1, "the outer clip is still open");
+        // Nested, the inner transform comes after the outer.
+        let mut nested = started();
+        nested.paint_with(Affine::scale(2.0), |scene| {
+            scene.paint_with(Affine::translate((5.0, 0.0)), |scene| item(scene, &font));
+        });
+        let mut inner = Scene::new();
+        inner.append(&drawn, Affine::translate((5.0, 0.0)));
+        let mut twice = started();
+        twice.append(&inner, Affine::scale(2.0));
+        assert_eq!(nested, twice);
+    }
+}

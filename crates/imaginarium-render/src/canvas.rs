@@ -714,9 +714,9 @@ impl Canvas {
                 -f64::from(key.y) * TILE_F,
             )) * Affine::scale(level_scale);
             for id in items {
-                let mut item_scene = Scene::new();
-                content.paint_item(id, &mut item_scene, level_scale);
-                tile_scene.append(&item_scene, to_tile);
+                tile_scene.paint_with(to_tile, |scene| {
+                    content.paint_item(id, scene, level_scale);
+                });
                 stats.items_painted += 1;
             }
             stats.rendered += 1;
@@ -837,9 +837,7 @@ impl Canvas {
         };
         scene.push_clip(&viewport.screen);
         for id in self.items_in(viewport.visible()) {
-            let mut item = Scene::new();
-            content.paint_item(id, &mut item, scale);
-            scene.append(&item, camera);
+            scene.paint_with(camera, |scene| content.paint_item(id, scene, scale));
             stats.items_painted += 1;
         }
         scene.set_transform(Affine::IDENTITY);
