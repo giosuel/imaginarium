@@ -213,10 +213,15 @@ and other levels comes later, on the same workers.
   it gets 12 ms minus that, between 1 and 6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
   the VM's software GPU it waits 12–14 ms for the frame). A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
   full 6 ms on top made the p99 17.5–17.8 ms.
-- **Stand-ins:** a stale copy, the nearest coarser cached level (zooming
-  in) or the nearest finer level's cached tiles (zooming out), clipped.
-  Tiles with no stand-in render first, then stale ones, then those another
-  level stands in for; nearest the middle first within each.
+- **Stand-ins:** a stale copy, or the nearest level whose cached tiles
+  cover the whole tile, coarser first (zooming in), then finer (zooming
+  out), clipped. Levels are half octaves apart, so a tile straddles up to
+  four of the next level's: a stand-in needs them all (since M2.8; before,
+  a coarser stand-in was the one tile at the corner, and the rest of the
+  tile stayed empty). Failing that, the nearest level with any covers
+  part of it, and the tile counts as blank. Blank tiles (in whole or in
+  part) render first, then stale ones, then those another level stands
+  in for; nearest the middle first within each.
 - **Empty tiles** need no texture: valid at once, nothing drawn, no budget.
 - **Tiles are textures:** `Scene::render_texture` renders a tile's scene
   into a texture the backend keeps, `Scene::draw_texture` draws it,

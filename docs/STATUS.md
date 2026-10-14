@@ -62,9 +62,18 @@ Last updated: 2026-10-14
   - the slowest frames' parts, parked tiles and the upload cost per tile
     in the report.
 
-  Next: the owner's sixth set of runs ("M2.8 run 4" in `m2-gate.md`),
+  The owner's fourth runs (2026-10-14, "M2.8 run 4"): **criterion 1
+  passes in all three** (iGPU zoom p99 13.5 ms). Zooming out is fine; while
+  zooming in, tiles or shapes "glitch in and out of existence" (what the
+  owner had called lag). The cause: a coarser stand-in drew only the tile
+  at the corner, though half-octave levels straddle up to four. Done
+  since: stand-ins cover the whole tile, or the tile counts as blank.
+
+  Next: the owner's seventh set of runs ("M2.8 run 5" in `m2-gate.md`),
   and the manual checklist for criteria 4 and 5 (not reported yet). If
-  they hold, M2.8 is done and M2.9 follows. For M3 (canvas): covering
+  shapes no longer disappear while zooming in, M2.8 is done and M2.9
+  follows. Rendering the next level ahead while zooming in only if still
+  needed (owner, 2026-10-14). For M3 (canvas): covering
   the fill as a board opens (the owner: maybe an animation; still
   similar in run 3, not the biggest deal), the cards board's slow first
   frame (52 ms, 39 of it in encode, on the iGPU), and a window-wide

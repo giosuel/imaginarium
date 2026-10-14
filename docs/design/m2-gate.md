@@ -613,6 +613,95 @@ manual checklist's items for criteria 4 and 5 (HiDPI, text, input
 method, screen reader), and watching: is zooming in on the shapes still
 laggy?
 
+### Results (2026-10-14, "M2.8 test 4 (5336189)")
+
+All three ran fullscreen at 3456×2160, with 8 tile threads. Times are in
+ms.
+
+| | iGPU | dGPU | iGPU, no vsync |
+|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **8.8** | 9.1 | 8.7 |
+| C1 shapes zoom, p99 (< 16) | **13.5** | 11.4 | 11.6 |
+| C1 zoom frames over 16 ms, of 240 | **1** | 0 | 1 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **1 / 2 / 0** | 0 / 1 / 0 | 0 / 0 / 0 |
+| C2 tiles per drag frame (≤ 4) | **3** | 3 | 3 |
+| C3 palette search, p95 (< 1) | **0.30** | 0.46 | 0.33 |
+| C6 cold start without the GPU's setup (< 400) | **387** | 205 | 269 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.3 % | 0 / 0 % |
+| GPU time per shapes pan frame, median | 8.4 | 1.0 | 8.5 |
+| Zoom: most uploads in a frame / slowest frame's uploads | **30 / 1.7** | 30 / 2.6 | 30 / 1.8 |
+| Zoom: upload per tile | **0.065** | 0.055 | 0.059 |
+| Zoom: tiles owed per frame, mean / parked at most | **18 / 48** | 17 / 48 | 17 / 48 |
+| Zoom: blank tiles / frames with any | **16 / 5** | 0 / 0 | 0 / 0 |
+| Cards board opening: covered / complete, frames | **26 / 29** | 25 / 27 | 20 / 22 |
+| The same in ms | **568 / 619** | 485 / 518 | 330 / 351 |
+| Peak memory (RSS), MB | 206 | 413 | 205 |
+
+- **Criterion 1 passes in all three runs.** On the iGPU the zoom's p99 is
+  13.5 ms (19.3 in run 3, 11.0 in run 2), with 2 intervals over 20 ms
+  (8 in run 3, 2 in run 2).
+  - The uploads stay small: 1.7 ms at most in a frame. The frames over
+    16 uploads (up to 30) are tiles nothing stood in for, which the
+    frame waited for (zooming out).
+  - Building stays within its budget: 6.1 ms at most (9.2 in run 3).
+  - The slowest zoom frame (19.2 ms on the iGPU, 18.9 without vsync,
+    both the 27th frame, zooming out) spent 10.5 ms in encode, with 102
+    tiles drawn by stand-ins. The next slowest are 12–14 ms.
+  - Tiles sharpen a little more slowly: 18 owed per frame on average
+    (15 in runs 2 and 3), and up to 48 back from the threads waiting to
+    be uploaded.
+- **Owner, watching:** zooming out is fine. Zooming in, "some tiles or
+  shapes glitch in and out of existence" (it isn't slow: the frames are
+  on time). Earlier runs' "a bit laggy" was the same thing.
+  - The cause: levels are half octaves apart (√2), so a tile straddles
+    up to four tiles of the next coarser level, but a tile waiting to be
+    rendered drew only the one at its top-left corner as its stand-in.
+    The rest of it stayed empty until it came back: strips of the screen
+    at each level switch zooming in, for a few frames. Zooming out, the
+    finer stand-ins already took every tile they touch. The report
+    didn't count these as blank. Run 4's upload cap kept tiles owed
+    longer, so the gaps lasted longer. Fixed since (run 5).
+- **The cards board now takes longer to cover the screen:** 26 frames
+  (568 ms) on the iGPU, against 16 (318 ms) in run 3. Its frames now
+  keep to their budget: run 3 built many tiles at once, in longer frames.
+  Some cards tiles cost a lot to paint the first time (text layout on
+  the UI thread): one frame built 12 tiles in 22.7 ms, as the clock
+  stops only between tiles. The board's first two frames take 89 and
+  29 ms (58 and 26 ms of it encode).
+- **One slow upload in the cards' pan**, in both iGPU runs at the same
+  frame (198): 20–28 tiles in 15 ms, against about 1 ms on the dGPU. No
+  page was made or coming then. Not yet explained.
+- **Cold start 387 ms on the iGPU**, close to the limit: likely the first
+  start after boot again (the Vulkan driver took 857 ms, the font list
+  201 ms against 115–176 in the others).
+- No word yet on the manual checklist (criteria 4 and 5).
+
+## M2.8 run 5: stand-ins that cover the whole tile
+
+What changed since run 4:
+- **A stand-in covers the whole tile**: the nearest level whose cached
+  tiles cover all of it, coarser first, then finer; all of them are
+  drawn. Failing that, the nearest level with any covers part of it,
+  and the tile counts as blank: it renders first and the frame waits
+  for it.
+- `tiles_blank` and `frames_with_blanks` now count those tiles too (the
+  gaps run 4 didn't count).
+
+On the VM (1920×1200, 1 tile thread), the zoom's encode is unchanged
+(1.28 ms on average); the VM keeps few tiles owed, so the next report's
+`slowest_frames` says what the extra stand-in draws cost on the laptop.
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+```
+
+Watching: do tiles or shapes still disappear while zooming in? If not,
+M2.8 is done (the owner, 2026-10-14: rendering the next level ahead only
+if still needed). And, in the same session if possible, the manual
+checklist's items for criteria 4 and 5.
+
 Results: to come.
 
 ## Decision (owner, 2026-10-13)
