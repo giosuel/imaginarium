@@ -754,6 +754,17 @@ impl Canvas {
         stats.build = build_start.elapsed();
         stats.owed = owed.len();
         self.pending = (stats.rendered > 0).then_some((stats.build, units));
+        if self.workers.is_some() {
+            // Each needs a texture once it is back: on the GPU, room for
+            // them is made meanwhile.
+            let new = owed
+                .iter()
+                .filter(|key| self.tiles.get(*key).and_then(|tile| tile.texture).is_none())
+                .count();
+            if new > 0 {
+                scene.expect_uploads(new);
+            }
+        }
 
         // Draw: device-pixel destinations, snapped, then in logical pixels.
         let to_device = |doc: Point| {
@@ -1090,7 +1101,9 @@ mod tests {
             .iter()
             .filter_map(|work| match work {
                 TextureWork::Free(key) => Some(*key),
-                TextureWork::Render { .. } | TextureWork::Upload { .. } => None,
+                TextureWork::Render { .. }
+                | TextureWork::Upload { .. }
+                | TextureWork::Expect(_) => None,
             })
             .collect();
         scene
@@ -1323,7 +1336,7 @@ mod tests {
                     TextureWork::Free(key) => {
                         alive.remove(key);
                     }
-                    TextureWork::Render { .. } => {}
+                    TextureWork::Render { .. } | TextureWork::Expect(_) => {}
                 }
             }
             for command in scene.commands() {
@@ -1367,6 +1380,33 @@ mod tests {
         // Nothing changed: nothing more to do.
         let again = canvas.frame(&mut Scene::new(), &view, Instant::now(), &mut boxes);
         assert_eq!((again.rendered, again.owed), (0, 0));
+    }
+
+    #[test]
+    fn frames_say_how_many_tiles_the_workers_will_send() {
+        let (canvas, mut boxes) = board(2_000);
+        let mut canvas = canvas.with_workers(TileWorkers::new(2, CpuMode::Deterministic));
+        let view = viewport(Point::ZERO, 1.0);
+        let expected = |scene: &Scene| {
+            scene
+                .texture_work()
+                .iter()
+                .filter_map(|work| match work {
+                    TextureWork::Expect(count) => Some(*count),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut scene = Scene::new();
+        let first = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
+        // Nothing is cached yet: every owed tile needs room.
+        assert!(first.owed > 0);
+        assert_eq!(expected(&scene), vec![first.owed]);
+        frames_until_settled(&mut canvas, &view, &mut boxes, &mut HashSet::new());
+        let mut scene = Scene::new();
+        let settled = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
+        assert_eq!(settled.owed, 0);
+        assert!(expected(&scene).is_empty());
     }
 
     #[test]
@@ -1505,6 +1545,7 @@ mod tests {
                                 TextureWork::Free(key) => {
                                     alive.remove(key);
                                 }
+                                TextureWork::Expect(_) => {}
                             }
                         }
                         for command in scene.commands() {

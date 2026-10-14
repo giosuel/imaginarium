@@ -97,6 +97,9 @@ pub(crate) enum TextureWork {
     },
     /// Releases texture `key`.
     Free(TextureKey),
+    /// About this many uploads of new canvas tiles are coming in the next
+    /// frames ([`Scene::expect_uploads`]).
+    Expect(usize),
 }
 
 /// A pixmap a scene shares; scenes compare it by identity.
@@ -257,6 +260,15 @@ impl Scene {
             key,
             pixmap: SharedPixmap(pixmap),
         });
+    }
+
+    /// Tells the renderer that about `count` uploads of new canvas tiles
+    /// (256² pixmaps, for textures that have none yet) are coming in the
+    /// next frames, so it can make room for them ahead: on the GPU, that
+    /// room takes a while to make. Say it again each frame with the number
+    /// still to come; it doesn't add up.
+    pub fn expect_uploads(&mut self, count: usize) {
+        self.textures.push(TextureWork::Expect(count));
     }
 
     /// Draws texture `key` (`width × height` texels) into `dest`, in the

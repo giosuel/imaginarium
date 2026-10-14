@@ -7,10 +7,12 @@
 //! driver backed only when a frame first used it. Uploaded tiles share
 //! slots of a few large textures instead. Pages are made ahead of need on a
 //! thread of their own and cleared there, so that work is done before a
-//! frame needs the page.
+//! frame needs the page: when the canvas hands tiles to its workers, it
+//! says how many will come ([`crate::Scene::expect_uploads`]).
 
 use std::collections::HashMap;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use vello_common::TextureId;
 use vello_common::geometry::RectU16;
@@ -24,6 +26,10 @@ const PAGE: u16 = 2048;
 pub(crate) const SLOT: u16 = 256;
 const SLOTS_PER_ROW: u16 = PAGE / SLOT;
 const SLOTS: u16 = SLOTS_PER_ROW * SLOTS_PER_ROW;
+
+/// How long an upload waits for a page on its way before making one
+/// itself (the page thread is gone).
+const PAGE_WAIT: Duration = Duration::from_millis(500);
 
 /// The pixel format of uploads: `vello_cpu`'s premultiplied RGBA.
 pub(crate) const UPLOAD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -70,8 +76,10 @@ pub(crate) struct TilePages {
 /// What a frame's uploads cost in pages.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PageStats {
-    /// Pages made during the frame because none was ready.
+    /// Pages the frame made, or waited for, because none was ready.
     pub(crate) made: u32,
+    /// Pages being made on their thread when the frame's uploads began.
+    pub(crate) coming: u32,
 }
 
 impl TilePages {
@@ -134,27 +142,47 @@ impl TilePages {
         }
     }
 
+    /// Makes room ahead for `count` uploads of tiles without a slot, and a
+    /// page more in reserve ([`crate::Scene::expect_uploads`]).
+    pub(crate) fn expect(&mut self, count: usize) {
+        self.make_ahead(pages_to_make(self.free.len(), self.coming, count));
+    }
+
+    /// Pages being made on their thread.
+    pub(crate) fn coming(&self) -> usize {
+        self.coming
+    }
+
     /// Writes `pixmap` ([`SLOT`]² pixels) into `key`'s slot, giving it one
-    /// first if it has none. `screen` is the window's size in pixels, for
-    /// the number of pages a screenful needs.
+    /// first if it has none.
     pub(crate) fn upload(
         &mut self,
         bindings: &mut vello_gpu::TextureBindings,
         key: TextureKey,
         pixmap: &Pixmap,
-        screen: (u32, u32),
         stats: &mut PageStats,
     ) -> Placed {
         let slot = match self.used.get(&key) {
             Some(slot) => *slot,
             None => {
-                if self.pages.is_empty() && self.coming == 0 {
-                    // The first upload: a screenful of pages, ahead.
-                    self.make_ahead(pages_for(screen).saturating_sub(1));
-                }
                 if self.free.is_empty() {
                     stats.made += 1;
-                    self.add(make_page(&self.device, &self.queue), bindings);
+                    // Waiting for a page on its way costs at most what
+                    // making another would, and doesn't make one too many.
+                    let coming = (self.coming > 0)
+                        .then(|| self.made.recv_timeout(PAGE_WAIT).ok())
+                        .flatten();
+                    let page = match coming {
+                        Some(page) => {
+                            self.coming -= 1;
+                            page
+                        }
+                        None => {
+                            self.coming = 0;
+                            make_page(&self.device, &self.queue)
+                        }
+                    };
+                    self.add(page, bindings);
                 }
                 let Some(slot) = self.free.pop() else {
                     unreachable!("a page was just added");
@@ -211,13 +239,12 @@ impl TilePages {
     }
 }
 
-/// The pages a screen of `width × height` pixels needs for its tiles, at
-/// most (tiles are up to √2 smaller than shown, and rows and columns at
-/// the edges are cut).
-fn pages_for((width, height): (u32, u32)) -> usize {
-    let across = |pixels: u32| (f64::from(pixels) / f64::from(SLOT) * 2f64.sqrt()).ceil() + 1.0;
-    let tiles = across(width) * across(height);
-    (tiles / f64::from(SLOTS)).ceil().max(1.0) as usize
+/// The pages to start making for `count` more uploads, with `free` slots
+/// and `coming` pages on their way: room for them all and a page more.
+fn pages_to_make(free: usize, coming: usize, count: usize) -> usize {
+    let slots = usize::from(SLOTS);
+    let room = free + coming * slots;
+    (count + slots).saturating_sub(room).div_ceil(slots)
 }
 
 /// A cleared page. Clearing it here makes the driver back it with memory
@@ -302,9 +329,18 @@ mod tests {
     }
 
     #[test]
-    fn a_screenful_of_pages_holds_its_tiles() {
-        assert_eq!(pages_for((1280, 800)), 1);
-        // The gate laptop's panel: 21 × 13 tiles at most.
-        assert_eq!(pages_for((3456, 2160)), 5);
+    fn expected_uploads_get_room_and_a_page_in_reserve() {
+        // Nothing yet: a screenful of the gate laptop's panel (21 × 13
+        // tiles at most) takes five pages, the last one in reserve.
+        assert_eq!(pages_to_make(0, 0, 273), 6);
+        assert_eq!(pages_to_make(0, 0, 228), 5);
+        assert_eq!(pages_to_make(0, 0, 1), 2);
+        // Said again the next frame, nothing more is made.
+        assert_eq!(pages_to_make(0, 5, 228), 0);
+        // A page came and 30 tiles went into it.
+        assert_eq!(pages_to_make(34, 4, 198), 0);
+        // Nothing coming: still a page in reserve.
+        assert_eq!(pages_to_make(64, 0, 0), 0);
+        assert_eq!(pages_to_make(63, 0, 0), 1);
     }
 }

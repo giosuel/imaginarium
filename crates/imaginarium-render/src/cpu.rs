@@ -144,6 +144,8 @@ impl CpuRenderer {
                 TextureWork::Upload { key, pixmap } => {
                     self.textures.insert(*key, Arc::clone(&pixmap.0));
                 }
+                // Pixmaps need no room made ahead.
+                TextureWork::Expect(_) => {}
             }
         }
         self.draw(scene, width, height, background)

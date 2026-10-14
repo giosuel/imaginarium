@@ -311,9 +311,12 @@ pub struct FrameTiming {
     pub textures_upload: Duration,
     /// Tile pages (shared textures for uploaded tiles) in use.
     pub tile_pages: u32,
-    /// Tile pages made during the frame because none was ready: each can
-    /// make the frame slow.
+    /// Tile pages the frame made, or waited for, because none was ready:
+    /// each can make the frame slow.
     pub tile_pages_made: u32,
+    /// Tile pages being made on their thread when the frame's texture work
+    /// began (whether a slow upload may have waited behind one).
+    pub tile_pages_coming: u32,
     /// Draws of textures that don't exist, skipped (a bug in their owner).
     pub missing_textures: u32,
     /// The GPU's time for an earlier frame, read back by now (with
@@ -497,8 +500,7 @@ impl Textures {
     /// Renders, uploads and frees textures as `work` says. Each render is a
     /// submission of its own: Vello rewrites its buffers between renders,
     /// so renders sharing one submission would see the last one's data.
-    /// Uploads go with the next submission. `screen` is the window's size,
-    /// for the tile pages a screenful needs.
+    /// Uploads go with the next submission.
     fn process(
         &mut self,
         gpu: &Gpu,
@@ -507,14 +509,15 @@ impl Textures {
         bitmap_fonts: &mut BitmapFonts,
         mut timer: Option<&mut GpuTimer>,
         glyph_atlas: bool,
-        screen: (u32, u32),
         work: &[TextureWork],
     ) -> Result<TextureStats, RenderError> {
         let mut stats = TextureStats::default();
         self.pages.receive(&mut self.bindings);
+        stats.pages.coming = u32::try_from(self.pages.coming()).unwrap_or(u32::MAX);
         for item in work {
             match item {
                 TextureWork::Free(key) => self.free(*key),
+                TextureWork::Expect(count) => self.pages.expect(*count),
                 TextureWork::Upload { key, pixmap } => {
                     let uploading = Instant::now();
                     let pixmap = &pixmap.0;
@@ -523,13 +526,9 @@ impl Textures {
                         self.free(*key);
                     } else if size == (SLOT, SLOT) {
                         self.drop_own(*key);
-                        let placed = self.pages.upload(
-                            &mut self.bindings,
-                            *key,
-                            pixmap,
-                            screen,
-                            &mut stats.pages,
-                        );
+                        let placed =
+                            self.pages
+                                .upload(&mut self.bindings, *key, pixmap, &mut stats.pages);
                         self.placed.insert(*key, placed);
                     } else {
                         self.pages.free(*key);
@@ -855,7 +854,6 @@ impl WindowRenderer {
             &mut self.bitmap_fonts,
             self.timer.as_mut(),
             glyph_atlas,
-            (self.config.width, self.config.height),
             scene.texture_work(),
         )?;
         let textured = Instant::now();
@@ -951,6 +949,7 @@ impl WindowRenderer {
             textures_upload: texture_stats.upload,
             tile_pages: u32::try_from(self.textures.pages.len()).unwrap_or(u32::MAX),
             tile_pages_made: texture_stats.pages.made,
+            tile_pages_coming: texture_stats.pages.coming,
             missing_textures,
             gpu,
         }))
@@ -1035,7 +1034,6 @@ impl OffscreenRenderer {
             &mut bitmap_fonts,
             None,
             false,
-            (u32::from(w), u32::from(h)),
             scene.texture_work(),
         )?;
         replay(

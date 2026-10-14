@@ -472,6 +472,46 @@ fn uploaded_textures_draw_like_rendered_ones() {
     assert!(share == 0.0, "GPU: {share} of pixels differ (max {max})");
 }
 
+/// Tiles announced ahead ([`Scene::expect_uploads`]) and more than a page
+/// of them: on the GPU the uploads wait for the pages being made, and
+/// every tile draws its own pixels.
+#[test]
+fn expected_tiles_fill_several_pages() {
+    const TILES: u16 = 80;
+    let color = |index: u16| {
+        let step = u8::try_from(index * 3).unwrap();
+        Color::from_rgba8(step, 255 - step, 128, 255)
+    };
+    // A 32-pixel cell per tile: each drawn at an eighth of its size.
+    let cell = |index: u16| {
+        let (x, y) = (f64::from(index % 10) * 32.0, f64::from(index / 10) * 32.0);
+        Rect::new(x, y, x + 32.0, y + 32.0)
+    };
+    let mut scene = Scene::new();
+    scene.expect_uploads(usize::from(TILES));
+    let mut direct = Scene::new();
+    for index in 0..TILES {
+        let key = TextureKey::unique();
+        scene.upload_texture(key, solid(256, 256, color(index)));
+        scene.draw_texture(key, 256, 256, cell(index));
+        direct.fill(&cell(index), color(index));
+    }
+    let expected = CpuRenderer::new(CpuMode::Deterministic).render(&direct, 320, 256, background());
+    let on_cpu = CpuRenderer::new(CpuMode::Deterministic).render(&scene, 320, 256, background());
+    let (max, share) = compare(&expected, &on_cpu, 2);
+    assert!(share == 0.0, "CPU: {share} of pixels differ (max {max})");
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
+        Err(err) => {
+            eprintln!("GPU part skipped: {err}");
+            return;
+        }
+    };
+    let on_gpu = gpu.render(&scene, 320, 256, background()).unwrap();
+    let (max, share) = compare(&expected, &on_gpu, 2);
+    assert!(share == 0.0, "GPU: {share} of pixels differ (max {max})");
+}
+
 /// A tile drawn scaled is filtered with its own texels only, not with its
 /// neighbours' in the GPU's shared page.
 #[test]
