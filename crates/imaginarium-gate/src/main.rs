@@ -225,6 +225,40 @@ struct Gate {
     gpu_times: std::collections::HashMap<u64, GpuFrameTime>,
     /// Why the frames during the idle phase were drawn.
     idle_causes: CauseCounts,
+    /// Every frame's interval and parts, for the run's longest gaps.
+    gaps: Vec<Gap>,
+}
+
+/// A frame of any phase: the time since the one before, and its parts.
+#[derive(Clone, Copy, Debug)]
+struct Gap {
+    phase: &'static str,
+    number: u64,
+    interval: Duration,
+    paint: Duration,
+    textures: Duration,
+    acquire: Duration,
+    encode: Duration,
+    submit: Duration,
+}
+
+impl Phase {
+    /// The phase's name in the report.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Pan(_) => "cards pan",
+            Self::Type(_) => "typing",
+            Self::Palette(_) => "palette",
+            Self::Shapes(ShapePhase::Pan, _) => "shapes pan",
+            Self::Shapes(ShapePhase::Zoom, _) => "shapes zoom",
+            Self::Shapes(ShapePhase::Drag, _) => "shapes drag",
+            Self::Settle(..) => "settle",
+            Self::Idle { .. } => "idle",
+            Self::Done => "done",
+            Self::Manual => "manual",
+        }
+    }
 }
 
 /// Frames by cause (a frame can have several).
@@ -503,6 +537,18 @@ impl View for Gate {
         self.frames = frame.number;
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
+        if self.measure && !interval.is_zero() {
+            self.gaps.push(Gap {
+                phase: self.phase.name(),
+                number: frame.number,
+                interval,
+                paint: frame.paint,
+                textures: frame.render.textures,
+                acquire: frame.render.acquire,
+                encode: frame.render.encode,
+                submit: frame.render.submit,
+            });
+        }
         self.app.set_frame(frame.paint, frame.render.encode);
         self.app.board.borrow_mut().note_render_time(
             frame.render.textures,
@@ -839,6 +885,29 @@ fn canvas_report(
     })
 }
 
+/// The `count` longest intervals in `gaps`, longest first, with the phase
+/// each frame belonged to and its parts.
+fn longest_intervals(gaps: &[Gap], count: usize) -> serde_json::Value {
+    let mut order: Vec<&Gap> = gaps.iter().collect();
+    order.sort_by_key(|gap| std::cmp::Reverse(gap.interval));
+    order
+        .into_iter()
+        .take(count)
+        .map(|gap| {
+            serde_json::json!({
+                "phase": gap.phase,
+                "frame": gap.number,
+                "interval_ms": millis(gap.interval),
+                "paint_ms": millis(gap.paint),
+                "textures_ms": millis(gap.textures),
+                "acquire_ms": millis(gap.acquire),
+                "encode_ms": millis(gap.encode),
+                "submit_ms": millis(gap.submit),
+            })
+        })
+        .collect()
+}
+
 /// The `count` slowest frames of `samples` on the UI thread, slowest
 /// first, with their parts.
 fn slowest_frames(samples: &[CanvasSample], count: usize) -> serde_json::Value {
@@ -978,6 +1047,7 @@ fn main() -> anyhow::Result<()> {
         missing_textures: 0,
         gpu_times: std::collections::HashMap::new(),
         idle_causes: CauseCounts::default(),
+        gaps: Vec::new(),
     };
     // The time from exec to `main` (loading the binary and its libraries)
     // is measured separately from the time in `main`.
@@ -1164,6 +1234,9 @@ fn main() -> anyhow::Result<()> {
             "pass": palette_search_p95.map(|p95| p95 < Duration::from_millis(1)),
         },
         "idle": idle,
+        // The run's longest frame intervals, in any phase (including the
+        // unmeasured ones between phases): where it froze, and on what.
+        "longest_intervals": longest_intervals(&gate.gaps, 8),
         "frames": stats.frames,
         "inputs": gate.inputs,
         "peak_rss_bytes": proc::peak_rss_bytes(),
