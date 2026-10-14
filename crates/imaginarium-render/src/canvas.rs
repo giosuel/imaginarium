@@ -256,6 +256,9 @@ pub struct Canvas {
     pending: Option<(Duration, usize)>,
     /// The last frame's time apart from tile work, if told.
     rest: Option<Duration>,
+    /// The last frame's own tile work on the UI thread (painting tiles'
+    /// items), which [`Canvas::note_rest_of_frame`]'s time includes.
+    last_tile_work: Duration,
     /// A tile's fixed cost, in units.
     tile_units: usize,
     /// Renders tiles off the UI thread, if set.
@@ -291,6 +294,7 @@ impl Canvas {
             unit_cost: INITIAL_UNIT_COST,
             pending: None,
             rest: None,
+            last_tile_work: Duration::ZERO,
             tile_units: TILE_UNITS,
             workers: None,
             capacity: 1_000,
@@ -361,12 +365,13 @@ impl Canvas {
         self.unit_cost = (self.unit_cost + sample) / 2;
     }
 
-    /// Tells the canvas how long the frame it drew last took apart from
-    /// tile work (painting, encoding and submitting it), so that later
+    /// Tells the canvas how long the frame it drew last took on the UI
+    /// thread (painting, encoding and submitting it), so that later
     /// frames' tile work fits in what the rest of a frame leaves: a big
-    /// window's frame leaves less.
-    pub fn note_rest_of_frame(&mut self, rest: Duration) {
-        self.rest = Some(rest);
+    /// window's frame leaves less. The canvas's own share of it (painting
+    /// tiles' items) doesn't count.
+    pub fn note_rest_of_frame(&mut self, frame: Duration) {
+        self.rest = Some(frame.saturating_sub(self.last_tile_work));
     }
 
     /// The time for this frame's tile renders.
@@ -752,6 +757,7 @@ impl Canvas {
             self.last_rendered.push(key);
         }
         stats.build = build_start.elapsed();
+        self.last_tile_work = stats.build;
         stats.owed = owed.len();
         self.pending = (stats.rendered > 0).then_some((stats.build, units));
         if self.workers.is_some() {
@@ -1180,7 +1186,8 @@ mod tests {
         let view = viewport(Point::ZERO, 1.0);
         let mut rendered = |rest: Option<Duration>| {
             if let Some(rest) = rest {
-                canvas.note_rest_of_frame(rest);
+                // The frame took this besides the canvas's own part.
+                canvas.note_rest_of_frame(rest + canvas.last_tile_work);
             }
             canvas.invalidate_all();
             canvas
