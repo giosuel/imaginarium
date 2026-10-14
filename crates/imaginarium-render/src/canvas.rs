@@ -182,19 +182,31 @@ struct Tile {
 enum StandIn {
     /// Its stale copy.
     Stale,
-    /// A coarser level's tile over it.
-    Coarser(TileKey),
-    /// Finer levels' tiles in it.
+    /// A coarser level's tiles over it, all of it.
+    Coarser(Vec<TileKey>),
+    /// A finer level's tiles in it, all of it.
     Finer(Vec<TileKey>),
+    /// Another level's tiles over part of it: the rest is blank.
+    Partial(Vec<TileKey>),
 }
 
 impl StandIn {
-    /// How much it is worth rendering the tile now instead (lower first).
+    /// How much it is worth rendering the tile now instead (lower first;
+    /// 0 is a tile with no stand-in, or one covering only part of it).
     fn rank(&self) -> u8 {
         match self {
+            Self::Partial(_) => 0,
             Self::Stale => 1,
             Self::Finer(_) => 2,
             Self::Coarser(_) => 3,
+        }
+    }
+
+    /// The tiles it draws for `key`.
+    fn tiles(self, key: TileKey) -> Vec<TileKey> {
+        match self {
+            Self::Stale => vec![key],
+            Self::Coarser(tiles) | Self::Finer(tiles) | Self::Partial(tiles) => tiles,
         }
     }
 }
@@ -213,7 +225,8 @@ pub struct CanvasStats {
     /// Visible tiles shown by a stand-in (a stale copy or another level),
     /// to be rendered in a following frame.
     pub owed: usize,
-    /// Of `owed`: tiles with no stand-in at all, left blank this frame.
+    /// Of `owed`: tiles with no stand-in, or one covering only part of
+    /// them, left blank (in part) this frame.
     pub blank: usize,
     /// Items painted into tiles this frame.
     pub items_painted: usize,
@@ -842,9 +855,9 @@ impl Canvas {
             false
         });
         // What the budget leaves over shows a stand-in, so render first
-        // where there would be none (blank), then where it would be wrong
-        // (a stale copy), then where it is only partial or blurry (another
-        // level). Nearest the middle first within each.
+        // where there would be none or only part of one (blank), then where
+        // it would be wrong (a stale copy), then where it is blurry
+        // (another level). Nearest the middle first within each.
         let mut ranked: Vec<(u8, TileKey)> = invalid
             .into_iter()
             .map(|key| {
@@ -861,7 +874,7 @@ impl Canvas {
         // aren't looked up).
         let render_budget = budget.saturating_sub(uploading);
         let mut spent = false;
-        // Handed to the workers with nothing to stand in for them.
+        // Handed to the workers with nothing to stand in for all of them.
         let mut blanks: HashSet<TileKey> = HashSet::new();
         for (rank, key) in ranked {
             // A tile the workers have shows a stand-in until it is back;
@@ -1016,9 +1029,12 @@ impl Canvas {
                     stats.blank += 1;
                     continue;
                 }
-                Some(StandIn::Stale) => vec![*key],
-                Some(StandIn::Coarser(parent)) => vec![parent],
-                Some(StandIn::Finer(children)) => children,
+                Some(stand_in) => {
+                    if matches!(stand_in, StandIn::Partial(_)) {
+                        stats.blank += 1;
+                    }
+                    stand_in.tiles(*key)
+                }
             };
             scene.push_clip(&dest(key));
             for other in shown {
@@ -1084,37 +1100,46 @@ impl Canvas {
     }
 
     /// What can show in place of `key` until it is rendered: its stale
-    /// copy, the nearest coarser level's tile over it (when zooming in), or
-    /// the nearest finer level's tiles in it (when zooming out; they may
-    /// cover only part of it).
+    /// copy, or the nearest level whose cached tiles cover it, coarser
+    /// first (zooming in) and then finer (zooming out). Levels are half
+    /// octaves apart, so a tile can straddle up to four of the next
+    /// level's, coarser or finer: a stand-in needs all of them. Failing
+    /// that, the nearest level with any of them covers part of it.
     fn stand_in(&self, key: TileKey) -> Option<StandIn> {
         if self.tiles.contains_key(&key) {
             return Some(StandIn::Stale);
         }
         // Inset a little, so tiles that only touch it don't count.
         let inside = key.bounds().inset(-1e-6);
-        for coarser in (key.level - 6..key.level).rev() {
-            let (x, y, _, _) = tiles_in(coarser, inside);
-            let parent = TileKey {
-                level: coarser,
-                x,
-                y,
-            };
-            if self.tiles.contains_key(&parent) {
-                return Some(StandIn::Coarser(parent));
+        let coarser = (key.level - 6..key.level).rev().map(|level| (level, true));
+        let finer = (key.level + 1..=key.level + 4).map(|level| (level, false));
+        let mut partial = Vec::new();
+        for (level, is_coarser) in coarser.chain(finer) {
+            let (x0, y0, x1, y1) = tiles_in(level, inside);
+            let mut cached = Vec::new();
+            let mut all = true;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let tile = TileKey { level, x, y };
+                    if self.tiles.contains_key(&tile) {
+                        cached.push(tile);
+                    } else {
+                        all = false;
+                    }
+                }
+            }
+            if all {
+                return Some(if is_coarser {
+                    StandIn::Coarser(cached)
+                } else {
+                    StandIn::Finer(cached)
+                });
+            }
+            if partial.is_empty() {
+                partial = cached;
             }
         }
-        for finer in key.level + 1..=key.level + 4 {
-            let (x0, y0, x1, y1) = tiles_in(finer, inside);
-            let children: Vec<TileKey> = (y0..y1)
-                .flat_map(|y| (x0..x1).map(move |x| TileKey { level: finer, x, y }))
-                .filter(|child| self.tiles.contains_key(child))
-                .collect();
-            if !children.is_empty() {
-                return Some(StandIn::Finer(children));
-            }
-        }
-        None
+        (!partial.is_empty()).then_some(StandIn::Partial(partial))
     }
 
     /// Evicts the least recently drawn tiles over capacity (never one drawn
@@ -1450,13 +1475,10 @@ mod tests {
             stats.level < 0 && stats.rendered == 1 && stats.owed > 0,
             "{stats:?}"
         );
-        // The rendered tile is one nothing stood in for: outside the area
-        // the finer tiles cover.
+        // The rendered tile is one nothing stood in for all of: not within
+        // the area the finer tiles cover.
         let rendered = canvas.last_rendered[0].bounds();
-        assert!(
-            rendered.intersect(near.visible()).area() <= 0.0,
-            "{rendered:?}"
-        );
+        assert!(!near.visible().contains_rect(rendered), "{rendered:?}");
         // The rest of the old view shows the finer tiles.
         let drawn = scene
             .commands()
@@ -1466,6 +1488,77 @@ mod tests {
             })
             .count();
         assert!(drawn >= 4, "{drawn} finer tiles drawn");
+    }
+
+    /// The tiles `key`'s stand-in draws, if any.
+    fn shown_for(canvas: &Canvas, key: TileKey) -> Vec<TileKey> {
+        canvas
+            .stand_in(key)
+            .map_or_else(Vec::new, |stand_in| stand_in.tiles(key))
+    }
+
+    /// Whether `tiles` cover all of `key` (sampled at 9 × 9 points).
+    fn covered(key: TileKey, tiles: &[TileKey]) -> bool {
+        let b = key.bounds();
+        (0..9).all(|i| {
+            (0..9).all(|j| {
+                let p = Point::new(
+                    b.x0 + b.width() * (f64::from(i) + 0.5) / 9.0,
+                    b.y0 + b.height() * (f64::from(j) + 0.5) / 9.0,
+                );
+                tiles.iter().any(|tile| tile.bounds().contains(p))
+            })
+        })
+    }
+
+    #[test]
+    fn stand_ins_cover_the_whole_tile_zooming_in_and_out() {
+        let (canvas, mut boxes) = board(5_000);
+        let mut canvas = canvas.with_limits(1, 10_000);
+        let start = Instant::now();
+        let settle = |canvas: &mut Canvas, boxes: &mut Boxes, view: &Viewport, at: Instant| {
+            while canvas.frame(&mut Scene::new(), view, at, boxes).owed > 0 {}
+        };
+        // Levels are half octaves apart, so a tile straddles the next
+        // level's tiles both ways.
+        // In by one level, out by three, in by three.
+        for (zoom, from) in [(1.1, 1.0), (0.3, 1.0), (1.1, 0.45)] {
+            canvas.invalidate_all();
+            canvas.tiles.clear();
+            // Big enough for a whole tile of the coarsest level inside.
+            let at = |zoom| Viewport {
+                screen: Rect::new(0.0, 0.0, 2560.0, 1600.0),
+                ..viewport(Point::new(300.0, 200.0), zoom)
+            };
+            let first = at(from);
+            settle(&mut canvas, &mut boxes, &first, start);
+            let later = start + Duration::from_secs(1);
+            let view = at(zoom);
+            let stats = canvas.frame(&mut Scene::new(), &view, later, &mut boxes);
+            assert!(stats.owed > 0, "{zoom}: {stats:?}");
+            let (x0, y0, x1, y1) = tiles_in(stats.level, view.visible());
+            let mut checked = 0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let key = TileKey {
+                        level: stats.level,
+                        x,
+                        y,
+                    };
+                    if canvas.tiles.get(&key).is_some_and(|tile| !tile.stale) {
+                        continue;
+                    }
+                    // Within the old view (the rest is newly in view).
+                    if !first.visible().contains_rect(key.bounds()) {
+                        continue;
+                    }
+                    checked += 1;
+                    let shown = shown_for(&canvas, key);
+                    assert!(covered(key, &shown), "{zoom}: {key:?} shows only {shown:?}");
+                }
+            }
+            assert!(checked > 0, "{zoom}");
+        }
     }
 
     #[test]
