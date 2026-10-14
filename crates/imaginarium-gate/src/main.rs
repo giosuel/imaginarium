@@ -293,6 +293,8 @@ struct CanvasSample {
     interval: Duration,
     rendered: usize,
     owed: usize,
+    /// Of `owed`: tiles with nothing to stand in for them, left blank.
+    blank: usize,
     items: usize,
     /// The surface size in physical pixels.
     size: (u32, u32),
@@ -308,9 +310,13 @@ struct CanvasSample {
     worker_time: Duration,
     /// Painting the tiles' items into their scenes (of `paint`).
     build: Duration,
+    /// Waiting for tiles nothing stood in for (of `paint`).
+    waited: Duration,
     /// Of `textures`: uploading tiles, and tile pages made in the frame.
     textures_upload: Duration,
     pages_made: u32,
+    /// Tile pages being made on their thread as the frame's uploads began.
+    pages_coming: u32,
     pages: u32,
 }
 
@@ -379,6 +385,7 @@ impl Gate {
             interval,
             rendered: canvas.rendered,
             owed: canvas.owed,
+            blank: canvas.blank,
             items: canvas.items_painted,
             size: frame.physical_size,
             number: frame.number,
@@ -388,8 +395,10 @@ impl Gate {
             in_flight: canvas.in_flight,
             worker_time: canvas.worker_time,
             build: canvas.build,
+            waited: canvas.waited,
             textures_upload: frame.render.textures_upload,
             pages_made: frame.render.tile_pages_made,
+            pages_coming: frame.render.tile_pages_coming,
             pages: frame.render.tile_pages,
         }
     }
@@ -733,6 +742,14 @@ fn canvas_report(
     let rendered: usize = samples.iter().map(|s| s.rendered).sum();
     let build_ms_per_tile = (rendered > 0)
         .then(|| millis(samples.iter().map(|s| s.build).sum::<Duration>()) / rendered as f64);
+    // From the phase's first frame to the first one that `done` holds for:
+    // frames, and the time from the first frame's start to that one's.
+    let until = |done: fn(&CanvasSample) -> bool| {
+        samples.iter().position(done).map(|index| {
+            let waited: Duration = samples[1..=index].iter().map(|s| s.interval).sum();
+            serde_json::json!({ "frames": index, "ms": millis(waited) })
+        })
+    };
     serde_json::json!({
         "frame": summary(field(|s| s.frame)),
         "frame_p99_ms": percentile(field(|s| s.frame), 0.99).map(millis),
@@ -759,6 +776,7 @@ fn canvas_report(
                 "rendered": s.rendered,
                 "arrived": s.arrived,
                 "pages_made": s.pages_made,
+                "pages_coming": s.pages_coming,
                 "gpu_textures_ms": gpu.get(&s.number).map(|t| millis(t.textures)),
             })),
         // Zero: the first frame, or one after a pause.
@@ -771,6 +789,14 @@ fn canvas_report(
         // handed to the tile threads).
         "tiles_rendered": counts(|s| s.rendered),
         "tiles_owed": counts(|s| s.owed),
+        // Owed tiles nothing stood in for (blank areas on screen), the
+        // frames that had any, and when the screen was first covered (no
+        // blank tile) and complete (none owed). The cards' pan starts with
+        // the board opening; the shapes phases start settled.
+        "tiles_blank": counts(|s| s.blank),
+        "frames_with_blanks": samples.iter().filter(|s| s.blank > 0).count(),
+        "covered_after": until(|s| s.blank == 0),
+        "complete_after": until(|s| s.owed == 0),
         // With tile threads: tiles back and uploaded, tiles still with
         // them, the threads' time per tile, the upload time per frame.
         "tiles_arrived": counts(|s| s.arrived),
@@ -779,6 +805,9 @@ fn canvas_report(
         // Painting the tiles' items on the UI thread (part of `paint`).
         "tile_build": summary(field(|s| s.build)),
         "build_ms_per_tile": build_ms_per_tile,
+        // Waiting in the frame for tiles that would show blank otherwise
+        // (part of `paint`).
+        "blank_wait": summary(field(|s| s.waited)),
         "upload": summary(field(|s| s.textures_upload)),
         // Pages made in a frame because none was ready (each can stall
         // it), and pages at the phase's end.
