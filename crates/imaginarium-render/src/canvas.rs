@@ -767,7 +767,11 @@ impl Canvas {
             }
             let items = self.items_in(key.bounds());
             let cost = self.tile_units + items.len();
-            if stats.rendered > 0 && self.unit_cost * (units + cost) as u32 > render_budget {
+            // The estimate decides, and the clock when it is wrong.
+            if stats.rendered > 0
+                && (self.unit_cost * (units + cost) as u32 > render_budget
+                    || build_start.elapsed() >= render_budget)
+            {
                 spent = true;
                 owed.push(key);
                 continue;
@@ -1553,6 +1557,49 @@ mod tests {
         // Told how long the frame took, the canvas leaves out its own part.
         canvas.note_rest_of_frame(first.build + first.waited + Duration::from_millis(3));
         assert_eq!(canvas.rest, Some(Duration::from_millis(3)));
+    }
+
+    /// Content that paints like [`Boxes`] and takes `delay` per item.
+    struct SlowBoxes {
+        boxes: Boxes,
+        delay: Duration,
+    }
+
+    impl CanvasContent for SlowBoxes {
+        fn paint_item(&mut self, id: ItemId, scene: &mut Scene, level_scale: f64) {
+            std::thread::sleep(self.delay);
+            self.boxes.paint_item(id, scene, level_scale);
+        }
+    }
+
+    /// A 2560 × 1600 window: 70 tiles at 100 %.
+    fn big_viewport() -> Viewport {
+        Viewport {
+            screen: Rect::new(0.0, 0.0, 2560.0, 1600.0),
+            ..viewport(Point::ZERO, 1.0)
+        }
+    }
+
+    #[test]
+    fn the_clock_stops_building_when_the_estimate_is_wrong() {
+        let (canvas, boxes) = board(5_000);
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(2, CpuMode::Deterministic))
+            .with_blank_wait(Duration::ZERO)
+            .with_render_budget(RENDER_BUDGET);
+        // Ten times the first guess: 0.2 ms per item, so a full tile (12
+        // items) takes 2.4 ms or more, where 25 seemed to fit in 6 ms.
+        let mut slow = SlowBoxes {
+            boxes,
+            delay: Duration::from_micros(200),
+        };
+        let stats = canvas.frame(
+            &mut Scene::new(),
+            &big_viewport(),
+            Instant::now(),
+            &mut slow,
+        );
+        assert!(stats.rendered >= 1 && stats.rendered <= 3, "{stats:?}");
     }
 
     #[test]
