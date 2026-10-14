@@ -286,6 +286,8 @@ struct CanvasSample {
     paint: Duration,
     textures: Duration,
     encode: Duration,
+    /// Submitting and presenting.
+    submit: Duration,
     /// The wait for the window's texture (vertical sync, or the GPU).
     acquire: Duration,
     /// Presenting (part of the frame time; blocks on some systems).
@@ -307,6 +309,8 @@ struct CanvasSample {
     /// frame, and their time for those back.
     arrived: usize,
     in_flight: usize,
+    /// Of `in_flight`: back, waiting for a frame with time to upload them.
+    parked: usize,
     worker_time: Duration,
     /// Painting the tiles' items into their scenes (of `paint`).
     build: Duration,
@@ -380,6 +384,7 @@ impl Gate {
             paint: frame.paint,
             textures: frame.render.textures,
             encode: frame.render.encode,
+            submit: frame.render.submit,
             acquire: frame.render.acquire,
             present: frame.render.present,
             interval,
@@ -393,6 +398,7 @@ impl Gate {
             textures_submit: frame.render.textures_submit,
             arrived: canvas.arrived,
             in_flight: canvas.in_flight,
+            parked: canvas.parked,
             worker_time: canvas.worker_time,
             build: canvas.build,
             waited: canvas.waited,
@@ -742,6 +748,9 @@ fn canvas_report(
     let rendered: usize = samples.iter().map(|s| s.rendered).sum();
     let build_ms_per_tile = (rendered > 0)
         .then(|| millis(samples.iter().map(|s| s.build).sum::<Duration>()) / rendered as f64);
+    let upload_ms_per_tile = (arrived > 0).then(|| {
+        millis(samples.iter().map(|s| s.textures_upload).sum::<Duration>()) / arrived as f64
+    });
     // From the phase's first frame to the first one that `done` holds for:
     // frames, and the time from the first frame's start to that one's.
     let until = |done: fn(&CanvasSample) -> bool| {
@@ -779,6 +788,9 @@ fn canvas_report(
                 "pages_coming": s.pages_coming,
                 "gpu_textures_ms": gpu.get(&s.number).map(|t| millis(t.textures)),
             })),
+        // Where the slowest frames' time went, slowest first: which part
+        // of the frame to look at when the p99 is over budget.
+        "slowest_frames": slowest_frames(samples, 5),
         // Zero: the first frame, or one after a pause.
         "interval": summary(samples.iter().map(|s| s.interval).filter(|i| !i.is_zero()).collect()),
         // Frames that took longer than a 60 Hz refresh on the UI thread,
@@ -801,6 +813,8 @@ fn canvas_report(
         // them, the threads' time per tile, the upload time per frame.
         "tiles_arrived": counts(|s| s.arrived),
         "tiles_in_flight": counts(|s| s.in_flight),
+        // Of those: back, waiting for a frame with time to upload them.
+        "tiles_parked": counts(|s| s.parked),
         "worker_ms_per_tile": worker_ms_per_tile,
         // Painting the tiles' items on the UI thread (part of `paint`).
         "tile_build": summary(field(|s| s.build)),
@@ -809,6 +823,7 @@ fn canvas_report(
         // (part of `paint`).
         "blank_wait": summary(field(|s| s.waited)),
         "upload": summary(field(|s| s.textures_upload)),
+        "upload_ms_per_tile": upload_ms_per_tile,
         // Pages made in a frame because none was ready (each can stall
         // it), and pages at the phase's end.
         "tile_pages_made": samples.iter().map(|s| s.pages_made).sum::<u32>(),
@@ -822,6 +837,38 @@ fn canvas_report(
             "ms": millis(waited),
         })),
     })
+}
+
+/// The `count` slowest frames of `samples` on the UI thread, slowest
+/// first, with their parts.
+fn slowest_frames(samples: &[CanvasSample], count: usize) -> serde_json::Value {
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by_key(|index| std::cmp::Reverse(samples[*index].frame));
+    order
+        .into_iter()
+        .take(count)
+        .map(|index| {
+            let s = &samples[index];
+            serde_json::json!({
+                "frame_in_phase": index,
+                "frame_ms": millis(s.frame),
+                "paint_ms": millis(s.paint),
+                "build_ms": millis(s.build),
+                "waited_ms": millis(s.waited),
+                "textures_ms": millis(s.textures),
+                "upload_ms": millis(s.textures_upload),
+                "encode_ms": millis(s.encode),
+                "submit_ms": millis(s.submit),
+                "interval_ms": millis(s.interval),
+                "rendered": s.rendered,
+                "arrived": s.arrived,
+                "parked": s.parked,
+                "owed": s.owed,
+                "blank": s.blank,
+                "items": s.items,
+            })
+        })
+        .collect()
 }
 
 /// The GPU's own time (timestamp queries) for the frames of `samples` it
