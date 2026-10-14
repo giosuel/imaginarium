@@ -356,6 +356,75 @@ Three runs, fullscreen, integrated GPU first:
 ./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
 ```
 
+### Results (2026-10-14, "M2.8 test 1 (e77b5d1)")
+
+All three ran fullscreen at 3456×2160 (7.5 megapixels, window scale
+1.5). Times are in ms.
+
+| | iGPU | dGPU | iGPU, no vsync |
+|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **12.7** | 11.2 | 11.5 |
+| C1 shapes zoom, p99 (< 16) | **17.7** ✗ | 13.1 | 17.0 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **0 / 1 / 1** | 0 / 0 / 0 | 0 / 28 / 49 |
+| C2 tiles per drag frame (≤ 4) | **3** | 3 | 3 |
+| C3 palette search, p95 (< 1) | **0.34** | 0.36 | 0.29 |
+| C6 cold start without the GPU's setup (< 400) | **231** | 172 | 243 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.3 % | 0 / 0 % |
+| GPU time per shapes pan frame, median | 9.0 | 1.0 | 8.9 |
+| Tiles filling the screen before the pan: frames / ms | 31 / 535 | 22 / 383 | 31 / 333 |
+| Slowest tile work in a frame (of it, one submission) | 68.6 (66.6) | 13.9 (0.9) | 120 (117) |
+
+- **Criterion 1 passes on the dGPU.** On the iGPU only the zoom misses:
+  6 of its 240 frames took over 16 ms, one of them a 60 ms stall.
+- **The iGPU keeps up at 7.5 megapixels:** 9 ms of GPU work per frame
+  (the fourth run had one frame in four or five miss vertical sync).
+- **Criterion 2 passes:** with the script settling first, a drag frame
+  renders at most 3 tiles.
+- **Slow fill (owner, watching):** the screen filled with tiles in
+  rings from the middle, with blank areas meanwhile, over 22–31 frames.
+  Tile work ran on the UI thread within its budget: 1.4–3 tiles per
+  frame, of up to 228 owed.
+- **Stalls on the iGPU only:** single submissions of 3–4 tile renders
+  took 58–117 ms, while the GPU's own work on them took under 1 ms.
+- **Scale 1.5 against the monitor's 2.0:** likely not a bug. On Wayland
+  an output reports a whole-number scale (2), and the window gets the
+  fractional one (1.5) on its own. Text crispness is for the manual
+  check (criterion 5).
+- Cold start in the iGPU run: loading the Vulkan driver took 1.5 s
+  (89–106 ms in the other runs), likely the first start after boot. It
+  doesn't count (owner, 2026-10-13).
+
+## M2.8 run 2: tiles on worker threads
+
+The owner chose both fixes for M2.8 (2026-10-14; ADR-0019):
+- **Tiles render on worker threads** with `vello_cpu`, and frames upload
+  them. The UI thread only paints the tiles' items.
+- **Tiles share pages on the GPU**, made ahead of need on a thread of
+  their own. GPU memory comes in smaller blocks.
+- Tiles drawn one texel per pixel are sampled nearest (one load per
+  pixel on the GPU instead of four).
+- Items paint straight into their tile's scene.
+- The glyph atlas takes up to 32 of its pages again.
+
+On the VM (llvmpipe, 1280×800, 4 tile threads against tiles in the
+frame), the shapes pan's tiles filled in 47 ms instead of 196 ms, and
+the UI thread's tile work per frame dropped from about 1 ms (at most
+11–23 ms) to 0.25 ms (at most 1–3.6 ms).
+
+The same three runs, plus one with tiles in the frame to compare:
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+./imaginarium-gate --measure --fullscreen --tile-threads 0 --report gate-report-nothreads.json
+```
+
+The report adds per canvas phase: `tiles_arrived`, `tiles_in_flight`,
+`worker_ms_per_tile`, `tile_build` and `build_ms_per_tile` (the UI
+thread's painting), `upload`, `tile_pages` and `tile_pages_made` (pages
+made in a frame because none was ready), and `content.tile_threads`.
+
 Results: to come.
 
 ## Decision (owner, 2026-10-13)

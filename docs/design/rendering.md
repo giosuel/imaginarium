@@ -159,11 +159,19 @@ trait Backend {
 
 ## 9. Threads
 
-M2 rasterizes on the UI thread within the per-frame budget. Prefetching
-off-screen tiles and other levels moves to the worker pool later (PLAN
-§4.3): tile rendering is independent per tile, and `vello_cpu` can
-already use several threads. Nothing in the design assumes threads, which
-also keeps a browser (wasm) build possible.
+Since M2.8, tiles render on **tile worker threads** with `vello_cpu`
+(ADR-0019; `TileWorkers`, `Canvas::with_workers`):
+
+1. The UI thread paints a tile's items into a scene, within the frame's
+   budget, and hands it over. The content stays on the UI thread: it
+   isn't shared between threads.
+2. A worker renders the scene into a pixmap and sends it back.
+3. Until then, frames show a stand-in. The frame after the tile comes
+   back uploads it (`Scene::upload_texture`) and draws it.
+
+Without workers, tiles render in the frame on the GPU, as in M2.5. That
+also keeps a browser (wasm) build possible. Prefetching off-screen tiles
+and other levels comes later, on the same workers.
 
 ## 10. What M2.5 implemented
 
@@ -226,8 +234,7 @@ also keeps a browser (wasm) build possible.
   atlas on the GPU, and bigger runs are cached at 128 and scaled up (emoji
   bitmaps are 109 pixels per em). Still unsupported: rotated or skewed
   bitmap glyphs (the atlas refuses them), which nothing draws yet.
-- Not yet: rendering tiles on worker threads, prefetching the margin ring,
-  and partial tile updates.
+- Not yet: prefetching the margin ring, and partial tile updates.
 
 Measured in the gate app (llvmpipe VM, M2.5): with tiles, a pan frame
 encodes in 1.4 ms instead of 4.7 ms for the 10,000 shapes, and 1.6 ms
@@ -262,3 +269,34 @@ run):**
     frame number.
   - `FrameTiming::textures_create` and `textures_submit` split the tile
     work's CPU time.
+- **Tiles render on worker threads** (section 9, ADR-0019), from the
+  gate's M2.8 run: a fullscreen board filled over about 30 frames,
+  ring by ring, and the UI thread rendered 1.4–3 tiles per frame.
+  - The workers have at most 4 tiles per thread at once; the rest wait
+    for a later frame.
+  - A tile whose items change while a worker has it comes back stale and
+    goes again.
+  - A tile a worker fails to render is left empty, not tried again in
+    every frame.
+  - The time budget now covers the UI thread's part: painting the items
+    (a tile's fixed cost is 8 units instead of 50) and the uploads.
+  - On the VM (4 threads, 1280×800) the shapes pan's tiles filled in
+    47 ms instead of 196 ms.
+- **Tile pages:** on the GPU, uploaded 256² textures share 2048² pages
+  (64 tiles, 16 MB). A frame draws a page's tiles with one binding,
+  instead of a draw and a bind group per tile. Pages are made ahead of
+  need on a thread of their own and cleared there: a screenful at the
+  first upload, then one in reserve.
+- **Smaller GPU memory blocks** (wgpu's `MemoryUsage` hint: 8–64 MB
+  rather than 128–256 MB). The laptop's Intel GPU stalled in single tile
+  submissions for 58–117 ms. The likely cause is new memory blocks backed
+  when a submission first uses them; that isn't proven.
+- **Nearest sampling at 1:1:** a texture drawn one texel per pixel on
+  whole pixels is sampled nearest. That gives the same pixels, with one
+  load per pixel on the GPU instead of four.
+- **Items paint straight into the tile's scene** (`Scene::paint_with`),
+  without a scene of their own that is then copied. A dense zoomed-out
+  tile's painting took 0.31 ms and now takes 0.21–0.23 ms on the VM.
+- **The glyph atlas takes up to 32 pages** (Vello's limit of 8 assumed
+  4096² pages). A full atlas would draw glyphs directly, which vello_gpu
+  can't do for color emoji.

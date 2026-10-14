@@ -4,7 +4,7 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 ## Current position
 
@@ -24,8 +24,22 @@ Last updated: 2026-10-13
   - the script settles before each shapes phase;
   - GPU times, the monitor and per-phase sizes in the report.
 
-  Next: the owner's three runs ("M2.8 run" in `m2-gate.md`). Then decide
-  whether tiles need their own compositor pass.
+  The owner's runs (2026-10-14, "M2.8 run" in `m2-gate.md`): criterion 1
+  passes on the dGPU; on the iGPU only the zoom misses (p99 17.7 ms), and
+  tiles filled the screen ring by ring over half a second. The owner
+  chose both fixes for M2.8 (ADR-0019). Done on `perf/m2.8-tile-workers`,
+  stacked on `perf/m2.8-canvas-igpu`:
+  - tiles render on worker threads with `vello_cpu`, and frames upload
+    them;
+  - uploaded tiles share pages on the GPU, made ahead on their own
+    thread;
+  - smaller GPU memory blocks, for the iGPU's submission stalls;
+  - nearest sampling for tiles drawn 1:1;
+  - items paint straight into their tile's scene;
+  - the glyph atlas takes up to 32 pages.
+
+  Next: the owner's fourth set of runs ("M2.8 run 2" in `m2-gate.md`).
+  Then the checklist notes for criteria 4 and 5, and M2.9.
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -843,6 +857,16 @@ app runs. Two owner exceptions for M2:
     the first-frame cause on the iGPU. On the VM the first text tile frame
     stalled in wgpu's clear of a 64 MB atlas page; it is now a 16 MB
     page.
+  - The owner's runs (2026-10-14): C1 passes on the dGPU, the iGPU misses
+    only the zoom's p99 (17.7 ms); C2 passes. Tiles filled the screen
+    over 22–31 frames, and single tile submissions stalled for 58–117 ms
+    on the iGPU.
+  - Done (2026-10-14, ADR-0019): tiles on worker threads (`vello_cpu`),
+    tile pages on the GPU, smaller GPU memory blocks, nearest sampling at
+    1:1, items painted in place, glyph atlas up to 32 pages. Whether
+    tiles still need a compositor pass of their own is for the next
+    run's GPU times to say.
+  - Next: the owner's fourth set of runs, criteria 1 and 2 on the iGPU.
 - [ ] **M2.9 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.
