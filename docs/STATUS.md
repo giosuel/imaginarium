@@ -38,8 +38,24 @@ Last updated: 2026-10-14
   - items paint straight into their tile's scene;
   - the glyph atlas takes up to 32 pages.
 
-  Next: the owner's fourth set of runs ("M2.8 run 2" in `m2-gate.md`).
-  Then the checklist notes for criteria 4 and 5, and M2.9.
+  The owner's second runs (2026-10-14, "M2.8 run 2"): **criterion 1
+  passes on the iGPU** (zoom p99 11.0 ms), the fill is 3–4 times faster
+  and the big stalls are gone. Left: the first tile page made in the
+  cards board's first frame (32–52 ms), and tiles newly in view showing
+  blank for a frame (the owner's "minor glitching" zooming out, likely).
+  Done since, on the same branch:
+  - tile pages made as tiles go to the workers (`Scene::expect_uploads`);
+  - a frame waits up to 4 ms for tiles nothing stands in for;
+  - 8 tiles per thread; the frame budget no longer counts the canvas's
+    painting twice;
+  - blank tiles and fill times in the report.
+
+  Next: the owner's fifth set of runs, with the manual checklist for
+  criteria 4 and 5 in the same session ("M2.8 run 3" in `m2-gate.md`).
+  If they hold, M2.8 is done and M2.9 follows. For M3 (canvas): covering
+  the fill as a board opens (the owner: maybe an animation), and a
+  window-wide memory budget for tile pages (21 pages, 336 MB, at the
+  end of run 2).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),

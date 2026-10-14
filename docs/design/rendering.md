@@ -168,6 +168,16 @@ Since M2.8, tiles render on **tile worker threads** with `vello_cpu`
 2. A worker renders the scene into a pixmap and sends it back.
 3. Until then, frames show a stand-in. The frame after the tile comes
    back uploads it (`Scene::upload_texture`) and draws it.
+4. A tile nothing can stand in for (newly in view, or every tile when a
+   board opens) would show blank until then. For those, the frame that
+   hands them over waits up to 4 ms, within what the rest of the frame
+   leaves of 12 ms, and draws the ones back by then
+   (`Canvas::with_blank_wait`).
+5. Each thread has at most 8 tiles at once, so the queue follows what is
+   on screen.
+6. On the GPU, uploaded tiles share pages of 64. The canvas says how many
+   new tiles are coming (`Scene::expect_uploads`), so pages are made on a
+   thread of their own while the workers render.
 
 Without workers, tiles render in the frame on the GPU, as in M2.5. That
 also keeps a browser (wasm) build possible. Prefetching off-screen tiles
@@ -193,8 +203,8 @@ and other levels comes later, on the same workers.
   (`Canvas::note_render_time`, from `FrameTiming::textures`). Once a tile
   doesn't fit, the rest wait. Since M2.8, tile work also leaves room for
   the rest of the frame (painting, encoding, submitting;
-  `Canvas::note_rest_of_frame`): it gets 12 ms minus that, between 1 and
-  6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
+  `Canvas::note_rest_of_frame`, which leaves out the canvas's own part):
+  it gets 12 ms minus that, between 1 and 6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
   the VM's software GPU it waits 12–14 ms for the frame). A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
   full 6 ms on top made the p99 17.5–17.8 ms.
 - **Stand-ins:** a stale copy, the nearest coarser cached level (zooming

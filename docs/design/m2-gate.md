@@ -181,8 +181,7 @@ works, odd (what), or broken.
 22. Does it open quickly? (The report has the number.)
 
 **Known gaps (not bugs yet):** no pinch zoom, no context menus, no
-scrolling lists (the palette shows the best 10), and tiles render on the
-UI thread (workers come later).
+scrolling lists (the palette shows the best 10).
 
 ## What to send back
 
@@ -424,6 +423,105 @@ The report adds per canvas phase: `tiles_arrived`, `tiles_in_flight`,
 `worker_ms_per_tile`, `tile_build` and `build_ms_per_tile` (the UI
 thread's painting), `upload`, `tile_pages` and `tile_pages_made` (pages
 made in a frame because none was ready), and `content.tile_threads`.
+
+### Results (2026-10-14, "M2.8 test 2 (8cb93a5)")
+
+All four ran fullscreen at 3456×2160, with 8 tile threads except the
+last. Times are in ms.
+
+| | iGPU | dGPU | iGPU, no vsync | iGPU, tiles in the frame |
+|---|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **7.7** | 5.5 | 6.1 | 16.6 ✗ |
+| C1 shapes zoom, p99 (< 16) | **11.0** | 10.9 | 10.8 | 13.3 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **0 / 2 / 0** | 0 / 0 / 0 | 0 / 0 / 0 | 3 / 2 / 1 |
+| C2 tiles per drag frame (≤ 4) | **3** | 3 | 3 | 3 |
+| C3 palette search, p95 (< 1) | **0.46** | 0.35 | 0.32 | 0.30 |
+| C6 cold start without the GPU's setup (< 400) | **197** | 199 | 290 | 209 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.2 % | 0 / 0 % | 0 / 0 % |
+| GPU time per shapes pan frame, median | 8.5 | 1.0 | 8.7 | 8.8 |
+| Tiles filling the screen before the pan: frames / ms | **9 / 166** | 8 / 149 | 9 / 103 | 37 / 636 |
+| The same before the drag | **5 / 101** | 4 / 83 | 7 / 74 | 28 / 485 |
+| Zoom: tiles owed per frame, mean | **15** | 16 | 15 | 62 |
+| Slowest tile work in a frame: cards / zoom | **32 / 20** | 5 / 5 | 52 / 5 | 32 / 6 |
+| Peak memory (RSS), MB | 287 | 492 | 301 | 298 |
+
+Per tile on the iGPU run: the workers took 1.2 ms (cards), 0.4 ms
+(shapes pan) and 1.0 ms (zoomed out); the UI thread's painting 0.30,
+0.08 and 0.15 ms.
+
+- **Criterion 1 passes on the iGPU**: zoom p99 11.0 ms (17.7 in the
+  first M2.8 run). It passes in every run with tile threads. With tiles
+  in the frame, the pan misses (16.6 ms).
+- **The fill is 3–4 times faster**: 9 frames before the shapes pan,
+  against 31 in the first M2.8 run and 37 with tiles in the frame.
+- **The big stalls are gone**, also with tiles in the frame: the first
+  run's single submissions of 58–117 ms are down to 15 ms at most. The
+  smaller GPU memory blocks are the likely reason.
+- **Two hitches are left on the iGPU:**
+  - The cards board's first frame: 32 ms (52 ms without vsync), making
+    the first tile page in that frame. Fixed since (run 3).
+  - One zoom frame's upload of 17 tiles took 20 ms (two intervals over
+    20 ms, 24 ms at most). Whether it waited behind a page being made
+    on its thread, the next report says (`pages_coming`).
+- **Owner, watching:** smoother than before; the run with tiles in the
+  frame was visibly laggier. Zooming in was smooth. Zooming out on the
+  shapes had some minor glitching. The board still filled from the
+  middle out, in rings, but faster.
+  - The glitching is likely the blank tiles: with workers, a tile newly
+    in view with nothing to stand in for it (zooming out reveals them at
+    the edges) stayed blank for at least a frame. The report didn't count
+    them yet. Fixed since (run 3).
+  - The rings at opening: a fullscreen view needs up to 228 tiles. At
+    0.3 ms of painting per cards tile on the UI thread, that's at least
+    70 ms, so the fill takes several frames whatever the threads do.
+    It can be covered (owner: maybe an animation, eventually).
+- **GPU memory:** 21 tile pages at the end, 336 MB of the iGPU's shared
+  memory (not in RSS). The tile caches keep up to 1,000 tiles per board.
+  A window-wide memory budget for tiles is for M3.
+- Cold start in the iGPU run: loading the Vulkan driver took 793 ms
+  (95–144 ms in the others), likely the first start after boot again.
+  It doesn't count (owner, 2026-10-13).
+
+## M2.8 run 3: the stalls and blanks left
+
+What changed since run 2:
+- **Tile pages are made as tiles go to the workers**
+  (`Scene::expect_uploads`), a frame before they come back. An upload
+  that finds no free slot waits for the page on its way.
+- **A frame waits for the tiles nothing stands in for**, up to 4 ms and
+  within what the rest of the frame leaves of 12 ms. They show in that
+  frame instead of blank until the next.
+- **Threads take up to 8 tiles at once** (4 before).
+- **Tile work no longer counts the canvas's own painting twice**: a frame
+  that painted for its whole budget left the next one only 2 ms.
+
+On the VM (llvmpipe, 1280×800, 4 tile threads):
+- the cards board's first frames: slowest tile work 3.7 ms instead of
+  19.5 ms with run 2's build, no page made in a frame;
+- with the wait, 8 tiles per thread and the budget fix, against the
+  page fix alone: blank tile-frames 58 → 0 in the shapes pan and 24 → 0
+  in the zoom; the cards board covered after 2 frames (46 ms) instead
+  of 3 (64 ms);
+- the wait took 0.05 ms per frame on average, 3.7 ms at most.
+
+The report adds per canvas phase:
+- `tiles_blank` and `frames_with_blanks`: owed tiles nothing stood in for;
+- `covered_after` and `complete_after`: frames and time to the first frame
+  with no blank tile, and with none owed. The cards' pan starts as the
+  board opens, so these measure its fill;
+- `blank_wait`: the frames' wait for tiles;
+- `slowest_textures.pages_coming`.
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+```
+
+Then, in the same session, the manual checklist's items for criteria 4
+and 5 (HiDPI, text, input method, screen reader), and watching 5a: is
+zooming out on the shapes still glitchy, and how does the board fill as
+it opens?
 
 Results: to come.
 
