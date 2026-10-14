@@ -39,6 +39,10 @@ several threads"), and ADR-0003 puts background work on a pool.
    - For tiles nothing can stand in for, the frame that hands them over
      waits up to 4 ms for them instead (amended 2026-10-14, after the
      owner's second run).
+   - Uploads take half a frame's tile time at most, by their measured
+     cost, and 16 tiles at most; the others wait for the next frame
+     (amended 2026-10-14, after the owner's third run: bursts of up to
+     57 uploads made zoom frames of 20 ms on the integrated GPU).
    - The GPU still composites the tiles and draws everything else.
 2. **On the GPU, uploaded tiles share pages**: 2048² textures holding 64
    tiles each, so a frame draws a page's tiles with one binding. Pages
@@ -55,7 +59,8 @@ several threads"), and ADR-0003 puts background work on a pool.
 
 ## Consequences
 - **The UI thread only paints.** Its share of a tile is painting the
-  items (0.1–0.5 ms on the VM) and the upload. The rendering, 0.5–1.6 ms
+  items (0.1–0.5 ms on the VM) and the upload (0.08 ms on the gate
+  laptop, more in bursts), both within the frame's budget. The rendering, 0.5–1.6 ms
   per tile on the VM, runs on the workers, several tiles at once.
 - **Two renderers.** Tiles are rendered by `vello_cpu` and the rest of
   the frame by `vello_gpu`. Both are Vello's sparse-strip renderers with
