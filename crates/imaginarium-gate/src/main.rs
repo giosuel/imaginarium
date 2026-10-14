@@ -302,6 +302,9 @@ struct KeySample {
     search: Duration,
     paint: Duration,
     encode: Duration,
+    /// Tiles of the board the frame rendered (the search must not make
+    /// any render again).
+    rendered: usize,
 }
 
 /// The scripted phases on the shapes board.
@@ -642,6 +645,7 @@ impl View for Gate {
                         search,
                         paint: frame.paint,
                         encode: frame.render.encode,
+                        rendered: self.app.board.borrow().last_canvas.rendered,
                     });
                 }
                 if left > 1 {
@@ -1217,6 +1221,9 @@ fn main() -> anyhow::Result<()> {
             "search": summary(typing(|sample| sample.search)),
             "paint": summary(typing(|sample| sample.paint)),
             "encode": summary(typing(|sample| sample.encode)),
+            // Searching dims the cards it misses over the tiles, so no
+            // tile renders again.
+            "tiles_rendered": gate.typing.iter().map(|sample| sample.rendered).sum::<usize>(),
         },
         "palette": {
             // Criterion 3: the search over all commands per keystroke.

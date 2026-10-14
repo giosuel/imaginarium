@@ -335,12 +335,15 @@ impl Board {
 
     /// Highlights cards whose title contains `query` (case-insensitive);
     /// an empty query clears it. Returns the number of matches.
+    ///
+    /// The others are dimmed by a veil drawn over the tiles each frame
+    /// ([`Board::paint_dimming`]), not in them: every keystroke would make
+    /// every visible tile render again, and the screen would lag behind
+    /// the typing.
     pub(crate) fn search(&mut self, query: &str) -> Option<usize> {
         let query = query.trim().to_lowercase();
         if query.is_empty() {
-            if self.matches.take().is_some() {
-                self.cards_canvas.invalidate_all();
-            }
+            self.matches = None;
             return None;
         }
         let matches: Vec<bool> = self
@@ -350,9 +353,32 @@ impl Board {
             .collect();
         let count = matches.iter().filter(|&&m| m).count();
         self.matches = Some(matches);
-        // Every card's look may have changed.
-        self.cards_canvas.invalidate_all();
         Some(count)
+    }
+
+    /// Veils the visible cards the search doesn't match, in world
+    /// coordinates: the paper at 70 % over a card looks like the card at
+    /// 30 %. Cards are drawn without text below [`TEXT_ZOOM`], as plain
+    /// rectangles.
+    fn paint_dimming(&self, scene: &mut Scene, view: Rect) {
+        let Some(matches) = &self.matches else {
+            return;
+        };
+        let veil = PAPER.with_alpha(0.7);
+        let plain = self.zoom < TEXT_ZOOM;
+        for index in self.visible_cards(view) {
+            if matches.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            let rect = card_rect(self.columns, index);
+            if plain {
+                scene.fill(&rect, veil);
+            } else {
+                // The card and its shadow, 3 units below it.
+                let covered = Rect::new(rect.x0, rect.y0, rect.x1, rect.y1 + 3.0);
+                scene.fill(&RoundedRect::from_rect(covered, 10.0), veil);
+            }
+        }
     }
 
     /// Ends editing, keeping the edited text.
@@ -693,7 +719,6 @@ impl Board {
                     titles: &self.titles,
                     bodies: &self.bodies,
                     texts: &mut self.texts,
-                    matches: self.matches.as_deref(),
                     editing: self.editing.as_ref().map(|(index, _)| *index),
                     scale_factor: canvas_view.scale_factor,
                     layouts: 0,
@@ -731,6 +756,7 @@ impl Board {
         scene.set_transform(self.camera());
         match self.mode {
             Mode::Cards => {
+                self.paint_dimming(scene, view);
                 if let Some(index) = self.hovered
                     && self
                         .editing
@@ -851,7 +877,6 @@ struct CardContent<'a> {
     titles: &'a [String],
     bodies: &'a [String],
     texts: &'a mut HashMap<usize, CardText>,
-    matches: Option<&'a [bool]>,
     editing: Option<usize>,
     scale_factor: f64,
     /// Text layouts built (cache misses).
@@ -862,9 +887,7 @@ impl CanvasContent for CardContent<'_> {
     fn paint_item(&mut self, id: ItemId, scene: &mut Scene, level_scale: f64) {
         let index = id.0 as usize;
         let rect = card_rect(self.columns, index);
-        let dimmed = self.matches.is_some_and(|matches| !matches[index]);
         let tint = TINTS[index % TINTS.len()];
-        let tint = if dimmed { tint.with_alpha(0.3) } else { tint };
         // The level's scale in logical pixels decides the detail.
         if level_scale / self.scale_factor < TEXT_ZOOM {
             scene.fill(&rect, tint);
@@ -874,12 +897,9 @@ impl CanvasContent for CardContent<'_> {
         // A soft shadow, then the card.
         scene.fill(
             &RoundedRect::from_rect(rect + Vec2::new(0.0, 3.0), 10.0),
-            INK.with_alpha(if dimmed { 0.03 } else { 0.08 }),
+            INK.with_alpha(0.08),
         );
         scene.fill(&card, tint);
-        if dimmed {
-            scene.push_opacity(0.35);
-        }
         scene.push_clip(&card);
         if !self.texts.contains_key(&index) {
             self.layouts += 1;
@@ -902,9 +922,6 @@ impl CanvasContent for CardContent<'_> {
             }
         }
         scene.pop();
-        if dimmed {
-            scene.pop();
-        }
     }
 }
 
@@ -996,5 +1013,27 @@ mod tests {
         let count = board.search("planning").unwrap_or(0);
         assert!(count > 0 && count < 100);
         assert_eq!(board.search("zzz-not-there"), Some(0));
+    }
+
+    #[test]
+    fn a_search_veils_the_visible_cards_it_misses() {
+        let mut board = board();
+        let view = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        let visible = board.visible_cards(view).count();
+        let veils = |board: &Board| {
+            let mut scene = Scene::new();
+            board.paint_dimming(&mut scene, view);
+            scene.len()
+        };
+        assert_eq!(veils(&board), 0, "no search, no veil");
+        let count = board.search("planning").unwrap_or(0);
+        let shown = board
+            .visible_cards(view)
+            .filter(|&index| board.matches.as_ref().is_some_and(|m| m[index]))
+            .count();
+        assert!(count > 0 && visible > shown);
+        assert_eq!(veils(&board), visible - shown);
+        assert_eq!(board.search(""), None);
+        assert_eq!(veils(&board), 0);
     }
 }
