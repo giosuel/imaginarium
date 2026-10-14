@@ -306,6 +306,8 @@ struct CanvasSample {
     arrived: usize,
     in_flight: usize,
     worker_time: Duration,
+    /// Painting the tiles' items into their scenes (of `paint`).
+    build: Duration,
     /// Of `textures`: uploading tiles, and tile pages made in the frame.
     textures_upload: Duration,
     pages_made: u32,
@@ -385,6 +387,7 @@ impl Gate {
             arrived: canvas.arrived,
             in_flight: canvas.in_flight,
             worker_time: canvas.worker_time,
+            build: canvas.build,
             textures_upload: frame.render.textures_upload,
             pages_made: frame.render.tile_pages_made,
             pages: frame.render.tile_pages,
@@ -727,6 +730,9 @@ fn canvas_report(
     let arrived: usize = samples.iter().map(|s| s.arrived).sum();
     let worker_ms_per_tile = (arrived > 0)
         .then(|| millis(samples.iter().map(|s| s.worker_time).sum::<Duration>()) / arrived as f64);
+    let rendered: usize = samples.iter().map(|s| s.rendered).sum();
+    let build_ms_per_tile = (rendered > 0)
+        .then(|| millis(samples.iter().map(|s| s.build).sum::<Duration>()) / rendered as f64);
     serde_json::json!({
         "frame": summary(field(|s| s.frame)),
         "frame_p99_ms": percentile(field(|s| s.frame), 0.99).map(millis),
@@ -770,6 +776,9 @@ fn canvas_report(
         "tiles_arrived": counts(|s| s.arrived),
         "tiles_in_flight": counts(|s| s.in_flight),
         "worker_ms_per_tile": worker_ms_per_tile,
+        // Painting the tiles' items on the UI thread (part of `paint`).
+        "tile_build": summary(field(|s| s.build)),
+        "build_ms_per_tile": build_ms_per_tile,
         "upload": summary(field(|s| s.textures_upload)),
         // Pages made in a frame because none was ready (each can stall
         // it), and pages at the phase's end.
