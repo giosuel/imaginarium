@@ -14,7 +14,7 @@
 //!   (we keep the toolkit); the binary measures the canvas work of M2.8,
 //!   then is folded into a benchmark or deleted.
 //!
-//! # Measurements so far (M2.3)
+//! # Measurements
 //! - Cold start: process start (`/proc/self/stat`) and `main` until the
 //!   first presented frame, and loading the fonts.
 //! - Scripted pan: per-frame paint (toolkit), encode and submit (renderer),
@@ -141,8 +141,13 @@ const BUILD: &str = match option_env!("IMAGINARIUM_BUILD") {
     None => "development build",
 };
 
-/// Frames to wait at most for owed tiles before idling.
+/// Frames to wait at most for owed tiles (and a pending level switch)
+/// before the next phase; the report says when a wait ran out.
 const MAX_SETTLE_FRAMES: u32 = 600;
+
+/// Frames of a manual session kept per board, at most (an hour at 60 Hz):
+/// a session left open doesn't grow without end.
+const MAX_MANUAL_FRAMES: usize = 216_000;
 
 /// In a manual session, a frame interval longer than this is a pause.
 const MANUAL_GAP: Duration = Duration::from_millis(100);
@@ -150,6 +155,9 @@ const MANUAL_GAP: Duration = Duration::from_millis(100);
 /// What follows a [`Phase::Settle`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Next {
+    /// Typing into the search: after the cards pan's owed tiles, so the
+    /// typing's tile count is only its own.
+    Type,
     Shapes(ShapePhase),
     Idle,
 }
@@ -168,9 +176,10 @@ enum Phase {
     /// The shapes board: panning, zooming, dragging a shape, with this
     /// many frames to go.
     Shapes(ShapePhase, u32),
-    /// Waiting until nothing is left to draw (the cleared search, tiles
-    /// the time budget left over), so the next phase measures only its own
-    /// work; with the frames waited so far and the phase that follows.
+    /// Waiting until nothing is left to draw (tiles the time budget left
+    /// over, a level switch after a zoom), so the next phase measures only
+    /// its own work; with the frames waited so far and the phase that
+    /// follows.
     Settle(u32, Next),
     /// Idling since the instant, with the CPU time and frame count then.
     Idle {
@@ -206,6 +215,8 @@ struct Gate {
     shape_samples: [Vec<CanvasSample>; 3],
     /// Frames and time waited for owed tiles before each shapes phase.
     settled: [Option<(u32, Duration)>; 3],
+    /// The same before the typing.
+    settled_typing: Option<(u32, Duration)>,
     settle_started: Option<Instant>,
     /// Tiles rendered during the cards pan.
     pan_canvas: Vec<CanvasSample>,
@@ -318,7 +329,8 @@ enum ShapePhase {
 /// One frame of a canvas phase.
 #[derive(Clone, Copy, Debug, Default)]
 struct CanvasSample {
-    /// Everything on the UI thread: paint, texture renders, encode, submit.
+    /// The work on the UI thread: paint, texture renders, encode, submit
+    /// without a present that blocks.
     frame: Duration,
     paint: Duration,
     textures: Duration,
@@ -327,7 +339,8 @@ struct CanvasSample {
     submit: Duration,
     /// The wait for the window's texture (vertical sync, or the GPU).
     acquire: Duration,
-    /// Presenting (part of the frame time; blocks on some systems).
+    /// Presenting (of `submit`; blocks on some systems, a wait that
+    /// `frame` leaves out).
     present: Duration,
     interval: Duration,
     rendered: usize,
@@ -417,7 +430,12 @@ impl Gate {
     fn canvas_sample(&self, frame: &FrameInfo, interval: Duration) -> CanvasSample {
         let canvas = self.app.board.borrow().last_canvas.clone();
         CanvasSample {
-            frame: frame.paint + frame.render.textures + frame.render.encode + frame.render.submit,
+            // Work on the UI thread: a present that blocks (Mesa's
+            // software GPU on X11) is a wait, as the acquire is.
+            frame: frame.paint
+                + frame.render.textures
+                + frame.render.encode
+                + frame.render.submit.saturating_sub(frame.render.present),
             paint: frame.paint,
             textures: frame.render.textures,
             encode: frame.render.encode,
@@ -504,13 +522,55 @@ impl Gate {
 
     fn after_pan(&mut self) -> bool {
         if self.type_keys > 0 {
-            self.phase = Phase::Type(self.type_keys);
-            self.type_key();
+            self.settle(Next::Type);
             true
         } else {
             // On to the palette and the shapes, whatever is left.
             self.after_typing()
         }
+    }
+}
+
+impl Gate {
+    /// The script's state for `args`, showing `app`.
+    fn new(args: &Args, app: App) -> anyhow::Result<Self> {
+        let idle = Duration::try_from_secs_f64(args.idle_seconds.max(0.0))
+            .context("--idle-seconds must be a number of seconds")?;
+        Ok(Self {
+            app,
+            palette_keys: args.palette_keys,
+            palette: Vec::new(),
+            shape_frames: args.shape_frames,
+            shape_samples: [Vec::new(), Vec::new(), Vec::new()],
+            settled: [None; 3],
+            settled_typing: None,
+            settle_started: None,
+            pan_canvas: Vec::new(),
+            dragged: None,
+            measure: args.measure,
+            pan_frames: args.pan_frames,
+            type_keys: args.type_keys,
+            idle,
+            close_after_frames: args.frames,
+            phase: Phase::Start,
+            frames: 0,
+            first_frame: None,
+            last_frame: None,
+            last_at: None,
+            pan: Vec::new(),
+            pan_layouts: 0,
+            typing: Vec::new(),
+            pending_key: None,
+            typed: 0,
+            idle_result: None,
+            inputs: 0,
+            inputs_during_idle: 0,
+            manual: [Vec::new(), Vec::new()],
+            missing_textures: 0,
+            gpu_times: std::collections::HashMap::new(),
+            idle_causes: CauseCounts::default(),
+            gaps: Vec::new(),
+        })
     }
 }
 
@@ -561,7 +621,9 @@ impl View for Gate {
                 + frame.render.submit.saturating_sub(frame.render.present),
         );
         self.missing_textures += u64::from(frame.render.missing_textures);
-        if let Some(gpu) = frame.render.gpu {
+        if let Some(gpu) = frame.render.gpu
+            && self.gpu_times.len() < 2 * MAX_MANUAL_FRAMES
+        {
             self.gpu_times.insert(gpu.frame, gpu);
         }
         if matches!(self.phase, Phase::Idle { .. }) {
@@ -590,7 +652,9 @@ impl View for Gate {
                 };
                 let sample = self.canvas_sample(frame, interval);
                 let board = self.app.board.borrow().mode() as usize;
-                self.manual[board].push(sample);
+                if self.manual[board].len() < MAX_MANUAL_FRAMES {
+                    self.manual[board].push(sample);
+                }
                 false
             }
             Phase::Start if self.pan_frames > 0 => {
@@ -619,8 +683,12 @@ impl View for Gate {
                 }
             }
             Phase::Settle(frames, next) => {
-                // The board draws again by itself while tiles are owed.
-                if self.app.board.borrow().owed && frames < MAX_SETTLE_FRAMES {
+                // The board draws again by itself while tiles are owed,
+                // and wakes for a level switch after a zoom.
+                let board = self.app.board.borrow();
+                let busy = board.owed || board.wake_at().is_some();
+                drop(board);
+                if busy && frames < MAX_SETTLE_FRAMES {
                     self.phase = Phase::Settle(frames + 1, next);
                     return false;
                 }
@@ -629,6 +697,12 @@ impl View for Gate {
                     Next::Idle => {
                         self.start_idle();
                         false
+                    }
+                    Next::Type => {
+                        self.settled_typing = waited.map(|waited| (frames, waited));
+                        self.phase = Phase::Type(self.type_keys);
+                        self.type_key();
+                        true
                     }
                     Next::Shapes(which) => {
                         self.settled[which as usize] = waited.map(|waited| (frames, waited));
@@ -882,11 +956,42 @@ fn canvas_report(
         // At the phase's end: the window can change size meanwhile (a
         // compositor making it fullscreen after the first frame).
         "physical_size": samples.last().map(|s| [s.size.0, s.size.1]),
-        "settled_before": settled.map(|(frames, waited)| serde_json::json!({
+        "settled_before": settled_report(settled),
+    })
+}
+
+/// The frames and time waited before a phase, and whether the wait ran
+/// out (the phase then started with tiles owed).
+fn settled_report(settled: Option<(u32, Duration)>) -> serde_json::Value {
+    settled.map_or(serde_json::Value::Null, |(frames, waited)| {
+        serde_json::json!({
             "frames": frames,
             "ms": millis(waited),
-        })),
+            "timed_out": frames >= MAX_SETTLE_FRAMES,
+        })
     })
+}
+
+/// Criterion 1 for one phase: p99 frame time (work on the UI thread)
+/// under 16 ms, and, with vertical sync, 60 frames per second or more:
+/// at most 1 % of the intervals over 20 ms (a missed refresh at 60 Hz).
+/// Without vertical sync frames come as fast as they can, so only the
+/// p99 counts. `None` without samples.
+fn criterion_1(samples: &[CanvasSample], vsync: bool) -> Option<bool> {
+    let p99 = percentile(samples.iter().map(|sample| sample.frame).collect(), 0.99)?;
+    let missed = samples
+        .iter()
+        .filter(|sample| sample.interval > Duration::from_millis(20))
+        .count();
+    Some(p99 < Duration::from_millis(16) && (!vsync || missed * 100 <= samples.len()))
+}
+
+/// Criterion 2: dragging re-renders only the tiles under the shape (its
+/// old and new place), at most 4 per frame, past the frame that lifts
+/// it. `None` when it can't tell: without tiles, or without a frame past
+/// the lift.
+fn criterion_2(samples: &[CanvasSample], tiles: bool) -> Option<bool> {
+    (tiles && samples.len() >= 2).then(|| samples.iter().skip(1).all(|sample| sample.rendered <= 4))
 }
 
 /// The `count` longest intervals in `gaps`, longest first, with the phase
@@ -1012,47 +1117,15 @@ fn main() -> anyhow::Result<()> {
         .tile_threads
         .unwrap_or_else(TileWorkers::default_threads);
     let workers = (tile_threads > 0).then(|| TileWorkers::new(tile_threads, CpuMode::Fast));
-    let mut gate = Gate {
-        app: App::new(
-            fonts,
-            args.cards,
-            args.shapes,
-            args.commands,
-            !args.no_tiles,
-            workers.clone(),
-        ),
-        palette_keys: args.palette_keys,
-        palette: Vec::new(),
-        shape_frames: args.shape_frames,
-        shape_samples: [Vec::new(), Vec::new(), Vec::new()],
-        settled: [None; 3],
-        settle_started: None,
-        pan_canvas: Vec::new(),
-        dragged: None,
-        measure: args.measure,
-        pan_frames: args.pan_frames,
-        type_keys: args.type_keys,
-        idle: Duration::from_secs_f64(args.idle_seconds.max(0.0)),
-        close_after_frames: args.frames,
-        phase: Phase::Start,
-        frames: 0,
-        first_frame: None,
-        last_frame: None,
-        last_at: None,
-        pan: Vec::new(),
-        pan_layouts: 0,
-        typing: Vec::new(),
-        pending_key: None,
-        typed: 0,
-        idle_result: None,
-        inputs: 0,
-        inputs_during_idle: 0,
-        manual: [Vec::new(), Vec::new()],
-        missing_textures: 0,
-        gpu_times: std::collections::HashMap::new(),
-        idle_causes: CauseCounts::default(),
-        gaps: Vec::new(),
-    };
+    let app = App::new(
+        fonts,
+        args.cards,
+        args.shapes,
+        args.commands,
+        !args.no_tiles,
+        workers.clone(),
+    );
+    let mut gate = Gate::new(&args, app)?;
     // The time from exec to `main` (loading the binary and its libraries)
     // is measured separately from the time in `main`.
     let before_main = proc::since_exec().map(|since| since.saturating_sub(main_started.elapsed()));
@@ -1097,22 +1170,17 @@ fn main() -> anyhow::Result<()> {
             "pass": gate.idle_causes.by_itself == 0 && idle.cpu.is_none_or(|cpu| cpu.as_secs_f64() / idle.wall.as_secs_f64() < 0.01),
         })
     });
-    // Criterion 1: p99 frame time under 16 ms while panning and zooming
-    // 10,000 shapes. (Frames per second come from the intervals with
-    // vertical sync; --no-vsync shows the headroom.)
-    let criterion_1 = [&gate.shape_samples[0], &gate.shape_samples[1]]
-        .iter()
-        .all(|samples| {
-            percentile(samples.iter().map(|sample| sample.frame).collect(), 0.99)
-                .is_some_and(|p99| p99 < Duration::from_millis(16))
-        });
-    // Criterion 2: dragging re-renders only the tiles under the shape (its
-    // old and new place): at most 4 per frame.
-    let criterion_2 = !gate.shape_samples[2].is_empty()
-        && gate.shape_samples[2]
-            .iter()
-            .skip(1)
-            .all(|sample| sample.rendered <= 4);
+    // Criterion 1 while panning and zooming 10,000 shapes; --no-vsync
+    // shows the headroom.
+    let vsync = !args.no_vsync;
+    let criterion_1 = match (
+        criterion_1(&gate.shape_samples[0], vsync),
+        criterion_1(&gate.shape_samples[1], vsync),
+    ) {
+        (Some(pan), Some(zoom)) => Some(pan && zoom),
+        _ => None,
+    };
+    let criterion_2 = criterion_2(&gate.shape_samples[2], !args.no_tiles);
     // The time to the first frame without the GPU's share of it: what the
     // start takes if the GPU were open at once.
     let without_gpu_setup = stats.first_frame.map(|first| {
@@ -1122,7 +1190,7 @@ fn main() -> anyhow::Result<()> {
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
         "build": BUILD,
-        "milestone": "M2.8",
+        "milestone": "M2.9",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -1181,7 +1249,7 @@ fn main() -> anyhow::Result<()> {
         "content": {
             "cards": gate.app.board.borrow().cards(),
             "shapes": gate.app.board.borrow().shape_count(),
-            "commands": args.commands,
+            "commands": gate.app.command_count,
             "tiles": !args.no_tiles,
             // 0: tiles render in the frame, on the GPU.
             "tile_threads": workers.as_ref().map_or(0, TileWorkers::threads),
@@ -1222,8 +1290,9 @@ fn main() -> anyhow::Result<()> {
             "paint": summary(typing(|sample| sample.paint)),
             "encode": summary(typing(|sample| sample.encode)),
             // Searching dims the cards it misses over the tiles, so no
-            // tile renders again.
+            // tile renders again (the pan's owed tiles are done before).
             "tiles_rendered": gate.typing.iter().map(|sample| sample.rendered).sum::<usize>(),
+            "settled_before": settled_report(gate.settled_typing),
         },
         "palette": {
             // Criterion 3: the search over all commands per keystroke.
@@ -1253,4 +1322,257 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("writing {}", args.report.display()))?;
     println!("{text}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use imaginarium_render::FrameTiming;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn sample(frame: u64, interval: u64) -> CanvasSample {
+        CanvasSample {
+            frame: ms(frame),
+            interval: ms(interval),
+            ..CanvasSample::default()
+        }
+    }
+
+    #[test]
+    fn percentiles_of_one_or_two_samples() {
+        assert_eq!(percentile(Vec::new(), 0.99), None);
+        assert_eq!(percentile(vec![ms(5)], 0.99), Some(ms(5)));
+        assert_eq!(percentile(vec![ms(9), ms(5)], 0.99), Some(ms(9)));
+        assert_eq!(percentile(vec![ms(9), ms(5)], 0.5), Some(ms(9)));
+        assert_eq!(summary(Vec::new()), serde_json::Value::Null);
+        assert_eq!(summary(vec![ms(4)])["p95_ms"], 4.0);
+        // p99 of 240 is the third largest.
+        let mut many: Vec<Duration> = (1..=240).map(ms).collect();
+        many.reverse();
+        assert_eq!(percentile(many, 0.99), Some(ms(238)));
+    }
+
+    #[test]
+    fn criterion_1_needs_short_frames_and_with_vsync_sixty_per_second() {
+        let fast: Vec<CanvasSample> = (0..240).map(|_| sample(5, 16)).collect();
+        assert_eq!(criterion_1(&fast, true), Some(true));
+        // Short frames, but a GPU that doesn't keep up: 30 per second.
+        let behind: Vec<CanvasSample> = (0..240).map(|_| sample(5, 33)).collect();
+        assert_eq!(criterion_1(&behind, true), Some(false));
+        assert_eq!(
+            criterion_1(&behind, false),
+            Some(true),
+            "no vsync: headroom only"
+        );
+        // Two missed refreshes in 240 are within 1 %, three aren't.
+        let mut some: Vec<CanvasSample> = (0..240).map(|_| sample(5, 16)).collect();
+        some[10].interval = ms(25);
+        some[20].interval = ms(25);
+        assert_eq!(criterion_1(&some, true), Some(true));
+        some[30].interval = ms(25);
+        assert_eq!(criterion_1(&some, true), Some(false));
+        let slow: Vec<CanvasSample> = (0..240)
+            .map(|i| sample(if i < 3 { 17 } else { 5 }, 16))
+            .collect();
+        assert_eq!(criterion_1(&slow, true), Some(false), "p99 over 16 ms");
+        assert_eq!(criterion_1(&[], true), None);
+    }
+
+    #[test]
+    fn criterion_2_says_nothing_without_tiles_or_frames_past_the_lift() {
+        let drag = |rendered: &[usize]| -> Vec<CanvasSample> {
+            rendered
+                .iter()
+                .map(|&rendered| CanvasSample {
+                    rendered,
+                    ..CanvasSample::default()
+                })
+                .collect()
+        };
+        assert_eq!(
+            criterion_2(&drag(&[12, 3, 4, 2]), true),
+            Some(true),
+            "the lift may render more"
+        );
+        assert_eq!(criterion_2(&drag(&[12, 3, 5]), true), Some(false));
+        assert_eq!(criterion_2(&drag(&[12]), true), None);
+        assert_eq!(criterion_2(&drag(&[0, 0]), false), None);
+    }
+
+    #[test]
+    fn a_blocking_present_is_not_frame_time() {
+        let gate = scripted(&["--measure"]);
+        let frame = FrameInfo {
+            number: 1,
+            paint: ms(2),
+            render: FrameTiming {
+                encode: ms(3),
+                submit: ms(15),
+                present: ms(13),
+                ..FrameTiming::default()
+            },
+            at: ms(0),
+            scale: 1.0,
+            physical_size: (1280, 800),
+            causes: FrameCauses::default(),
+        };
+        assert_eq!(gate.canvas_sample(&frame, ms(16)).frame, ms(7));
+    }
+
+    fn scripted(args: &[&str]) -> Gate {
+        let mut all = vec![
+            "imaginarium-gate",
+            "--cards",
+            "40",
+            "--shapes",
+            "200",
+            "--commands",
+            "40",
+        ];
+        all.extend_from_slice(args);
+        let args = Args::parse_from(all);
+        let app = App::new(
+            Fonts::bundled_only(),
+            args.cards,
+            args.shapes,
+            args.commands,
+            true,
+            None,
+        );
+        Gate::new(&args, app).unwrap()
+    }
+
+    /// Presents frames until the script idles, and names the phase each
+    /// frame was drawn in.
+    fn phases(gate: &mut Gate) -> Vec<&'static str> {
+        let mut seen = Vec::new();
+        for number in 1..10_000 {
+            if matches!(gate.phase, Phase::Idle { .. } | Phase::Done) {
+                return seen;
+            }
+            seen.push(gate.phase.name());
+            let frame = FrameInfo {
+                number,
+                paint: ms(1),
+                render: FrameTiming::default(),
+                at: ms(16 * number),
+                scale: 1.0,
+                physical_size: (1280, 800),
+                causes: FrameCauses::default(),
+            };
+            gate.presented(&frame);
+        }
+        panic!("the script never idled: {:?}", seen.last());
+    }
+
+    fn runs(phases: &[&'static str]) -> Vec<(&'static str, usize)> {
+        let mut runs: Vec<(&'static str, usize)> = Vec::new();
+        for &phase in phases {
+            match runs.last_mut() {
+                Some((last, count)) if *last == phase => *count += 1,
+                _ => runs.push((phase, 1)),
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn the_script_runs_every_phase_in_order_and_settles_between() {
+        let mut gate = scripted(&[
+            "--measure",
+            "--pan-frames",
+            "3",
+            "--type-keys",
+            "2",
+            "--palette-keys",
+            "2",
+            "--shape-frames",
+            "2",
+        ]);
+        let seen = phases(&mut gate);
+        assert_eq!(
+            runs(&seen),
+            [
+                ("start", 1),
+                ("cards pan", 3),
+                ("settle", 1),
+                ("typing", 2),
+                ("palette", 2),
+                ("settle", 1),
+                ("shapes pan", 2),
+                ("settle", 1),
+                ("shapes zoom", 2),
+                ("settle", 1),
+                ("shapes drag", 2),
+                ("settle", 1),
+            ]
+        );
+        assert_eq!(gate.typing.len(), 2);
+        assert_eq!(gate.palette.len(), 2);
+        assert!(gate.shape_samples.iter().all(|samples| samples.len() == 2));
+        assert!(gate.settled_typing.is_some() && gate.settled.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn phases_left_out_lead_on_to_the_next() {
+        // dff4083: without typing, the script went straight to idle.
+        let mut gate = scripted(&[
+            "--measure",
+            "--pan-frames",
+            "2",
+            "--type-keys",
+            "0",
+            "--palette-keys",
+            "0",
+            "--shape-frames",
+            "1",
+        ]);
+        let seen = runs(&phases(&mut gate));
+        assert_eq!(
+            seen.iter().map(|(phase, _)| *phase).collect::<Vec<_>>(),
+            [
+                "start",
+                "cards pan",
+                "settle",
+                "shapes pan",
+                "settle",
+                "shapes zoom",
+                "settle",
+                "shapes drag",
+                "settle"
+            ]
+        );
+        let mut nothing = scripted(&[
+            "--measure",
+            "--pan-frames",
+            "0",
+            "--type-keys",
+            "0",
+            "--palette-keys",
+            "0",
+            "--shape-frames",
+            "0",
+        ]);
+        assert_eq!(runs(&phases(&mut nothing)), [("start", 1), ("settle", 1)]);
+    }
+
+    #[test]
+    fn idle_seconds_must_be_a_duration() {
+        let args = Args::parse_from([
+            "imaginarium-gate",
+            "--idle-seconds",
+            "inf",
+            "--cards",
+            "4",
+            "--shapes",
+            "4",
+            "--commands",
+            "4",
+        ]);
+        let app = App::new(Fonts::bundled_only(), 4, 4, 4, true, None);
+        assert!(Gate::new(&args, app).is_err());
+    }
 }

@@ -46,6 +46,9 @@ pub(crate) struct App {
     size: Size,
     mode_request: Rc<Cell<Option<Mode>>>,
     updates_request: Rc<Cell<bool>>,
+    /// The commands the palette searches (fewer than asked for if the
+    /// generator ran out of combinations).
+    pub(crate) command_count: usize,
 }
 
 fn input_colors() -> InputColors {
@@ -353,6 +356,7 @@ impl App {
             size: Size::ZERO,
             mode_request,
             updates_request,
+            command_count,
         }
     }
 
