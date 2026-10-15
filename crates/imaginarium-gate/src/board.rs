@@ -117,8 +117,10 @@ pub(crate) struct Board {
     dragging: Option<Point>,
     /// The card whose body is being edited, and its field.
     editing: Option<(usize, TextField)>,
-    /// Cards whose title matches the search; `None`: no search.
+    /// Cards whose title or body matches the search; `None`: no search.
     matches: Option<Vec<bool>>,
+    /// The search's query, to search again when a card's text changes.
+    query: String,
     /// The viewport (window coordinates) from the last paint.
     viewport: Rect,
 }
@@ -181,6 +183,7 @@ impl Board {
             dragging: None,
             editing: None,
             matches: None,
+            query: String::new(),
             viewport: Rect::ZERO,
         };
         board.haystacks = (0..cards).map(|index| board.haystack(index)).collect();
@@ -333,8 +336,9 @@ impl Board {
         self.origin = before - (anchor - self.viewport.origin()) / self.zoom;
     }
 
-    /// Highlights cards whose title contains `query` (case-insensitive);
-    /// an empty query clears it. Returns the number of matches.
+    /// Highlights cards whose title or body contains `query`
+    /// (case-insensitive); an empty query clears it. Returns the number of
+    /// matches.
     ///
     /// The others are dimmed by a veil drawn over the tiles each frame
     /// ([`Board::paint_dimming`]), not in them: every keystroke would make
@@ -342,6 +346,7 @@ impl Board {
     /// the typing.
     pub(crate) fn search(&mut self, query: &str) -> Option<usize> {
         let query = query.trim().to_lowercase();
+        self.query.clone_from(&query);
         if query.is_empty() {
             self.matches = None;
             return None;
@@ -387,6 +392,11 @@ impl Board {
             field.blur(fonts);
             self.bodies[index] = field.text();
             self.haystacks[index] = self.haystack(index);
+            // The edit may have made it match the search, or not.
+            if self.matches.is_some() {
+                let query = self.query.clone();
+                self.search(&query);
+            }
             self.texts.remove(&index);
             self.cards_canvas
                 .invalidate(card_bounds(card_rect(self.columns, index)));
@@ -1013,6 +1023,19 @@ mod tests {
         let count = board.search("planning").unwrap_or(0);
         assert!(count > 0 && count < 100);
         assert_eq!(board.search("zzz-not-there"), Some(0));
+    }
+
+    #[test]
+    fn editing_a_card_during_a_search_updates_its_dimming() {
+        let mut fonts = Fonts::bundled_only();
+        let mut board = board();
+        assert_eq!(board.search("zebracorn"), Some(0));
+        board.start_editing(&mut fonts, 3);
+        if let Some((_, field)) = &mut board.editing {
+            field.editor().insert(&mut fonts, " zebracorn");
+        }
+        board.stop_editing(&mut fonts);
+        assert_eq!(board.matches.as_ref().map(|m| m[3]), Some(true));
     }
 
     #[test]

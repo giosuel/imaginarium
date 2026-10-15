@@ -595,6 +595,20 @@ impl Canvas {
         self.invalidate(bounds);
     }
 
+    /// Like [`Canvas::upsert`], but only the new area is redrawn: for an
+    /// item whose old area was invalidated while the content didn't paint
+    /// it there (a dragged shape is lifted out of the tiles and drawn live
+    /// meanwhile). Tiles rendered since then are right without it, and
+    /// the others are stale already.
+    pub fn upsert_drawn_elsewhere(&mut self, id: ItemId, z: u64, bounds: Rect) {
+        let Some(old) = self.items.remove(&id) else {
+            self.upsert(id, z, bounds);
+            return;
+        };
+        self.unlink(id, old.bounds);
+        self.upsert(id, z, bounds);
+    }
+
     /// Removes an item; its area is redrawn.
     pub fn remove(&mut self, id: ItemId) {
         if let Some(item) = self.items.remove(&id) {
@@ -2353,6 +2367,28 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn an_item_drawn_elsewhere_redraws_only_its_new_place() {
+        let (mut canvas, mut boxes) = board(2_000);
+        let view = viewport(Point::ZERO, 1.0);
+        canvas.frame(&mut Scene::new(), &view, Instant::now(), &mut boxes);
+        // Item 0 is lifted: its tiles render once without it.
+        let old = boxes.bounds[&ItemId(0)];
+        canvas.invalidate(old);
+        canvas.frame(&mut Scene::new(), &view, Instant::now(), &mut boxes);
+        let new = old + Vec2::new(700.0, 400.0);
+        canvas.upsert_drawn_elsewhere(ItemId(0), 0, new);
+        boxes.bounds.insert(ItemId(0), new);
+        let grow = 1.0;
+        for (key, tile) in &canvas.tiles {
+            let under_new = key.bounds().intersect(new.inflate(grow, grow)).area() > 0.0;
+            assert_eq!(tile.stale, under_new, "{key:?}");
+        }
+        assert_eq!(canvas.bounds(ItemId(0)), Some(new));
+        assert_eq!(canvas.item_at(new.center()), Some(ItemId(0)));
+        assert_eq!(canvas.item_at(old.center()), None);
     }
 
     #[test]

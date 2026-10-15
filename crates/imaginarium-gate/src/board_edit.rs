@@ -122,8 +122,12 @@ impl Board {
             self.top_z += 1;
             self.shapes[index].z = self.top_z;
             let shape = &self.shapes[index];
-            self.shapes_canvas
-                .upsert(ItemId(index as u64), shape.z, shape.bounds());
+            // Its old place was redrawn without it when it was lifted.
+            self.shapes_canvas.upsert_drawn_elsewhere(
+                ItemId(index as u64),
+                shape.z,
+                shape.bounds(),
+            );
         }
         if lift.total != Vec2::ZERO {
             self.record(ShapeEdit::Move {
@@ -136,7 +140,8 @@ impl Board {
     /// Moves the selection by `delta` (arrow keys).
     pub(super) fn nudge(&mut self, delta: Vec2) {
         let ids: Vec<usize> = self.selection.iter().copied().collect();
-        if ids.is_empty() {
+        // Edits wait for the drag to end: it owns the selection's places.
+        if ids.is_empty() || self.lifted.is_some() {
             return;
         }
         self.apply_move(&ids, delta);
@@ -154,6 +159,9 @@ impl Board {
 
     /// Deletes the selection.
     pub(super) fn delete_selection(&mut self) {
+        if self.lifted.is_some() {
+            return;
+        }
         let ids: Vec<usize> = std::mem::take(&mut self.selection).into_iter().collect();
         if ids.is_empty() {
             return;
@@ -182,6 +190,9 @@ impl Board {
 
     /// Undoes the last change; `false` if there is none.
     pub(super) fn undo(&mut self) -> bool {
+        if self.lifted.is_some() {
+            return false;
+        }
         let Some(edit) = self.undo.pop() else {
             return false;
         };
@@ -198,6 +209,9 @@ impl Board {
 
     /// Redoes the last undone change; `false` if there is none.
     pub(super) fn redo(&mut self) -> bool {
+        if self.lifted.is_some() {
+            return false;
+        }
         let Some(edit) = self.redo.pop() else {
             return false;
         };
@@ -265,6 +279,27 @@ mod tests {
         assert_eq!(board.shapes[3].rect, before);
         assert!(board.redo());
         assert_eq!(board.shapes[3].rect, before + Vec2::new(40.0, 10.0));
+    }
+
+    #[test]
+    fn edits_wait_for_a_drag_to_end() {
+        let mut board = Board::new(10, 100, true, None);
+        let rect = board.shapes[3].rect;
+        board.select_only(3);
+        board.lift(rect.center());
+        board.drag_to(rect.center() + Vec2::new(500.0, 0.0));
+        board.delete_selection();
+        board.nudge(Vec2::new(1.0, 0.0));
+        assert!(!board.undo());
+        board.drop_lift();
+        let moved = rect + Vec2::new(500.0, 0.0);
+        assert_eq!(board.shapes[3].rect, moved);
+        assert!(!board.deleted[3], "not deleted while dragged");
+        assert_eq!(board.selection_len(), 1);
+        assert_eq!(
+            board.shapes_canvas.item_at(moved.center()),
+            Some(imaginarium_render::canvas::ItemId(3))
+        );
     }
 
     #[test]
