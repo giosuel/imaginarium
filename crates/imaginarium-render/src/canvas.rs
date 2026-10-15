@@ -145,7 +145,7 @@ pub fn level_scale(level: i32) -> f64 {
 }
 
 /// The smallest level whose scale is at least `scale`: tiles are never
-/// magnified and at most √2 too fine (within ±[`MAX_LEVEL`]).
+/// magnified and at most √2 too fine (within ±64).
 pub fn level_for(scale: f64) -> i32 {
     ((2.0 * scale.max(1e-6).log2() - 1e-9).ceil() as i32).clamp(-MAX_LEVEL, MAX_LEVEL)
 }
