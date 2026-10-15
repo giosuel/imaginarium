@@ -80,8 +80,26 @@ Since M2.8, each canvas phase also reports:
 - `acquire`: the swapchain wait.
 - `physical_size`: the window's size.
 - `settled_before`: the wait for owed tiles before the phase. Each shapes
-  phase starts once none are owed.
+  phase starts once none are owed and no level switch is pending, and so
+  does the typing (since M2.9). `timed_out` says the wait ran out after
+  600 frames and the phase started with tiles owed.
 - `slowest_textures`: the parts of the phase's slowest tile frame.
+
+How criteria 1 and 2 are judged (`shapes.criterion_1_pass`,
+`shapes.criterion_2_pass`; since the M2.9 review):
+- **Criterion 1**, for the pan and the zoom: the p99 frame time is under
+  16 ms, and with vertical sync at most 1 % of the intervals are over
+  20 ms (a missed refresh at 60 Hz: the frame rate). The frame time is
+  the work on the UI thread (`paint`, `textures`, `encode`, `submit`)
+  without a present that blocks (`present`; Mesa's software GPU waits
+  there), as the swapchain wait (`acquire`) isn't in it either. Without
+  vertical sync only the p99 counts. Before M2.9 the pass checked the
+  p99 alone, with the present in it.
+- **Criterion 2**: past the frame that lifts the shape, no drag frame
+  renders more than 4 tiles. `null` without tiles (`--no-tiles`) or
+  without a frame past the lift.
+- `typing.tiles_rendered` counts the typing's own tile renders: the
+  search dims cards over the tiles, so it should be 0.
 
 `monitor` has the screen, and `window` is the last frame's size.
 
@@ -117,8 +135,10 @@ works, odd (what), or broken.
     late or blurry, or seams between tiles?
 5b. Drag shapes around. Turn on "Tile updates" (Ctrl+T): tiles flash red
     when they re-render. A drag flashes the tiles under the shapes when it
-    starts and ends, none while they move (they are drawn live on top);
-    panning flashes only the tiles coming into view.
+    starts, and at the new place when it ends, none while they move (they
+    are drawn live on top); panning flashes only the tiles coming into
+    view. Does a shape show twice for a moment as the drag starts?
+    Delete or Ctrl+Z during a drag do nothing until it ends.
 5b2. Editing: click selects, Shift+click adds, Shift+drag on empty board
     draws a selection rectangle, Ctrl+A selects all; drag moves the
     selection, arrow keys nudge (Shift: 10), Delete removes, Ctrl+Z /
@@ -152,10 +172,14 @@ works, odd (what), or broken.
 12. The same while editing a card, also when zoomed in.
 13. Escape or switching the input method off during a composition leaves
     no stray text.
+13b. Start a composition in the search field, then double-click a card
+    before committing: the composition doesn't end up in the card.
 
 **Screen reader (criterion 4)**
 14. Start Orca (`orca`), then the gate. Orca announces the window
-    ("Imaginarium gate").
+    ("Imaginarium gate"). Also the other way round: the gate first, then
+    Orca while the caret blinks in the search field (this crashed the
+    gate before M2.9).
 15. Click into the search field: Orca says something like "Search cards,
     entry". Typing echoes characters; ←/→ read the character at the
     caret; Shift+arrows announce the selection.
@@ -171,13 +195,19 @@ works, odd (what), or broken.
     search field and the board (focus rings). Enter or Space on the button
     opens the palette.
 19. Copy and paste (Ctrl+C, Ctrl+X, Ctrl+V) in the search field and while
-    editing a card, also to and from other apps.
+    editing a card, also to and from other apps. (Since M2.9 the
+    clipboard is read on a thread of its own: the pasted text should
+    still appear at once.) Optional: with a Russian or Greek keyboard
+    layout, Ctrl+A, Ctrl+C and Ctrl+V still work.
 20. With Orca: the palette is announced as a dialog, the results as a list
     with options.
 
 **Idle and start (criterion 6)**
 21. Leave the window alone for a minute: `top -p "$(pidof imaginarium-gate)"`
     shows about 0 % CPU.
+21b. The same with the window minimized or on another workspace for a
+    minute: still about 0 % (before M2.9 a hidden window could redraw in
+    a loop).
 22. Does it open quickly? (The report has the number.)
 
 **Known gaps (not bugs yet):** no pinch zoom, no context menus, no

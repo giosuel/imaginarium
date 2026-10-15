@@ -51,9 +51,9 @@ several threads"), and ADR-0003 puts background work on a pool.
 3. **The pool is the canvas's own.** It isn't the general rayon pool of
    ADR-0003, which doesn't exist yet. Tile threads live as long as the
    window, and each keeps its own `vello_cpu` context and glyph cache.
-   The queue is first in, first out, with at most 8 tiles per thread at
-   once (4 until the owner's second run), so it follows what is on
-   screen.
+   The queue is first in, first out. A canvas hands it 8 tiles per
+   thread at most at once (4 until the owner's second run), so it
+   follows what is on screen.
 4. **Without workers, tiles render in the frame on the GPU**, as before.
    This applies when none could start, or later in a browser build.
 

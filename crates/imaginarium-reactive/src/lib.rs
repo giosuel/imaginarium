@@ -41,19 +41,25 @@
 //! writes works, but its effects run after it.)
 //!
 //! A computation whose closure panics keeps its previous value and runs
-//! again on its next change. Effects that were still pending wait for the
-//! next write.
+//! again on its next change (a memo without a previous value: on its next
+//! read). Effects that were still pending, and the one whose update
+//! panicked, wait for the next write. A panicking cleanup doesn't stop the
+//! others: the whole subtree is still disposed, then the panic goes on.
 //!
 //! Programming errors panic: reading a disposed handle (the `try_` methods
-//! return `None` instead), a memo that depends on itself, or writing a
-//! signal inside its own [`Signal::with`]. An effect that keeps triggering
-//! itself is stopped after a million runs: a panic in debug builds; in
-//! release builds the flush stops and drops its pending effects.
+//! return `None` instead), a memo that depends on itself, memos that keep
+//! writing each other's sources, or writing a signal inside its own
+//! [`Signal::with`]. An effect that keeps triggering itself is stopped
+//! after a million runs in one flush: a panic in debug builds; in release
+//! builds the flush stops, and its pending effects go on at the next
+//! write.
 //!
 //! Limits: memos are brought up to date recursively, so a chain of memos
-//! (each reading the previous one) deeper than a few thousand can overflow
-//! a small thread stack. Generations are 32-bit; a slot whose generation
-//! would wrap is retired.
+//! (each reading the previous one) takes stack for each memo: about 350
+//! bytes in a release build and 1.8 KB in a debug build on Linux, more on
+//! Windows. Windows gives the main thread 1 MiB: a chain of about 3,000
+//! fits in a release build, fewer than 500 in a debug build. Generations are
+//! 32-bit; a slot whose generation would wrap is retired.
 //!
 //! # Boundaries
 //! - **One graph per thread.** Handles are `Copy` but not `Send`: the graph

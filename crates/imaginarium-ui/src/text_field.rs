@@ -34,6 +34,9 @@ pub struct FieldResponse {
     pub submitted: bool,
     /// The field gave up the focus (Escape, or a press elsewhere).
     pub blurred: bool,
+    /// A screen reader acted on the field: it should get the focus (from
+    /// its owner, which knows who has it).
+    pub wants_focus: bool,
 }
 
 /// A single- or multi-line plain text field. It doesn't know where it is:
@@ -117,7 +120,8 @@ impl TextField {
     }
 
     /// Like [`TextField::input`], with copy, cut and paste (Ctrl/⌘ + C, X,
-    /// V; Shift+Delete and Shift+Insert as well).
+    /// V; Shift+Delete and Shift+Insert as well). A paste asks the
+    /// clipboard for its text, which comes back as [`Input::Paste`].
     pub fn input_with_clipboard(
         &mut self,
         fonts: &mut Fonts,
@@ -141,11 +145,14 @@ impl TextField {
             let cut = command("x") || (modifiers.shift && *key == Key::Delete);
             let paste = command("v") || (modifiers.shift && *key == Key::Other("Insert".into()));
             if copy || cut {
-                if let Some(text) = self.editor.selected_text() {
+                let selected = self.editor.selected_text().map(str::to_owned);
+                if let Some(text) = &selected {
                     clipboard.set_text(text);
                 }
                 let before = self.editor.text();
-                if cut {
+                // Without a selection, Delete would take the next
+                // character: there is nothing to cut.
+                if cut && selected.is_some() {
                     self.editor.edit(fonts, Edit::Delete);
                 }
                 self.blink_epoch = Instant::now();
@@ -157,15 +164,11 @@ impl TextField {
                 };
             }
             if paste {
-                let before = self.editor.text();
-                if let Some(text) = clipboard.text() {
-                    self.editor.insert(fonts, &text);
-                }
-                self.blink_epoch = Instant::now();
+                // The text arrives as `Input::Paste`: reading the
+                // clipboard may wait for another app.
+                clipboard.request_text();
                 return FieldResponse {
                     handled: true,
-                    repaint: true,
-                    changed: self.editor.text() != before,
                     ..FieldResponse::default()
                 };
             }
@@ -246,6 +249,13 @@ impl TextField {
                     },
                 }
             }
+            Input::Paste(text) if self.focused => {
+                if !self.editor.is_composing() {
+                    self.editor.insert(fonts, text);
+                }
+                response.handled = true;
+                response.repaint = true;
+            }
             Input::Ime(ime) if self.focused => {
                 match ime {
                     Ime::Preedit { text, cursor } => self.editor.compose(fonts, text, *cursor),
@@ -273,14 +283,18 @@ impl TextField {
         response
     }
 
-    /// Handles a screen reader's request for this field. `true` if it did
-    /// something.
-    pub fn access_action(&mut self, fonts: &mut Fonts, request: &ActionRequest, id: u64) -> bool {
-        match (&request.action, &request.data) {
-            (Action::Focus | Action::Click, _) => {
-                self.focus();
-                true
-            }
+    /// Handles a screen reader's request for this field (node `id`). It
+    /// doesn't take the focus itself: [`FieldResponse::wants_focus`] asks
+    /// the owner, so focus stays in one place.
+    pub fn access_action(
+        &mut self,
+        fonts: &mut Fonts,
+        request: &ActionRequest,
+        id: u64,
+    ) -> FieldResponse {
+        let before = self.editor.text();
+        let handled = match (&request.action, &request.data) {
+            (Action::Focus | Action::Click, _) => true,
             (Action::SetTextSelection, Some(ActionData::SetTextSelection(selection))) => {
                 let lines = self.editor.access_lines(fonts);
                 let offset = |position: &TextPosition| {
@@ -298,7 +312,6 @@ impl TextField {
                     (offset(&selection.anchor), offset(&selection.focus))
                 {
                     self.editor.select_bytes(fonts, anchor, focus);
-                    self.focus();
                     true
                 } else {
                     false
@@ -309,6 +322,13 @@ impl TextField {
                 true
             }
             _ => false,
+        };
+        FieldResponse {
+            handled,
+            repaint: handled,
+            changed: self.editor.text() != before,
+            wants_focus: handled,
+            ..FieldResponse::default()
         }
     }
 
@@ -372,7 +392,8 @@ impl TextField {
         let mut node = Node::new(role);
         node.set_label(label);
         node.set_bounds(rect(bounds));
-        node.set_value(self.editor.text());
+        // What is shown, as the text runs are: with a composition in it.
+        node.set_value(self.editor.shown_text());
         node.add_action(Action::Focus);
         node.add_action(Action::SetTextSelection);
         node.add_action(Action::ReplaceSelectedText);
@@ -384,15 +405,16 @@ impl TextField {
                 .iter()
                 .rposition(|line| line.start <= byte)
                 .unwrap_or(0);
-            let line = &lines[index];
             let mut chars = 0;
-            let mut at = line.start;
-            for &len in &line.character_lengths {
-                if at >= byte {
-                    break;
+            if let Some(line) = lines.get(index) {
+                let mut at = line.start;
+                for &len in &line.character_lengths {
+                    if at >= byte {
+                        break;
+                    }
+                    at += usize::from(len);
+                    chars += 1;
                 }
-                at += usize::from(len);
-                chars += 1;
             }
             TextPosition {
                 node: NodeId(id + 1 + index as u64),
@@ -555,6 +577,50 @@ mod tests {
         assert!(!field.input(&mut fonts, &typed("k"), BOUNDS).changed);
         field.input(&mut fonts, &Input::Ime(Ime::Commit("仮名".into())), BOUNDS);
         assert_eq!(field.text(), "仮名");
+    }
+
+    #[test]
+    fn cutting_without_a_selection_deletes_nothing() {
+        let mut fonts = Fonts::bundled_only();
+        let mut field = TextField::new("ab", TextStyle::new(16.0), false);
+        field.focus();
+        field
+            .editor()
+            .edit(&mut fonts, Edit::Move(Motion::TextStart));
+        let command = Modifiers {
+            ctrl: !cfg!(target_os = "macos"),
+            meta: cfg!(target_os = "macos"),
+            ..Modifiers::default()
+        };
+        let cut = key(Key::Character("x".into()), None, command);
+        let mut clipboard = Clipboard::default();
+        let response = field.input_with_clipboard(&mut fonts, &cut, BOUNDS, &mut clipboard);
+        assert!(response.handled && !response.changed);
+        assert_eq!(field.text(), "ab");
+    }
+
+    #[test]
+    fn the_access_value_shows_the_composition_like_the_runs() {
+        let mut fonts = Fonts::bundled_only();
+        let mut field = TextField::new("ab", TextStyle::new(16.0), false);
+        field.focus();
+        field.editor().edit(&mut fonts, Edit::Move(Motion::TextEnd));
+        let preedit = Input::Ime(Ime::Preedit {
+            text: "にほん".into(),
+            cursor: Some((9, 9)),
+        });
+        field.input(&mut fonts, &preedit, BOUNDS);
+        let mut tree = AccessTree::default();
+        field.access(&mut fonts, &mut tree, 10, BOUNDS, "Name");
+        let value = |id| {
+            tree.nodes()
+                .iter()
+                .find(|(node, _)| *node == NodeId(id))
+                .and_then(|(_, node)| node.value().map(str::to_owned))
+                .unwrap()
+        };
+        assert_eq!(value(10), value(11));
+        assert_eq!(value(10), "abにほん");
     }
 
     #[test]

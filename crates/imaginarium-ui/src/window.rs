@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 use imaginarium_render::kurbo::{Affine, Point, Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::{
-    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, RenderError, Scene,
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, RenderError, Scene, Skip,
     WindowRenderer,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::NamedKey;
+use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 /// What can go wrong running a window.
@@ -199,6 +199,10 @@ pub enum Input {
     /// Input method events, while [`View::ime_area`] says a text field
     /// has the focus.
     Ime(Ime),
+    /// Text read from the clipboard after a
+    /// [`Clipboard::request_text`](crate::Clipboard::request_text), for
+    /// the focused widget.
+    Paste(String),
     /// The window gained (`true`) or lost the keyboard focus.
     WindowFocus(bool),
 }
@@ -363,6 +367,8 @@ impl<V: View + ?Sized> View for &mut V {
 #[derive(Debug)]
 enum UserEvent {
     Access(accesskit_winit::Event),
+    /// The clipboard's thread read a text.
+    Pasted,
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -420,7 +426,18 @@ impl MonitorInfo {
 thread_local! {
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
     static SCALE_FACTOR: Cell<f64> = const { Cell::new(1.0) };
+    static IME_RESET: Cell<bool> = const { Cell::new(false) };
 }
+
+/// The keyboard focus moved: the input method starts over, so a
+/// composition begun in one field can't be committed into the next.
+pub(crate) fn reset_ime() {
+    IME_RESET.with(|reset| reset.set(true));
+}
+
+/// How long to wait before drawing again after the GPU gave no texture in
+/// time.
+const RETRY_AFTER_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// The window's scale factor (device pixels per logical pixel), for
 /// content that snaps to device pixels (canvas tiles).
@@ -456,6 +473,10 @@ pub fn run_with_gpu(
         .map_err(|err| UiError::EventLoop(err.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    let waker = proxy.clone();
+    crate::clipboard::set_waker(move || {
+        let _ = waker.send_event(UserEvent::Pasted);
+    });
     let mut shell = Shell {
         options,
         view,
@@ -472,7 +493,9 @@ pub fn run_with_gpu(
         ime: None,
         proxy,
         access: None,
-        access_initial: false,
+        occluded: false,
+        retry_at: None,
+        ime_resend: false,
         started: Instant::now(),
         stats: RunStats::default(),
         error: None,
@@ -509,8 +532,14 @@ struct Shell<V> {
     proxy: EventLoopProxy<UserEvent>,
     /// The screen reader bridge; idle until a screen reader asks.
     access: Option<accesskit_winit::Adapter>,
-    /// The next tree update must be a full one.
-    access_initial: bool,
+    /// The last frame was skipped because the window is hidden: draw again
+    /// when it shows (or something else asks), not in a loop.
+    occluded: bool,
+    /// After a frame skipped for a timeout: when to try again.
+    retry_at: Option<Instant>,
+    /// Send the input method's caret area even if it looks unchanged (the
+    /// scale factor changed, and with it the physical position).
+    ime_resend: bool,
     started: Instant,
     stats: RunStats,
     error: Option<UiError>,
@@ -558,7 +587,11 @@ impl<V: View> Shell<V> {
             return;
         };
         let area = self.view.ime_area();
-        if area == self.ime {
+        if IME_RESET.with(|reset| reset.replace(false)) && self.ime.is_some() {
+            window.set_ime_allowed(false);
+            self.ime = None;
+        }
+        if area == self.ime && !std::mem::take(&mut self.ime_resend) {
             return;
         }
         if area.is_some() != self.ime.is_some() {
@@ -579,17 +612,11 @@ impl<V: View> Shell<V> {
             return;
         };
         let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
-        let initial = self.access_initial;
-        let mut sent = false;
         adapter.update_if_active(|| {
-            sent = true;
             let mut tree = AccessTree::default();
             view.accessibility(&mut tree);
-            tree.into_update(title, scale, initial)
+            tree.into_update(title, scale)
         });
-        if sent {
-            self.access_initial = false;
-        }
     }
 
     fn deliver(&mut self, input: Input) {
@@ -642,8 +669,19 @@ impl<V: View> Shell<V> {
         );
         let render = match outcome {
             Ok(FrameOutcome::Presented(timing)) => timing,
-            Ok(FrameOutcome::Skipped) => {
-                window.request_redraw(); // try again when the surface is ready
+            // The causes stay: the frame that is drawn counts them.
+            Ok(FrameOutcome::Skipped(skip)) => {
+                match skip {
+                    Skip::Reconfigured => window.request_redraw(),
+                    Skip::Lost => match renderer.recreate_surface(window.clone()) {
+                        Ok(()) => window.request_redraw(),
+                        Err(err) => self.fail(event_loop, err.into()),
+                    },
+                    // Asking again at once would spin while it's minimized
+                    // (winit delivers redraws to hidden windows too).
+                    Skip::Occluded => self.occluded = true,
+                    Skip::Timeout => self.retry_at = Some(Instant::now() + RETRY_AFTER_TIMEOUT),
+                }
                 return;
             }
             Err(err) => {
@@ -651,6 +689,7 @@ impl<V: View> Shell<V> {
                 return;
             }
         };
+        self.occluded = false;
         self.stats.frames += 1;
         let mut causes = std::mem::take(&mut self.causes);
         if causes == FrameCauses::default() {
@@ -718,12 +757,17 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Access(event) = event;
-        match event.window_event {
-            accesskit_winit::WindowEvent::InitialTreeRequested => {
-                self.access_initial = true;
-                self.update_access();
+        let event = match event {
+            UserEvent::Access(event) => event,
+            UserEvent::Pasted => {
+                for text in crate::clipboard::take_pasted() {
+                    self.deliver(Input::Paste(text));
+                }
+                return;
             }
+        };
+        match event.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => self.update_access(),
             accesskit_winit::WindowEvent::ActionRequested(request) => {
                 if self.view.accessibility_action(&request) {
                     self.request_redraw(Cause::Access);
@@ -757,7 +801,12 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 // A move to a monitor with another scale (criterion 5). The
                 // new physical size follows as a `Resized` event.
                 self.scale = scale_factor;
+                self.ime_resend = true;
                 self.note_monitor();
+                self.request_redraw(Cause::Resize);
+            }
+            WindowEvent::Occluded(false) if self.occluded => {
+                self.occluded = false;
                 self.request_redraw(Cause::Resize);
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -828,6 +877,12 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if self.retry_at.is_some_and(|at| at <= now) {
+            self.retry_at = None;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
         let mut wake_at = self.view.wake_at();
         if wake_at.is_some_and(|at| at <= now) {
             if self.view.wake(now) {
@@ -847,6 +902,10 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         self.update_ime();
         // Sleep until input arrives or the view's timer runs out: nothing
         // is drawn unless something changed (gate criterion 6).
+        let wake_at = match (wake_at, self.retry_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -856,7 +915,91 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
 
 /// Translates a winit key event.
 fn key_input(event: &KeyEvent, modifiers: Modifiers) -> Input {
-    let key = match &event.logical_key {
+    // Shortcuts don't type. Ctrl + Alt is AltGr on Windows, which does.
+    let shortcut = (modifiers.ctrl && !modifiers.alt) || modifiers.meta;
+    let key = shortcut_key(logical_key(event), event.physical_key, shortcut);
+    let text = event
+        .text
+        .as_ref()
+        .map(|text| text.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|text| !text.is_empty() && !shortcut);
+    Input::Key {
+        key,
+        text,
+        pressed: event.state == ElementState::Pressed,
+        repeat: event.repeat,
+        modifiers,
+    }
+}
+
+/// With a shortcut modifier held, a letter of a non-Latin layout (Ctrl+С
+/// on a Russian keyboard) stands for the Latin letter on the same key, as
+/// in other apps: shortcuts are matched by their Latin names.
+fn shortcut_key(key: Key, physical: PhysicalKey, shortcut: bool) -> Key {
+    let Key::Character(typed) = &key else {
+        return key;
+    };
+    if !shortcut || typed.is_ascii() {
+        return key;
+    }
+    match latin_letter(physical) {
+        Some(letter) => Key::Character(letter.to_string()),
+        None => key,
+    }
+}
+
+/// The letter or digit a key has on a US layout.
+fn latin_letter(physical: PhysicalKey) -> Option<char> {
+    let PhysicalKey::Code(code) = physical else {
+        return None;
+    };
+    let letters = [
+        (KeyCode::KeyA, 'a'),
+        (KeyCode::KeyB, 'b'),
+        (KeyCode::KeyC, 'c'),
+        (KeyCode::KeyD, 'd'),
+        (KeyCode::KeyE, 'e'),
+        (KeyCode::KeyF, 'f'),
+        (KeyCode::KeyG, 'g'),
+        (KeyCode::KeyH, 'h'),
+        (KeyCode::KeyI, 'i'),
+        (KeyCode::KeyJ, 'j'),
+        (KeyCode::KeyK, 'k'),
+        (KeyCode::KeyL, 'l'),
+        (KeyCode::KeyM, 'm'),
+        (KeyCode::KeyN, 'n'),
+        (KeyCode::KeyO, 'o'),
+        (KeyCode::KeyP, 'p'),
+        (KeyCode::KeyQ, 'q'),
+        (KeyCode::KeyR, 'r'),
+        (KeyCode::KeyS, 's'),
+        (KeyCode::KeyT, 't'),
+        (KeyCode::KeyU, 'u'),
+        (KeyCode::KeyV, 'v'),
+        (KeyCode::KeyW, 'w'),
+        (KeyCode::KeyX, 'x'),
+        (KeyCode::KeyY, 'y'),
+        (KeyCode::KeyZ, 'z'),
+        (KeyCode::Digit0, '0'),
+        (KeyCode::Digit1, '1'),
+        (KeyCode::Digit2, '2'),
+        (KeyCode::Digit3, '3'),
+        (KeyCode::Digit4, '4'),
+        (KeyCode::Digit5, '5'),
+        (KeyCode::Digit6, '6'),
+        (KeyCode::Digit7, '7'),
+        (KeyCode::Digit8, '8'),
+        (KeyCode::Digit9, '9'),
+    ];
+    letters
+        .iter()
+        .find(|(key, _)| *key == code)
+        .map(|&(_, letter)| letter)
+}
+
+/// Our name for the key's meaning on the current layout.
+fn logical_key(event: &KeyEvent) -> Key {
+    match &event.logical_key {
         winit::keyboard::Key::Character(text) => Key::Character(text.to_string()),
         winit::keyboard::Key::Named(named) => match named {
             NamedKey::Enter => Key::Enter,
@@ -876,20 +1019,6 @@ fn key_input(event: &KeyEvent, modifiers: Modifiers) -> Input {
             other => Key::Other(format!("{other:?}")),
         },
         other => Key::Other(format!("{other:?}")),
-    };
-    // Shortcuts don't type. Ctrl + Alt is AltGr on Windows, which does.
-    let shortcut = (modifiers.ctrl && !modifiers.alt) || modifiers.meta;
-    let text = event
-        .text
-        .as_ref()
-        .map(|text| text.chars().filter(|c| !c.is_control()).collect::<String>())
-        .filter(|text| !text.is_empty() && !shortcut);
-    Input::Key {
-        key,
-        text,
-        pressed: event.state == ElementState::Pressed,
-        repeat: event.repeat,
-        modifiers,
     }
 }
 
@@ -929,6 +1058,21 @@ impl ClickCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts_on_non_latin_layouts_use_the_latin_letter() {
+        let c = PhysicalKey::Code(KeyCode::KeyC);
+        let cyrillic = || Key::Character("с".into());
+        assert_eq!(
+            shortcut_key(cyrillic(), c, true),
+            Key::Character("c".into())
+        );
+        assert_eq!(shortcut_key(cyrillic(), c, false), cyrillic(), "typing");
+        // Latin layouts keep theirs (Ctrl+Z on a German keyboard's Y key).
+        let z = Key::Character("z".into());
+        let y = PhysicalKey::Code(KeyCode::KeyY);
+        assert_eq!(shortcut_key(z.clone(), y, true), z);
+    }
 
     #[test]
     fn clicks_in_quick_succession_count_up_to_three() {

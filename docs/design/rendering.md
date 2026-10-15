@@ -168,18 +168,25 @@ Since M2.8, tiles render on **tile worker threads** with `vello_cpu`
 2. A worker renders the scene into a pixmap and sends it back.
 3. Until then, frames show a stand-in. The frame after the tile comes
    back uploads it (`Scene::upload_texture`) and draws it. Uploads take
-   half the frame's tile time at most, by their measured cost per tile
-   (`Canvas::note_render_time`), and 16 tiles at most. The others wait
-   for the next frame, the current level's first; building gets what
-   the uploads leave. On the gate laptop's Intel GPU, a frame that
-   uploaded all 57 tiles that came back took 13 ms for it.
+   half the frame's tile time at most before building, by their measured
+   cost per tile (`Canvas::note_render_time`), and what building leaves
+   after it; 16 tiles at most in a frame, including those of step 4. The
+   others wait for the next frame, the current level's first. On the
+   gate laptop's Intel GPU, a frame that uploaded all 57 tiles that came
+   back took 13 ms for it. A cost sample counts as four times the
+   estimate at most, so one frame that waited for a tile page or the
+   driver doesn't stall the uploads of the next ones (M2.9 review).
 4. A tile nothing can stand in for (newly in view, or every tile when a
    board opens) would show blank until then. For those, the frame that
    hands them over waits up to 4 ms, within what the rest of the frame
    leaves of 12 ms (their uploads included), and draws the ones back by
    then (`Canvas::with_blank_wait`).
-5. Each thread has at most 8 tiles at once, counting those back and
-   waiting to be uploaded, so the queue follows what is on screen.
+5. A canvas hands out 8 tiles per thread at most, counting those back
+   and waiting to be uploaded, so the queue follows what is on screen.
+   The cap is per canvas: two canvases on one pool can queue twice as
+   many. Tiles of a level no longer shown keep their places until they
+   are uploaded, which can delay a new level's tiles by a frame or two
+   after a zoom.
 6. On the GPU, uploaded tiles share pages of 64. The canvas says how many
    new tiles are coming (`Scene::expect_uploads`), so pages are made on a
    thread of their own while the workers render.
@@ -196,8 +203,14 @@ and other levels comes later, on the same workers.
   `CanvasContent` that paints an item into a tile on demand, with the
   level's scale, so content can pick a level of detail (cards drop their
   text below 30 %) without keeping display lists for every item.
-- The **grid index**, **levels**, **tile keys**, **invalidation**
-  (old ∪ new bounds plus a device pixel), the **budget**, **stand-ins**,
+- The **grid index** (items over more than 4,096 cells are kept in a
+  list of their own, and areas wider than the grid walk the grid instead
+  of its cells), **levels** (±64 at most), **tile keys**, **invalidation**
+  (old ∪ new bounds plus a device pixel; since the M2.9 review the tiles
+  over the area are looked up level by level instead of checking every
+  cached tile: moving 10,000 items with 1,000 tiles cached went from
+  299 ms to 8.5 ms on the VM, `benches/canvas.rs`), the **budget**,
+  **stand-ins**,
   the **zoom pause** (150 ms, or at once when tiles would be magnified),
   **LRU eviction** (1,000 tiles) and the **counters** are as above.
 - **The budget is time** (since M2.7; 24 tiles per frame before): tile
@@ -296,12 +309,12 @@ run):**
 - **Tiles render on worker threads** (section 9, ADR-0019), from the
   gate's M2.8 run: a fullscreen board filled over about 30 frames,
   ring by ring, and the UI thread rendered 1.4–3 tiles per frame.
-  - The workers have at most 4 tiles per thread at once; the rest wait
-    for a later frame.
+  - A canvas hands the workers 8 tiles per thread at most (4 until the
+    owner's second run); the rest wait for a later frame.
   - A tile whose items change while a worker has it comes back stale and
     goes again.
   - A tile a worker fails to render is left empty, not tried again in
-    every frame.
+    every frame; one whose items changed while it was out is tried again.
   - The time budget now covers the UI thread's part: painting the items
     (a tile's fixed cost is 8 units instead of 50) and the uploads.
   - On the VM (4 threads, 1280×800) the shapes pan's tiles filled in
@@ -310,7 +323,9 @@ run):**
   (64 tiles, 16 MB). A frame draws a page's tiles with one binding,
   instead of a draw and a bind group per tile. Pages are made ahead of
   need on a thread of their own and cleared there: a screenful at the
-  first upload, then one in reserve.
+  first upload, then one in reserve. A canvas that goes away while the
+  renderer stays frees its textures with `Canvas::release`. Pages aren't
+  given back yet: a window-wide memory budget for them is M3's.
 - **Smaller GPU memory blocks** (wgpu's `MemoryUsage` hint: 8–64 MB
   rather than 128–256 MB). The laptop's Intel GPU stalled in single tile
   submissions for 58–117 ms. The likely cause is new memory blocks backed

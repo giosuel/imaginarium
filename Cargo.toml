@@ -39,6 +39,7 @@ imaginarium-ui = { path = "crates/imaginarium-ui" }
 # External crates are added here (with exact minor versions) when a
 # milestone first needs them, never speculatively.
 accesskit = "0.25.1"
+accesskit_consumer = "0.39.1"
 accesskit_winit = "0.34.1"
 anyhow = "1.0.104"
 # Wayland clipboard through the data-control protocol (Hyprland, Sway, KDE);

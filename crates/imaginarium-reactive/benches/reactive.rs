@@ -82,6 +82,27 @@ fn writes(c: &mut Criterion) {
     });
     scope.dispose();
 
+    // 10,000 effects that read a hot signal only while a flag is set (items
+    // that read the zoom only while visible): one toggle drops or adds
+    // 10,000 edges of one signal.
+    let scope = Scope::new();
+    let flag = scope.run(|| {
+        let flag = signal(true);
+        let hot = signal(0u64);
+        for _ in 0..10_000 {
+            effect(move || {
+                if flag.get() {
+                    black_box(hot.get());
+                }
+            });
+        }
+        flag
+    });
+    group.bench_function("toggle_10k_dynamic_reads", |b| {
+        b.iter(|| flag.update(|on| *on = !*on));
+    });
+    scope.dispose();
+
     // A chain of 1,000 memos, written at the head and read at the tail.
     let scope = Scope::new();
     let (head, tail) = scope.run(|| {

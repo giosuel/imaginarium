@@ -45,7 +45,7 @@ pub use cpu::{CpuMode, CpuRenderer};
 pub use error::RenderError;
 pub use gpu::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, OffscreenRenderer, Power,
-    WindowRenderer,
+    Skip, WindowRenderer,
 };
 pub use gpu_timer::GpuFrameTime;
 pub use scene::{GlyphRun, Scene, TextureKey};

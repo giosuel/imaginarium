@@ -148,43 +148,48 @@ fn dep_age_task(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match dep_age::check(&root, days) {
-        Ok((files, packages, findings)) if findings.is_empty() => {
-            println!(
-                "dep-age: ok ({packages} crate versions in {files} lockfiles, all at least {days} days old)"
-            );
-            ExitCode::SUCCESS
-        }
-        Ok((_, _, findings)) => {
-            eprintln!(
-                "dep-age: {} crate version(s) younger than {days} days:",
-                findings.len()
-            );
-            for finding in &findings {
-                let package = &finding.package;
-                let fix = match &finding.suggestion {
-                    Some(version) => format!(
-                        "cargo update -p {}@{} --precise {version}",
-                        package.name, package.version
-                    ),
-                    None => "no older compatible version; wait, or add an exception with a reason"
-                        .into(),
-                };
-                eprintln!(
-                    "  - {} {} (published {}, {} days ago): {fix}",
-                    package.name, package.version, finding.published, finding.age_days
-                );
-            }
-            eprintln!(
-                "Security fixes may be listed in xtask/dep-age-exceptions.txt with a reason (MAINTAINERS.md)."
-            );
-            ExitCode::from(FAILED)
-        }
+    let report = match dep_age::check(&root, days) {
+        Ok(report) => report,
         Err(err) => {
             eprintln!("dep-age: couldn't run: {err}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
+    };
+    for (exception, why) in &report.unneeded {
+        eprintln!(
+            "dep-age: note: the exception for {} {} is no longer needed ({why}): remove it from xtask/dep-age-exceptions.txt",
+            exception.name, exception.version
+        );
     }
+    if report.findings.is_empty() {
+        println!(
+            "dep-age: ok ({} crate versions in {} lockfiles, all at least {days} days old)",
+            report.packages, report.files
+        );
+        return ExitCode::SUCCESS;
+    }
+    eprintln!(
+        "dep-age: {} crate version(s) younger than {days} days:",
+        report.findings.len()
+    );
+    for finding in &report.findings {
+        let package = &finding.package;
+        let fix = match &finding.suggestion {
+            Some(version) => format!(
+                "cargo update -p {}@{} --precise {version}",
+                package.name, package.version
+            ),
+            None => "no older compatible version; wait, or add an exception with a reason".into(),
+        };
+        eprintln!(
+            "  - {} {} (published {}, {} days ago): {fix}",
+            package.name, package.version, finding.published, finding.age_days
+        );
+    }
+    eprintln!(
+        "Security fixes and owner exceptions may be listed in xtask/dep-age-exceptions.txt with a reason (MAINTAINERS.md)."
+    );
+    ExitCode::from(FAILED)
 }
 
 /// `cargo xtask check-layers`

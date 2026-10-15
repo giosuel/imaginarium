@@ -281,15 +281,27 @@ fn reading_a_disposed_signal_panics() {
 
 #[test]
 fn deep_chains_and_wide_fan_outs_update_correctly() {
-    let head = signal(0);
-    let mut tail = memo(move |_| head.get());
-    for _ in 0..1_000 {
-        let previous = tail;
-        tail = memo(move |_| previous.get() + 1);
+    // Memos are brought up to date recursively (the crate docs' limits): a
+    // debug build needs about 1.8 KB of stack per memo on Linux and more on
+    // Windows, past a test thread's 2 MiB. A thread of its own, with a
+    // stack this chain fits in everywhere, and its own graph.
+    let chain = std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(|| {
+            let head = signal(0);
+            let mut tail = memo(move |_| head.get());
+            for _ in 0..1_000 {
+                let previous = tail;
+                tail = memo(move |_| previous.get() + 1);
+            }
+            assert_eq!(tail.get(), 1_000);
+            head.set(5);
+            assert_eq!(tail.get(), 1_005);
+        })
+        .unwrap();
+    if let Err(panic) = chain.join() {
+        std::panic::resume_unwind(panic);
     }
-    assert_eq!(tail.get(), 1_000);
-    head.set(5);
-    assert_eq!(tail.get(), 1_005);
 
     let source = signal(0);
     let total = Rc::new(Cell::new(0));
@@ -476,5 +488,222 @@ fn wide_computations_and_scopes_stay_linear() {
     for s in signals {
         s.dispose();
     }
+    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+}
+
+// ---- found in the M2.9 review ------------------------------------------------
+
+#[test]
+fn a_memo_that_writes_an_already_checked_source_is_not_lost() {
+    // `m2` runs during the effect's check and writes what `m1` reads,
+    // after `m1` was checked.
+    let (s, t) = (signal(0), signal(0));
+    let m1 = memo(move |_| t.get());
+    let m2 = memo(move |_| {
+        t.set_if_changed(s.get());
+        0
+    });
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || k.set(m1.get() + m2.get()));
+    assert_eq!(seen.get(), 0);
+    s.set(1);
+    assert_eq!(seen.get(), 1);
+    t.set(5);
+    assert_eq!(seen.get(), 5, "later writes still reach the effect");
+}
+
+#[test]
+fn an_effect_whose_memo_panicked_runs_on_the_next_change() {
+    let s = signal(0);
+    let m = memo(move |_| {
+        let v = s.get();
+        assert!(v != 1, "boom");
+        v
+    });
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || k.set(m.get()));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.set(1)));
+    assert!(panicked.is_err());
+    s.set(3);
+    assert_eq!(seen.get(), 3);
+}
+
+#[test]
+fn an_effect_whose_memo_cleanup_panicked_runs_again() {
+    let s = signal(0);
+    let armed = Rc::new(Cell::new(true));
+    let m = memo(move |_| {
+        let a = armed.clone();
+        on_cleanup(move || assert!(!a.replace(false), "boom"));
+        s.get()
+    });
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || k.set(m.get()));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.set(1)));
+    assert!(panicked.is_err());
+    s.set(2);
+    assert_eq!(seen.get(), 2);
+}
+
+#[test]
+fn a_runaway_effect_does_not_strand_the_others() {
+    let (s, ping, other) = (signal(0u64), trigger(), signal(0));
+    // Keeps triggering itself, and marks the other effect on every run, so
+    // one of the two is always pending when the guard stops the flush.
+    effect(move || {
+        let v = s.get();
+        if v > 0 {
+            s.set(v + 1);
+            ping.notify();
+        }
+    });
+    let seen = Rc::new(Cell::new(-1));
+    let k = seen.clone();
+    effect(move || {
+        ping.track();
+        k.set(other.get());
+    });
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.set(1)));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| other.set(2)));
+    assert_eq!(seen.get(), 2, "the other effect still runs");
+}
+
+#[test]
+fn a_memo_read_at_top_level_runs_once_although_its_cleanup_writes() {
+    let (s, t) = (signal(0), signal(0));
+    let runs = Count::default();
+    let r = runs.clone();
+    let children = Count::default();
+    let c = children.clone();
+    let m = memo(move |_| {
+        r.bump();
+        on_cleanup(move || t.set(t.get_untracked() + 1));
+        let c = c.clone();
+        effect(move || c.bump());
+        s.get()
+    });
+    // Reads `m` only once its cleanup has written `t`.
+    effect(move || {
+        if t.get() > 0 {
+            let _ = m.get();
+        }
+    });
+    assert_eq!(m.get(), 0);
+    assert_eq!(runs.get(), 1);
+    let live = live_nodes_for_tests();
+    s.set(1);
+    assert_eq!(m.get(), 1);
+    assert_eq!(runs.get(), 2, "one run per change");
+    assert_eq!(live_nodes_for_tests(), live, "one child effect, not two");
+}
+
+#[test]
+fn a_panicking_cleanup_still_disposes_the_rest() {
+    let baseline = live_nodes_for_tests();
+    let scope = Scope::new();
+    let ran = Count::default();
+    let (a, b) = scope.run(|| {
+        let a = effect(|| on_cleanup(|| panic!("boom")));
+        let r = ran.clone();
+        let b = effect(move || {
+            let r = r.clone();
+            on_cleanup(move || r.bump());
+        });
+        let r = ran.clone();
+        on_cleanup(move || r.bump());
+        (a, b)
+    });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scope.dispose()));
+    assert!(panicked.is_err(), "the panic still reaches the caller");
+    assert!(!a.is_alive() && !b.is_alive() && !scope.is_alive());
+    assert_eq!(ran.get(), 2, "the other cleanups ran");
+    assert_eq!(live_nodes_for_tests(), baseline);
+}
+
+#[test]
+fn a_memo_whose_first_run_panicked_runs_again_when_read() {
+    let s = signal(1);
+    let m = memo(move |_| {
+        let v = s.get();
+        assert!(v != 1, "boom");
+        v
+    });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.get()));
+    assert!(panicked.is_err());
+    assert!(m.is_alive());
+    // Not "disposed": reading it runs it again.
+    let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.get()));
+    let payload = again.expect_err("it ran again");
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|m| m.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(message.contains("boom"), "{message}");
+    s.set(2);
+    assert_eq!(m.get(), 2);
+}
+
+#[test]
+fn a_cleanup_for_a_disposed_owner_is_dropped_outside_the_graph() {
+    struct WritesOnDrop(imaginarium_reactive::Signal<i32>);
+    impl Drop for WritesOnDrop {
+        fn drop(&mut self) {
+            self.0.set(1);
+        }
+    }
+    let s = signal(0);
+    let scope = Scope::new();
+    scope.run(|| {
+        scope.dispose();
+        let guard = WritesOnDrop(s);
+        on_cleanup(move || drop(guard));
+    });
+    assert_eq!(s.get(), 1);
+}
+
+#[test]
+fn readers_that_stop_and_start_reading_a_signal_keep_one_edge() {
+    let (flag, hot) = (signal(true), signal(0));
+    let runs = Count::default();
+    let r = runs.clone();
+    effect(move || {
+        r.bump();
+        if flag.get() {
+            let _ = hot.get();
+        }
+    });
+    for _ in 0..3 {
+        flag.set(false); // drops `hot`
+        flag.set(true); // reads it again
+    }
+    assert_eq!(runs.get(), 7);
+    hot.set(1);
+    assert_eq!(runs.get(), 8, "one run per write: one edge");
+    flag.set(false);
+    hot.set(2);
+    assert_eq!(runs.get(), 9, "no edge once it stopped reading");
+    assert!(hot.subscriber_entries_for_tests() <= 1);
+}
+
+#[test]
+fn many_readers_dropping_one_signal_stay_linear() {
+    // Removing each edge on its own would be quadratic: about 10^9 steps.
+    let start = std::time::Instant::now();
+    let (flag, hot) = (signal(true), signal(0u64));
+    for _ in 0..40_000 {
+        effect(move || {
+            if flag.get() {
+                let _ = hot.get();
+            }
+        });
+    }
+    flag.set(false);
+    flag.set(true);
+    flag.set(false);
+    assert!(hot.subscriber_entries_for_tests() < 100);
     assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
 }

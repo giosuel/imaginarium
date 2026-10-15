@@ -210,7 +210,8 @@ impl Widget for Palette {
         else {
             return false;
         };
-        let count = self.results.with(|results| results.rows.len());
+        // Only the rows shown can be chosen (the search returns more).
+        let count = self.results.with(|results| results.rows.len().min(ROWS));
         match key {
             Key::ArrowDown if count > 0 => {
                 self.selected
@@ -467,5 +468,44 @@ impl Widget for ResultList {
         node.set_label("Commands");
         node.set_bounds(access_rect(bounds));
         Some(node)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use imaginarium_reactive::{memo, signal};
+    use imaginarium_text::Fonts;
+    use imaginarium_ui::{Modifiers, Ui};
+
+    use super::*;
+
+    #[test]
+    fn the_palette_chooses_only_rows_it_shows() {
+        let mut fonts = Fonts::bundled_only();
+        let mut ui = Ui::new();
+        let selected = signal(0);
+        let palette = ui.add(Palette {
+            open: signal(true),
+            selected,
+            // More matches than rows shown.
+            results: memo(|_| Results {
+                rows: (0..50).collect(),
+                search_ms: 0.0,
+            }),
+            run: Box::new(|_| {}),
+        });
+        ui.set_root(palette);
+        ui.layout(&mut fonts, Rect::new(0.0, 0.0, 1280.0, 800.0));
+        let down = Input::Key {
+            key: Key::ArrowDown,
+            text: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        };
+        for _ in 0..ROWS {
+            ui.input(&mut fonts, &down);
+        }
+        assert_eq!(selected.get_untracked(), 0, "around to the first shown row");
     }
 }

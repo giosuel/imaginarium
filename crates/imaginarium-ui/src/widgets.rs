@@ -9,7 +9,7 @@ use accesskit::{Action, ActionRequest, Node, NodeId, Role};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_text::{TextBlock, TextStyle};
+use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use taffy::prelude::{FlexDirection, length, percent};
 use taffy::{AlignItems, AvailableSpace, JustifyContent, Style};
 
@@ -424,10 +424,16 @@ impl Widget for Button {
                 cx.request_paint();
                 true
             }
+            // Once per press, not again while the key repeats.
             Input::Key {
-                key, pressed: true, ..
+                key,
+                pressed: true,
+                repeat,
+                ..
             } if *key == Key::Enter || *key == Key::Character(" ".into()) => {
-                (self.action)();
+                if !repeat {
+                    (self.action)();
+                }
                 true
             }
             _ => false,
@@ -538,9 +544,10 @@ impl TextInput {
         self.field.text()
     }
 
-    /// Replaces the text (no change callback).
-    pub fn set_text(&mut self, text: &str) {
-        self.field.editor().set_text(text);
+    /// Replaces the text (no change callback), ending a composition in
+    /// progress.
+    pub fn set_text(&mut self, fonts: &mut Fonts, text: &str) {
+        self.field.editor().set_text(fonts, text);
     }
 
     /// The field inside.
@@ -647,12 +654,17 @@ impl Widget for TextInput {
 
     fn access_action(&mut self, cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
         let base = cx.id().access_base();
-        let changed = self.field.access_action(cx.fonts(), request, base);
-        if changed {
+        let response = self.field.access_action(cx.fonts(), request, base);
+        if response.wants_focus {
+            cx.request_focus();
+        }
+        if response.changed {
             let text = self.field.text();
             (self.on_change)(&text);
+        }
+        if response.repaint {
             cx.request_paint();
         }
-        changed
+        response.handled
     }
 }

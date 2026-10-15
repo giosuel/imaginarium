@@ -70,9 +70,10 @@ fn typing_deleting_and_moving_by_words() {
 #[test]
 fn a_single_line_editor_turns_line_breaks_into_spaces() {
     let (mut fonts, mut editor) = editor("a");
-    editor.insert(&mut fonts, "b\nc\r\nd");
+    editor.insert(&mut fonts, "b\nc\r\nd\u{2029}e\u{85}f");
     editor.edit(&mut fonts, Edit::Newline);
-    assert_eq!(editor.text(), "ab c  d");
+    assert_eq!(editor.text(), "ab c d e f");
+    assert_eq!(editor.access_lines(&mut fonts).len(), 1);
     let mut multi = Editor::new("a", TextStyle::new(16.0), true);
     multi.edit(&mut fonts, Edit::Move(Motion::TextEnd));
     multi.edit(&mut fonts, Edit::Newline);
@@ -232,4 +233,41 @@ fn the_gpu_draws_text_like_the_cpu() {
     // Glyph edges are all antialiasing: allow more than for shapes.
     let share = off as f64 / on_cpu.data().len() as f64;
     assert!(share < 0.02, "{:.2} % of pixels differ", share * 100.0);
+}
+
+#[test]
+fn setting_the_text_while_composing_shows_the_caret_again() {
+    let (mut fonts, mut editor) = editor("ab");
+    editor.compose(&mut fonts, "日本", None);
+    assert!(
+        editor.caret(&mut fonts).is_none(),
+        "the input method hid it"
+    );
+    editor.set_text(&mut fonts, "x");
+    assert!(!editor.is_composing());
+    assert_eq!(editor.text(), "x");
+    assert!(editor.caret(&mut fonts).is_some());
+}
+
+#[test]
+fn access_offsets_are_in_the_shown_text() {
+    let (mut fonts, mut editor) = editor("ab");
+    editor.compose(&mut fonts, "にほん", Some((9, 9)));
+    assert_eq!(editor.text(), "ab");
+    assert_eq!(editor.shown_text(), "abにほん");
+    let lines = editor.access_lines(&mut fonts);
+    assert_eq!(lines[0].text, editor.shown_text());
+    assert_eq!(editor.selection(), (11, 11));
+}
+
+#[test]
+fn access_characters_are_what_the_caret_steps_over() {
+    // "é" as e plus a combining accent, then a family emoji (ZWJ sequence).
+    let text = "e\u{301}x\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let (mut fonts, mut editor) = editor(text);
+    let lines = editor.access_lines(&mut fonts);
+    assert_eq!(lines[0].character_lengths, vec![3, 1, 18]);
+    // The caret agrees: one step left from the end skips the whole emoji.
+    editor.edit(&mut fonts, Edit::Move(Motion::Left));
+    assert_eq!(editor.selection(), (4, 4));
 }
