@@ -281,15 +281,27 @@ fn reading_a_disposed_signal_panics() {
 
 #[test]
 fn deep_chains_and_wide_fan_outs_update_correctly() {
-    let head = signal(0);
-    let mut tail = memo(move |_| head.get());
-    for _ in 0..1_000 {
-        let previous = tail;
-        tail = memo(move |_| previous.get() + 1);
+    // Memos are brought up to date recursively (the crate docs' limits): a
+    // debug build needs about 1.8 KB of stack per memo on Linux and more on
+    // Windows, past a test thread's 2 MiB. A thread of its own, with a
+    // stack this chain fits in everywhere, and its own graph.
+    let chain = std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(|| {
+            let head = signal(0);
+            let mut tail = memo(move |_| head.get());
+            for _ in 0..1_000 {
+                let previous = tail;
+                tail = memo(move |_| previous.get() + 1);
+            }
+            assert_eq!(tail.get(), 1_000);
+            head.set(5);
+            assert_eq!(tail.get(), 1_005);
+        })
+        .unwrap();
+    if let Err(panic) = chain.join() {
+        std::panic::resume_unwind(panic);
     }
-    assert_eq!(tail.get(), 1_000);
-    head.set(5);
-    assert_eq!(tail.get(), 1_005);
 
     let source = signal(0);
     let total = Rc::new(Cell::new(0));
