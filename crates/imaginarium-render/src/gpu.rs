@@ -75,8 +75,103 @@ struct Gpu {
 }
 
 fn instance() -> wgpu::Instance {
+    // The primary APIs only (Vulkan, Metal, DirectX 12): enabling OpenGL
+    // too loads its drivers at startup (EGL), which costs time on every
+    // start for a backend that is never chosen while one of those works.
     // `WGPU_BACKEND` and friends still work, which helps on odd machines.
-    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
+    wgpu::Instance::new(
+        wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        }
+        .with_env(),
+    )
+}
+
+/// How long opening the GPU took, step by step (the gate's cold start).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuStartup {
+    /// Loading the graphics drivers (the API's instance).
+    pub instance: Duration,
+    /// Choosing the GPU and opening it.
+    pub device: Duration,
+    /// Creating and configuring the window's surface.
+    pub surface: Duration,
+    /// Creating Vello's pipelines (the driver compiles its shaders).
+    pub renderer: Duration,
+    /// How long the window waited for the GPU thread
+    /// ([`WindowRenderer::with_start`]), after its own startup work.
+    pub waited: Duration,
+}
+
+/// A GPU being opened on a thread of its own, so the drivers load while the
+/// program does the rest of its startup (fonts, laying out the first
+/// frame). [`WindowRenderer::with_start`] takes it over; the window's
+/// surface and the renderer follow there, as they need the window.
+#[derive(Debug)]
+pub struct GpuStart {
+    options: GpuOptions,
+    thread: Option<std::thread::JoinHandle<Result<OpenedGpu, RenderError>>>,
+}
+
+struct OpenedGpu {
+    instance: wgpu::Instance,
+    gpu: Gpu,
+    /// The renderer, built for [`LIKELY_FORMAT`] before the window's
+    /// surface says which format it takes.
+    renderer: Option<(vello_gpu::Renderer, vello_gpu::Resources)>,
+    startup: GpuStartup,
+}
+
+/// The format window surfaces take almost everywhere (Vulkan on Linux and
+/// Windows, Metal, DirectX), so the renderer can be built before the
+/// window exists; built again if the surface doesn't take it.
+const LIKELY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
+impl GpuStart {
+    /// Starts opening the GPU that `options` ask for.
+    pub fn spawn(options: &GpuOptions) -> Self {
+        let wanted = options.clone();
+        let thread = std::thread::Builder::new()
+            .name("gpu-open".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let instance = instance();
+                let loaded = started.elapsed();
+                let gpu = pollster::block_on(open(&instance, &wanted, None))?;
+                let opened = started.elapsed();
+                let renderer = vello_gpu::Renderer::new(
+                    &gpu.device,
+                    &vello_gpu::RenderTargetConfig {
+                        format: LIKELY_FORMAT,
+                        width: 1,
+                        height: 1,
+                    },
+                );
+                Ok(OpenedGpu {
+                    instance,
+                    gpu,
+                    renderer: Some(renderer),
+                    startup: GpuStartup {
+                        instance: loaded,
+                        device: opened - loaded,
+                        renderer: started.elapsed() - opened,
+                        ..GpuStartup::default()
+                    },
+                })
+            })
+            // Without a thread, the window opens the GPU itself.
+            .ok();
+        Self {
+            options: options.clone(),
+            thread,
+        }
+    }
+
+    /// The options it was started with.
+    pub fn options(&self) -> &GpuOptions {
+        &self.options
+    }
 }
 
 async fn open(
@@ -182,6 +277,7 @@ pub struct WindowRenderer {
     frames: u64,
     textures: Textures,
     bitmap_fonts: BitmapFonts,
+    startup: GpuStartup,
 }
 
 /// Which fonts have bitmap glyphs (color emoji in CBDT or sbix, EBDT), by
@@ -349,21 +445,93 @@ impl WindowRenderer {
         height: u32,
         options: &GpuOptions,
     ) -> Result<Self, RenderError> {
+        let started = Instant::now();
         let instance = instance();
+        let loaded = started.elapsed();
         let surface = instance
             .create_surface(window)
             .map_err(|err| RenderError::Surface(err.to_string()))?;
+        let opening = Instant::now();
         let gpu = pollster::block_on(open(&instance, options, Some(&surface)))?;
+        let startup = GpuStartup {
+            instance: loaded,
+            device: opening.elapsed(),
+            ..GpuStartup::default()
+        };
+        Self::finish(surface, gpu, None, width, height, options, startup)
+    }
+
+    /// Opens the window's renderer on the GPU that `start` opened in the
+    /// meantime, waiting for it if it isn't open yet. If that GPU can't
+    /// draw to this window, or the thread failed, it opens one as
+    /// [`WindowRenderer::new`] does.
+    pub fn with_start(
+        start: GpuStart,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RenderError> {
+        let waiting = Instant::now();
+        let opened = start.thread.and_then(|thread| thread.join().ok());
+        let waited = waiting.elapsed();
+        let Some(opened) = opened else {
+            return Self::new(window, width, height, &start.options);
+        };
+        let OpenedGpu {
+            instance,
+            gpu,
+            renderer,
+            mut startup,
+        } = opened?;
+        startup.waited = waited;
+        let creating = Instant::now();
+        let surface = instance
+            .create_surface(window)
+            .map_err(|err| RenderError::Surface(err.to_string()))?;
+        let (gpu, renderer) = if gpu.adapter.is_surface_supported(&surface) {
+            (gpu, renderer)
+        } else {
+            let other = pollster::block_on(open(&instance, &start.options, Some(&surface)))?;
+            (other, None)
+        };
+        startup.surface = creating.elapsed();
+        Self::finish(
+            surface,
+            gpu,
+            renderer,
+            width,
+            height,
+            &start.options,
+            startup,
+        )
+    }
+
+    /// The surface's configuration and the renderer, on an open GPU.
+    fn finish(
+        surface: wgpu::Surface<'static>,
+        gpu: Gpu,
+        built: Option<(vello_gpu::Renderer, vello_gpu::Resources)>,
+        width: u32,
+        height: u32,
+        options: &GpuOptions,
+        mut startup: GpuStartup,
+    ) -> Result<Self, RenderError> {
+        let configuring = Instant::now();
         let capabilities = surface.get_capabilities(&gpu.adapter);
+        // The format a renderer was built for already, else plain 8-bit
+        // RGBA or BGRA, else whatever comes first.
         let format = capabilities
             .formats
             .iter()
             .copied()
-            .find(|f| {
-                matches!(
-                    f,
-                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
-                )
+            .find(|f| built.is_some() && *f == LIKELY_FORMAT)
+            .or_else(|| {
+                capabilities.formats.iter().copied().find(|f| {
+                    matches!(
+                        f,
+                        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                    )
+                })
             })
             .or_else(|| capabilities.formats.first().copied())
             .ok_or_else(|| RenderError::Surface("the surface supports no format".into()))?;
@@ -394,14 +562,19 @@ impl WindowRenderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&gpu.device, &config);
-        let (renderer, resources) = vello_gpu::Renderer::new(
-            &gpu.device,
-            &vello_gpu::RenderTargetConfig {
-                format: view_format,
-                width: w,
-                height: h,
-            },
-        );
+        startup.surface += configuring.elapsed();
+        let creating = Instant::now();
+        let (renderer, resources) = match built {
+            Some(built) if view_format == LIKELY_FORMAT => built,
+            _ => vello_gpu::Renderer::new(
+                &gpu.device,
+                &vello_gpu::RenderTargetConfig {
+                    format: view_format,
+                    width: w,
+                    height: h,
+                },
+            ),
+        };
         let depth = vello_gpu::Renderer::create_depth_texture_view(
             &gpu.device,
             &vello_gpu::RenderSize {
@@ -409,6 +582,7 @@ impl WindowRenderer {
                 height: h,
             },
         );
+        startup.renderer += creating.elapsed();
         let info = GpuInfo::of(&gpu.adapter);
         Ok(Self {
             gpu,
@@ -424,12 +598,18 @@ impl WindowRenderer {
             frames: 0,
             textures: Textures::new(view_format),
             bitmap_fonts: BitmapFonts::default(),
+            startup,
         })
     }
 
     /// The GPU in use.
     pub fn info(&self) -> &GpuInfo {
         &self.info
+    }
+
+    /// How long opening it took.
+    pub fn startup(&self) -> &GpuStartup {
+        &self.startup
     }
 
     /// The surface size in physical pixels.

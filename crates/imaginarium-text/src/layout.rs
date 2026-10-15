@@ -8,8 +8,8 @@ use imaginarium_render::kurbo::{Point, Rect, Size};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::{Glyph, GlyphRun, Scene};
 use parley::{
-    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontWeight, GenericFamily, Layout,
-    LineHeight, PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontWeight, Layout, LineHeight,
+    PositionedLayoutItem, StyleProperty,
 };
 
 use crate::fonts::{Brush, Fonts, UI_FAMILY};
@@ -97,15 +97,19 @@ impl TextStyle {
     }
 }
 
-/// The bundled UI font, then the system's sans-serif. Scripts neither has
-/// fall back per script (fontique's fallback lists).
+/// The bundled UI font only. Scripts it lacks fall back per script
+/// (fontique asks the system once for the best font of each script).
+///
+/// No generic family (`sans-serif`) after it: with fontconfig that is every
+/// installed family, in order, and a character Inter lacks made the query
+/// load family after family until one had it (about 1,000 font files for
+/// the first CJK character with 1,500 families: 330 ms on the UI thread,
+/// a second on the gate laptop).
 fn family() -> FontFamily<'static> {
-    const STACK: &[FontFamilyName<'static>] = &[
-        FontFamilyName::named(UI_FAMILY),
-        FontFamilyName::Generic(GenericFamily::SansSerif),
-    ];
     FontFamily::List(Cow::Borrowed(STACK))
 }
+
+const STACK: &[FontFamilyName<'static>] = &[FontFamilyName::named(UI_FAMILY)];
 
 /// Text laid out once: shaped, broken into lines and aligned. Build a new
 /// one when the text or its style changes; [`TextBlock::set_width`] only
@@ -214,5 +218,21 @@ pub(crate) fn paint_layout(layout: &Layout<Brush>, scene: &mut Scene, origin: Po
                 scene.fill(&Rect::new(x0, top, x1, top + size), decoration.brush.0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With fontconfig, a generic family is every installed family: a
+    /// character the UI font lacks would be looked up in each of them.
+    #[test]
+    fn the_font_stack_names_no_generic_family() {
+        assert!(
+            STACK
+                .iter()
+                .all(|name| matches!(name, FontFamilyName::Named(_)))
+        );
     }
 }

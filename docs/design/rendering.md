@@ -174,11 +174,21 @@ also keeps a browser (wasm) build possible.
   level's scale, so content can pick a level of detail (cards drop their
   text below 30 %) without keeping display lists for every item.
 - The **grid index**, **levels**, **tile keys**, **invalidation**
-  (old ∪ new bounds plus a device pixel), the **budget** (24 tile renders
-  per frame, nearest the middle first), **stand-ins** (a stale copy, or the
-  nearest coarser cached level, clipped), the **zoom pause** (150 ms, or
-  at once when tiles would be magnified), **LRU eviction** (1,000 tiles)
-  and the **counters** are as above.
+  (old ∪ new bounds plus a device pixel), the **budget**, **stand-ins**,
+  the **zoom pause** (150 ms, or at once when tiles would be magnified),
+  **LRU eviction** (1,000 tiles) and the **counters** are as above.
+- **The budget is time** (since M2.7; 24 tiles per frame before): tile
+  work gets 6 ms per frame, at least one tile, at most 64. The cost is
+  estimated per unit, an item painted or a tile's fixed cost of 50 units
+  (the gate laptop: about 12 µs per unit, in panning and zooming alike),
+  and follows the renderer's measured time for the last frame's tiles
+  (`Canvas::note_render_time`, from `FrameTiming::textures`). Once a tile
+  doesn't fit, the rest wait.
+- **Stand-ins:** a stale copy, the nearest coarser cached level (zooming
+  in) or the nearest finer level's cached tiles (zooming out), clipped.
+  Tiles with no stand-in render first, then stale ones, then those another
+  level stands in for; nearest the middle first within each.
+- **Empty tiles** need no texture: valid at once, nothing drawn, no budget.
 - **Tiles are textures:** `Scene::render_texture` renders a tile's scene
   into a texture the backend keeps, `Scene::draw_texture` draws it,
   `Scene::free_texture` releases it. On the GPU each tile render is its own

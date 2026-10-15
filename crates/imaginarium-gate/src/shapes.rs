@@ -51,8 +51,14 @@ impl Shape {
     }
 
     /// Draws it in document coordinates. At small scales (`level_scale`,
-    /// device pixels per unit) the outline is left out.
+    /// device pixels per unit) the outline is left out, and below a few
+    /// pixels every kind is a filled box: the same picture at a fraction
+    /// of the cost (2,000 of them in a tile zoomed out to 7 %).
     pub(crate) fn paint(&self, scene: &mut Scene, level_scale: f64) {
+        if level_scale < 0.125 {
+            scene.fill(&self.rect, self.fill);
+            return;
+        }
         let outline = level_scale >= 0.25;
         match self.kind {
             Kind::Rect => {

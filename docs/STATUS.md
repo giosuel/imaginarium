@@ -10,16 +10,12 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.7 Gate run**, in progress. The owner's first manual
-  session crashed (missing tile texture); fixed on `fix/m2.7-tile-textures`
-  (details in `docs/design/m2-gate.md`, "First run"). The `--measure` runs
-  with that binary panicked on color emoji (bitmap glyphs outside
-  vello_gpu's atlas); fixed too ("Second run"). Waiting for the five
-  `--measure` reports and the checklist notes from the fix-2 binary, then
-  the fix round for failed criteria (cold start already fails: 746 ms).
-  Proposed for the fix round: finer cached levels as stand-ins when zooming
-  out, and a time budget for tile renders instead of 24 per frame (the
-  owner sees tiles cascade in after zoom steps; design §6 asks for both).
+- **Next step:** **M2.7 Gate run**: the fourth run (fix-3 binary) is in,
+  `docs/design/m2-gate.md` ("Fourth run"). Criteria 3 and 6 pass.
+  Criterion 2 needs the script to settle before the drag. Criterion 1
+  fails on the iGPU at 1132×1348 (the GPU can't keep up; p99 17.8 ms).
+  Next: the checklist notes for criteria 4 and 5, then the owner's
+  decision (keep our toolkit or GPUI).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -796,8 +792,26 @@ app runs. Two owner exceptions for M2:
   - Second run (`--measure`, fix 1): every run panicked on color emoji in
     the first frame (drawn without the glyph atlas). Bitmap glyphs now
     always go through the atlas on the GPU, scaled up past its 128 pixels
-    per em; test with a one-glyph cut of Noto Color Emoji. ADR-0007 notes that the gate evaluates the renderer
-  of ADR-0003 too (a renderer failure has other fallbacks than GPUI).
+    per em; test with a one-glyph cut of Noto Color Emoji.
+  - Third run (the five reports): criteria 2 and 3 pass; criterion 1 fails
+    only in the zoom phase (p99 26 ms on the iGPU: level switches rendering
+    24 tiles at once); criterion 6 fails (cold start 735–1,162 ms, 1–2
+    idle frames); and a one-second freeze from font fallback.
+  - Owner decision (2026-10-13, ADR-0007 amendment): cold start is judged
+    without the GPU's setup.
+  - Fix round: font stack without a generic family (the freeze; first
+    paint 385 → 24 ms on the VM with 1,537 families), a 6 ms time budget
+    for tile renders with finer stand-ins and textureless empty tiles, the
+    GPU opened on its own thread (Vulkan only), idle frames by cause and
+    no redraw for same-size resizes, `--fullscreen`, the build in the
+    report.
+  - Fourth run (fix 3): cold start without the GPU's setup 275–347 ms, idle
+    0 frames, palette 0.34 ms, no freeze, no crash. The drag phase starts
+    with about 190 tiles still owed from the zoom (a fault in the script).
+    The iGPU misses vertical sync in one frame in four or five at
+    1132×1348, and does 50–60 fps without vertical sync.
+  - The gate evaluates the renderer of ADR-0003 too. A renderer failure
+    has other fallbacks than GPUI.
 - [ ] **M2.8 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.

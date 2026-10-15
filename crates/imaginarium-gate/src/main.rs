@@ -43,9 +43,9 @@ use clap::{Parser, ValueEnum};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{GpuInfo, GpuOptions, Power};
+use imaginarium_render::{GpuInfo, GpuOptions, GpuStart, Power};
 use imaginarium_text::Fonts;
-use imaginarium_ui::{AccessTree, FrameInfo, Input, View, WindowOptions};
+use imaginarium_ui::{AccessTree, FrameCauses, FrameInfo, Input, View, WindowOptions};
 
 use crate::app::App;
 
@@ -96,6 +96,10 @@ struct Args {
     /// Don't wait for vertical sync (measures how fast frames could be).
     #[arg(long)]
     no_vsync: bool,
+    /// Fill the screen, so runs on different machines (and tiling window
+    /// managers) measure the same window size.
+    #[arg(long)]
+    fullscreen: bool,
     /// Draw every glyph's outline each frame instead of from Vello's
     /// (experimental) glyph atlas.
     #[arg(long)]
@@ -118,6 +122,16 @@ enum GpuChoice {
 const TYPED: &str = "quarterly planning review notes";
 /// What the scripted palette typing types.
 const COMMAND: &str = "insert table rotate image align left";
+/// Which build this is, set when a test build is made
+/// (`IMAGINARIUM_BUILD="M2.7 fix 3 (abc1234)" cargo build --release`).
+const BUILD: &str = match option_env!("IMAGINARIUM_BUILD") {
+    Some(build) => build,
+    None => "development build",
+};
+
+/// Frames to wait at most for owed tiles before idling.
+const MAX_SETTLE_FRAMES: u32 = 600;
+
 /// In a manual session, a frame interval longer than this is a pause.
 const MANUAL_GAP: Duration = Duration::from_millis(100);
 
@@ -135,9 +149,10 @@ enum Phase {
     /// The shapes board: panning, zooming, dragging a shape, with this
     /// many frames to go.
     Shapes(ShapePhase, u32),
-    /// Waiting for the frame that shows the cleared search, so the idle
-    /// measurement starts with nothing left to draw.
-    Settle,
+    /// Waiting until nothing is left to draw (the cleared search, tiles
+    /// the time budget left over), so the idle measurement starts idle;
+    /// with the frames waited so far.
+    Settle(u32),
     /// Idling since the instant, with the CPU time and frame count then.
     Idle {
         since: Instant,
@@ -182,6 +197,33 @@ struct Gate {
     manual: [Vec<CanvasSample>; 2],
     /// Draws of textures that didn't exist (skipped; a tile cache bug).
     missing_textures: u64,
+    /// Why the frames during the idle phase were drawn.
+    idle_causes: CauseCounts,
+}
+
+/// Frames by cause (a frame can have several).
+#[derive(Clone, Copy, Debug, Default)]
+struct CauseCounts {
+    system: u64,
+    resize: u64,
+    input: u64,
+    timer: u64,
+    request: u64,
+    access: u64,
+    /// Frames the program caused on its own (a timer or a request).
+    by_itself: u64,
+}
+
+impl CauseCounts {
+    fn add(&mut self, causes: &FrameCauses) {
+        self.system += u64::from(causes.system);
+        self.resize += u64::from(causes.resize);
+        self.input += u64::from(causes.input);
+        self.timer += u64::from(causes.timer);
+        self.request += u64::from(causes.request);
+        self.access += u64::from(causes.access);
+        self.by_itself += u64::from(causes.by_itself());
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,7 +335,7 @@ impl Gate {
 
     fn start_shapes(&mut self) {
         if self.shape_frames == 0 {
-            self.phase = Phase::Settle;
+            self.phase = Phase::Settle(0);
             return;
         }
         self.app.set_mode(crate::board::Mode::Shapes);
@@ -382,7 +424,14 @@ impl View for Gate {
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
         self.app.set_frame(frame.paint, frame.render.encode);
+        self.app
+            .board
+            .borrow_mut()
+            .note_render_time(frame.render.textures);
         self.missing_textures += u64::from(frame.render.missing_textures);
+        if matches!(self.phase, Phase::Idle { .. }) {
+            self.idle_causes.add(&frame.causes);
+        }
         if self.first_frame.is_none() {
             self.first_frame = Some(*frame);
         }
@@ -433,8 +482,13 @@ impl View for Gate {
                     self.after_pan()
                 }
             }
-            Phase::Settle => {
-                self.start_idle();
+            Phase::Settle(frames) => {
+                // The board draws again by itself while tiles are owed.
+                if self.app.board.borrow().owed && frames < MAX_SETTLE_FRAMES {
+                    self.phase = Phase::Settle(frames + 1);
+                } else {
+                    self.start_idle();
+                }
                 false
             }
             Phase::Type(left) => {
@@ -499,7 +553,7 @@ impl View for Gate {
                         }
                         None => {
                             self.app.set_mode(crate::board::Mode::Cards);
-                            self.phase = Phase::Settle;
+                            self.phase = Phase::Settle(0);
                         }
                     }
                 }
@@ -624,6 +678,7 @@ fn summary(mut samples: Vec<Duration>) -> serde_json::Value {
 fn main() -> anyhow::Result<()> {
     let main_started = Instant::now();
     let args = Args::parse();
+    eprintln!("imaginarium-gate {BUILD}");
     let gpu = GpuOptions {
         power: match args.gpu {
             GpuChoice::Low => Power::Low,
@@ -633,11 +688,14 @@ fn main() -> anyhow::Result<()> {
         no_vsync: args.no_vsync,
         glyph_atlas: !args.no_glyph_atlas,
     };
+    // The drivers load while the fonts load and the view is built.
+    let gpu_start = GpuStart::spawn(&gpu);
     let options = WindowOptions {
         title: "Imaginarium gate".into(),
         size: Size::new(1280.0, 800.0),
         gpu,
         background: Color::WHITE,
+        fullscreen: args.fullscreen,
     };
     let fonts_started = Instant::now();
     let fonts = Fonts::new();
@@ -675,12 +733,14 @@ fn main() -> anyhow::Result<()> {
         inputs_during_idle: 0,
         manual: [Vec::new(), Vec::new()],
         missing_textures: 0,
+        idle_causes: CauseCounts::default(),
     };
     // The time from exec to `main` (loading the binary and its libraries)
     // is measured separately from the time in `main`.
     let before_main = proc::since_exec().map(|since| since.saturating_sub(main_started.elapsed()));
     let before_run = main_started.elapsed();
-    let stats = imaginarium_ui::run(options, &mut gate).context("running the window")?;
+    let stats = imaginarium_ui::run_with_gpu(gpu_start, options, &mut gate)
+        .context("running the window")?;
 
     let first = gate.first_frame;
     let pan = |field: fn(&FrameSample) -> Duration| gate.pan.iter().map(field).collect::<Vec<_>>();
@@ -702,8 +762,21 @@ fn main() -> anyhow::Result<()> {
             "cpu_percent": idle.cpu.map(|cpu| cpu.as_secs_f64() / idle.wall.as_secs_f64() * 100.0),
             "frames": idle.frames,
             "inputs": gate.inputs_during_idle,
-            // Criterion 6: no frames and (almost) no CPU while idle.
-            "pass": idle.frames == 0 && idle.cpu.is_none_or(|cpu| cpu.as_secs_f64() / idle.wall.as_secs_f64() < 0.01),
+            // Why they were drawn: the window system, a resize, an input,
+            // a timer, a request, the screen reader.
+            "frame_causes": {
+                "system": gate.idle_causes.system,
+                "resize": gate.idle_causes.resize,
+                "input": gate.idle_causes.input,
+                "timer": gate.idle_causes.timer,
+                "request": gate.idle_causes.request,
+                "access": gate.idle_causes.access,
+            },
+            "frames_by_itself": gate.idle_causes.by_itself,
+            // Criterion 6: no frames of its own and (almost) no CPU while
+            // idle. Frames the window system or the user asks for don't
+            // count.
+            "pass": gate.idle_causes.by_itself == 0 && idle.cpu.is_none_or(|cpu| cpu.as_secs_f64() / idle.wall.as_secs_f64() < 0.01),
         })
     });
     // Criterion 1: p99 frame time under 16 ms while panning and zooming
@@ -722,8 +795,15 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .skip(1)
             .all(|sample| sample.rendered <= 4);
+    // The time to the first frame without the GPU's share of it: what the
+    // start takes if the GPU were open at once.
+    let without_gpu_setup = stats.first_frame.map(|first| {
+        (before_main.unwrap_or_default() + before_run + first)
+            .saturating_sub(stats.gpu_opened.unwrap_or_default())
+    });
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
+        "build": BUILD,
         "milestone": "M2.7",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
@@ -745,12 +825,28 @@ fn main() -> anyhow::Result<()> {
             "main_to_first_frame_ms": stats.first_frame.map(|first| millis(before_run + first)),
             "first_frame_paint_ms": first.map(|frame| millis(frame.paint)),
             "first_frame_encode_ms": first.map(|frame| millis(frame.render.encode)),
+            "first_frame_textures_ms": first.map(|frame| millis(frame.render.textures)),
+            "first_frame_submit_ms": first.map(|frame| millis(frame.render.submit)),
             "fonts_ms": millis(fonts_time),
             "window_ms": stats.window_created.map(millis),
+            // The GPU opens on a thread of its own from the start of
+            // `main`; `gpu_ms` is what the window waited for it and spent
+            // on it (surface, renderer): its share of the time to the
+            // first frame.
             "gpu_ms": stats.gpu_opened.map(millis),
+            "gpu": stats.gpu_startup.map(|startup| serde_json::json!({
+                "instance_ms": millis(startup.instance),
+                "device_ms": millis(startup.device),
+                "surface_ms": millis(startup.surface),
+                "renderer_ms": millis(startup.renderer),
+                "waited_ms": millis(startup.waited),
+            })),
             "font_families": gate.app.fonts.family_count(),
-            // Criterion 6: cold start under 400 ms.
-            "pass": stats.first_frame.map(|first| before_main.unwrap_or_default() + before_run + first < Duration::from_millis(400)),
+            "without_gpu_setup_ms": without_gpu_setup.map(millis),
+            // Criterion 6: cold start under 400 ms, not counting the GPU's
+            // setup (owner, 2026-10-13: the drivers' time is the same for
+            // any toolkit).
+            "pass": without_gpu_setup.map(|time| time < Duration::from_millis(400)),
         },
         "content": {
             "cards": gate.app.board.borrow().cards(),

@@ -20,6 +20,18 @@ const CELL: f64 = 512.0;
 /// A level switch waits for this pause in zooming…
 const ZOOM_PAUSE: Duration = Duration::from_millis(150);
 
+/// Time per frame for tile renders (`rendering.md` §6): with the rest of a
+/// frame (about 4 ms on the gate laptop), a frame stays well within 16 ms.
+const RENDER_BUDGET: Duration = Duration::from_millis(6);
+
+/// A tile's fixed cost (a GPU submission, the renderer's setup), in items:
+/// on the gate laptop a tile costs about as much as 50 items in it, and an
+/// item about 12 µs, in panning and zooming alike.
+const TILE_UNITS: usize = 50;
+
+/// The time per unit before any tile work was measured.
+const INITIAL_UNIT_COST: Duration = Duration::from_micros(12);
+
 /// An item on the canvas, chosen by the caller (a node id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub u64);
@@ -122,11 +134,34 @@ struct Item {
 
 #[derive(Debug)]
 struct Tile {
-    texture: TextureKey,
+    /// `None`: nothing is in it, so there is nothing to draw.
+    texture: Option<TextureKey>,
     /// Its items changed since it was rendered.
     stale: bool,
     /// The frame it was last drawn in (for eviction).
     used: u64,
+}
+
+/// What shows in place of a tile that isn't rendered yet.
+#[derive(Debug)]
+enum StandIn {
+    /// Its stale copy.
+    Stale,
+    /// A coarser level's tile over it.
+    Coarser(TileKey),
+    /// Finer levels' tiles in it.
+    Finer(Vec<TileKey>),
+}
+
+impl StandIn {
+    /// How much it is worth rendering the tile now instead (lower first).
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Stale => 1,
+            Self::Finer(_) => 2,
+            Self::Coarser(_) => 3,
+        }
+    }
 }
 
 /// What a frame did, for the gate report and the debug overlay.
@@ -160,8 +195,18 @@ pub struct Canvas {
     grid: HashMap<(i32, i32), Vec<ItemId>>,
     tiles: HashMap<TileKey, Tile>,
     frame: u64,
-    /// Tiles rendered per frame at most; the rest are owed.
+    /// Tile renders per frame at most; the rest are owed. A cap: the time
+    /// budget usually decides first.
     budget: usize,
+    /// Time per frame for tile renders: painting their items and the
+    /// renderer's work on them, as estimated from earlier frames.
+    render_budget: Duration,
+    /// The estimated time per unit of tile work (an item painted, or a
+    /// tile's fixed cost of [`TILE_UNITS`]), from [`Canvas::note_render_time`].
+    unit_cost: Duration,
+    /// The last frame's tile work, until the renderer's time for it comes:
+    /// building time and units.
+    pending: Option<(Duration, usize)>,
     /// Tiles kept at most (256 KiB each).
     capacity: usize,
     level: Option<i32>,
@@ -180,15 +225,18 @@ impl Default for Canvas {
 }
 
 impl Canvas {
-    /// An empty canvas, with a budget of 24 tile renders per frame and
-    /// 1,000 cached tiles (256 MB).
+    /// An empty canvas: tile renders take at most 6 ms per frame (and at
+    /// most 64 tiles), 1,000 tiles are cached (256 MB).
     pub fn new() -> Self {
         Self {
             items: HashMap::new(),
             grid: HashMap::new(),
             tiles: HashMap::new(),
             frame: 0,
-            budget: 24,
+            budget: 64,
+            render_budget: RENDER_BUDGET,
+            unit_cost: INITIAL_UNIT_COST,
+            pending: None,
             capacity: 1_000,
             level: None,
             last_scale: 0.0,
@@ -198,11 +246,36 @@ impl Canvas {
         }
     }
 
-    /// Sets the tile renders per frame and the cache size, in tiles.
+    /// Sets the tile renders per frame at most and the cache size, in
+    /// tiles.
     pub fn with_limits(mut self, renders_per_frame: usize, cached_tiles: usize) -> Self {
         self.budget = renders_per_frame.max(1);
         self.capacity = cached_tiles.max(1);
         self
+    }
+
+    /// Sets the time per frame for tile renders (default 6 ms). At least
+    /// one tile renders per frame, whatever it costs.
+    pub fn with_render_budget(mut self, budget: Duration) -> Self {
+        self.render_budget = budget;
+        self
+    }
+
+    /// Tells the canvas how long the renderer took for the tile renders of
+    /// the frame it drew last ([`crate::FrameTiming::textures`]), so it can
+    /// keep later frames' tile work within the time budget. Without it, the
+    /// canvas assumes a mid-range laptop.
+    pub fn note_render_time(&mut self, renderer: Duration) {
+        let Some((build, units)) = self.pending.take() else {
+            return;
+        };
+        if units == 0 {
+            return;
+        }
+        let sample = (build + renderer) / units as u32;
+        // Halfway to the new sample: quick to follow a change of content,
+        // steady across frames of similar tiles.
+        self.unit_cost = (self.unit_cost + sample) / 2;
     }
 
     /// The number of items.
@@ -297,6 +370,19 @@ impl Canvas {
     }
 
     /// The items touching `area`, bottom first.
+    /// Whether any item touches `area`.
+    fn any_item_in(&self, area: Rect) -> bool {
+        Self::cells(area).any(|cell| {
+            self.grid.get(&cell).is_some_and(|ids| {
+                ids.iter().any(|id| {
+                    self.items
+                        .get(id)
+                        .is_some_and(|item| item.bounds.intersect(area).area() > 0.0)
+                })
+            })
+        })
+    }
+
     fn items_in(&self, area: Rect) -> Vec<ItemId> {
         let mut seen = HashSet::new();
         let mut found: Vec<(u64, ItemId)> = Vec::new();
@@ -384,33 +470,81 @@ impl Canvas {
         };
         self.last_rendered.clear();
         let build_start = Instant::now();
-        let mut draws: Vec<(TileKey, TextureKey)> = Vec::with_capacity(keys.len());
-        let mut owed: Vec<TileKey> = Vec::new();
+        let mut draws: Vec<(TileKey, Option<TextureKey>)> = Vec::with_capacity(keys.len());
+        let mut invalid: Vec<TileKey> = Vec::new();
         for key in keys {
-            let valid = self.tiles.get(&key).is_some_and(|tile| !tile.stale);
-            if valid {
-                if let Some(tile) = self.tiles.get_mut(&key) {
+            match self.tiles.get_mut(&key) {
+                Some(tile) if !tile.stale => {
                     tile.used = self.frame;
                     draws.push((key, tile.texture));
                     stats.reused += 1;
                 }
-                continue;
+                _ => invalid.push(key),
             }
-            if stats.rendered >= self.budget {
+        }
+        // Tiles with nothing in them need no texture: valid at once, for
+        // free (zoomed out, most of the screen can be empty).
+        invalid.retain(|key| {
+            if self.any_item_in(key.bounds()) {
+                return true;
+            }
+            if let Some(texture) = self.tiles.get(key).and_then(|tile| tile.texture) {
+                scene.free_texture(texture);
+            }
+            self.tiles.insert(
+                *key,
+                Tile {
+                    texture: None,
+                    stale: false,
+                    used: self.frame,
+                },
+            );
+            false
+        });
+        // What the budget leaves over shows a stand-in, so render first
+        // where there would be none (blank), then where it would be wrong
+        // (a stale copy), then where it is only partial or blurry (another
+        // level). Nearest the middle first within each.
+        let mut ranked: Vec<(u8, TileKey)> = invalid
+            .into_iter()
+            .map(|key| {
+                (
+                    self.stand_in(key).map_or(0, |stand_in| stand_in.rank()),
+                    key,
+                )
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let mut owed: Vec<TileKey> = Vec::new();
+        let mut units = 0;
+        // Once a tile doesn't fit, the rest wait too (and their items
+        // aren't looked up).
+        let mut spent = false;
+        for (_, key) in ranked {
+            if spent || stats.rendered >= self.budget {
                 owed.push(key);
                 continue;
             }
-            let texture = match self.tiles.get(&key) {
-                Some(tile) => tile.texture,
-                None => TextureKey::unique(),
-            };
+            let items = self.items_in(key.bounds());
+            let cost = TILE_UNITS + items.len();
+            if stats.rendered > 0 && self.unit_cost * (units + cost) as u32 > self.render_budget {
+                spent = true;
+                owed.push(key);
+                continue;
+            }
+            units += cost;
+            let texture = self
+                .tiles
+                .get(&key)
+                .and_then(|tile| tile.texture)
+                .unwrap_or_else(TextureKey::unique);
             let mut tile_scene = Scene::new();
             // Document → level pixels → this tile's pixels.
             let to_tile = Affine::translate(Vec2::new(
                 -f64::from(key.x) * TILE_F,
                 -f64::from(key.y) * TILE_F,
             )) * Affine::scale(level_scale);
-            for id in self.items_in(key.bounds()) {
+            for id in items {
                 let mut item_scene = Scene::new();
                 content.paint_item(id, &mut item_scene, level_scale);
                 tile_scene.append(&item_scene, to_tile);
@@ -420,17 +554,18 @@ impl Canvas {
             self.tiles.insert(
                 key,
                 Tile {
-                    texture,
+                    texture: Some(texture),
                     stale: false,
                     used: self.frame,
                 },
             );
-            draws.push((key, texture));
+            draws.push((key, Some(texture)));
             self.last_rendered.push(key);
             stats.rendered += 1;
         }
         stats.build = build_start.elapsed();
         stats.owed = owed.len();
+        self.pending = (stats.rendered > 0).then_some((stats.build, units));
 
         // Draw: device-pixel destinations, snapped, then in logical pixels.
         let to_device = |doc: Point| {
@@ -455,32 +590,30 @@ impl Canvas {
             )
         };
         scene.push_clip(&viewport.screen);
-        // Stand-ins first: a stale copy, or the nearest coarser level. They
+        // Stand-ins first, clipped to the tile they stand in for. They
         // count as drawn, so this frame's eviction keeps them.
         for key in &owed {
-            if let Some(tile) = self.tiles.get_mut(key) {
-                tile.used = self.frame;
-                scene.draw_texture(tile.texture, TILE, TILE, dest(key));
-                continue;
-            }
-            for coarser in (level - 6..level).rev() {
-                let (cx, cy, _, _) = tiles_in(coarser, key.bounds().inset(-1e-6));
-                let parent = TileKey {
-                    level: coarser,
-                    x: cx,
-                    y: cy,
-                };
-                if let Some(tile) = self.tiles.get_mut(&parent) {
+            let shown = match self.stand_in(*key) {
+                None => continue,
+                Some(StandIn::Stale) => vec![*key],
+                Some(StandIn::Coarser(parent)) => vec![parent],
+                Some(StandIn::Finer(children)) => children,
+            };
+            scene.push_clip(&dest(key));
+            for other in shown {
+                if let Some(tile) = self.tiles.get_mut(&other) {
                     tile.used = self.frame;
-                    scene.push_clip(&dest(key));
-                    scene.draw_texture(tile.texture, TILE, TILE, dest(&parent));
-                    scene.pop();
-                    break;
+                    if let Some(texture) = tile.texture {
+                        scene.draw_texture(texture, TILE, TILE, dest(&other));
+                    }
                 }
             }
+            scene.pop();
         }
         for (key, texture) in &draws {
-            scene.draw_texture(*texture, TILE, TILE, dest(key));
+            if let Some(texture) = texture {
+                scene.draw_texture(*texture, TILE, TILE, dest(key));
+            }
         }
         if self.show_updates {
             for key in &self.last_rendered {
@@ -526,6 +659,40 @@ impl Canvas {
         stats
     }
 
+    /// What can show in place of `key` until it is rendered: its stale
+    /// copy, the nearest coarser level's tile over it (when zooming in), or
+    /// the nearest finer level's tiles in it (when zooming out; they may
+    /// cover only part of it).
+    fn stand_in(&self, key: TileKey) -> Option<StandIn> {
+        if self.tiles.contains_key(&key) {
+            return Some(StandIn::Stale);
+        }
+        // Inset a little, so tiles that only touch it don't count.
+        let inside = key.bounds().inset(-1e-6);
+        for coarser in (key.level - 6..key.level).rev() {
+            let (x, y, _, _) = tiles_in(coarser, inside);
+            let parent = TileKey {
+                level: coarser,
+                x,
+                y,
+            };
+            if self.tiles.contains_key(&parent) {
+                return Some(StandIn::Coarser(parent));
+            }
+        }
+        for finer in key.level + 1..=key.level + 4 {
+            let (x0, y0, x1, y1) = tiles_in(finer, inside);
+            let children: Vec<TileKey> = (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| TileKey { level: finer, x, y }))
+                .filter(|child| self.tiles.contains_key(child))
+                .collect();
+            if !children.is_empty() {
+                return Some(StandIn::Finer(children));
+            }
+        }
+        None
+    }
+
     /// Evicts the least recently drawn tiles over capacity (never one drawn
     /// this frame).
     fn evict(&mut self, scene: &mut Scene) -> usize {
@@ -543,7 +710,9 @@ impl Canvas {
         let mut evicted = 0;
         for (_, key) in old.into_iter().take(excess) {
             if let Some(tile) = self.tiles.remove(&key) {
-                scene.free_texture(tile.texture);
+                if let Some(texture) = tile.texture {
+                    scene.free_texture(texture);
+                }
                 evicted += 1;
             }
         }
@@ -562,6 +731,9 @@ mod tests {
     use super::*;
     use crate::scene::{Command, TextureWork};
 
+    /// A time budget that never runs out (tests of other limits).
+    const UNLIMITED: Duration = Duration::from_secs(3_600);
+
     /// Content that paints each item's bounds and counts paints.
     struct Boxes {
         bounds: HashMap<ItemId, Rect>,
@@ -578,7 +750,9 @@ mod tests {
     }
 
     fn board(count: u64) -> (Canvas, Boxes) {
-        let mut canvas = Canvas::new().with_limits(1_000, 10_000);
+        let mut canvas = Canvas::new()
+            .with_limits(1_000, 10_000)
+            .with_render_budget(UNLIMITED);
         let mut boxes = Boxes {
             bounds: HashMap::new(),
             painted: Vec::new(),
@@ -771,8 +945,117 @@ mod tests {
     }
 
     #[test]
+    fn the_time_budget_follows_what_tiles_cost() {
+        let (canvas, mut boxes) = board(2_000);
+        let mut canvas = canvas.with_render_budget(RENDER_BUDGET);
+        let now = Instant::now();
+        let view = viewport(Point::ZERO, 1.0);
+        // The first guess: a mid-range laptop.
+        let first = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        assert!(first.rendered > 1 && first.owed > 0, "{first:?}");
+        // The renderer took 60 ms for them: far fewer next time.
+        canvas.note_render_time(Duration::from_millis(60));
+        let slow = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        assert!(
+            slow.rendered >= 1 && slow.rendered < first.rendered,
+            "{slow:?}"
+        );
+        // Cheap renders: more per frame again.
+        for _ in 0..4 {
+            canvas.note_render_time(Duration::ZERO);
+            canvas.invalidate_all();
+            canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        }
+        canvas.invalidate_all();
+        let fast = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        assert!(fast.rendered > slow.rendered, "{fast:?}");
+    }
+
+    #[test]
+    fn zooming_out_shows_finer_tiles_and_renders_blank_areas_first() {
+        let (canvas, mut boxes) = board(5_000);
+        let mut canvas = canvas.with_limits(1, 10_000);
+        let start = Instant::now();
+        let near = viewport(Point::ZERO, 1.0);
+        while canvas
+            .frame(&mut Scene::new(), &near, start, &mut boxes)
+            .owed
+            > 0
+        {}
+        let finer: HashSet<TextureKey> = canvas
+            .tiles
+            .values()
+            .filter_map(|tile| tile.texture)
+            .collect();
+        // Zoomed out past half: a coarser level at once, one tile render
+        // per frame.
+        let later = start + Duration::from_secs(1);
+        let far = viewport(Point::ZERO, 0.45);
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, &far, later, &mut boxes);
+        assert!(
+            stats.level < 0 && stats.rendered == 1 && stats.owed > 0,
+            "{stats:?}"
+        );
+        // The rendered tile is one nothing stood in for: outside the area
+        // the finer tiles cover.
+        let rendered = canvas.last_rendered[0].bounds();
+        assert!(
+            rendered.intersect(near.visible()).area() <= 0.0,
+            "{rendered:?}"
+        );
+        // The rest of the old view shows the finer tiles.
+        let drawn = scene
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(command, Command::DrawTexture { key, .. } if finer.contains(key))
+            })
+            .count();
+        assert!(drawn >= 4, "{drawn} finer tiles drawn");
+    }
+
+    #[test]
+    fn empty_tiles_need_no_texture() {
+        let mut canvas = Canvas::new().with_render_budget(UNLIMITED);
+        let mut boxes = Boxes {
+            bounds: HashMap::new(),
+            painted: Vec::new(),
+        };
+        let bounds = Rect::new(10.0, 10.0, 60.0, 60.0);
+        canvas.upsert(ItemId(1), 1, bounds);
+        boxes.bounds.insert(ItemId(1), bounds);
+        let now = Instant::now();
+        let view = viewport(Point::ZERO, 1.0);
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, &view, now, &mut boxes);
+        assert_eq!((stats.rendered, stats.owed), (1, 0), "{stats:?}");
+        assert_eq!(scene.texture_renders(), 1);
+        assert_eq!(
+            canvas.tiles.len(),
+            stats.visible,
+            "the empty ones are valid too"
+        );
+        // Without the item, its tile's texture goes and nothing renders.
+        canvas.remove(ItemId(1));
+        boxes.bounds.remove(&ItemId(1));
+        let mut scene = Scene::new();
+        let stats = canvas.frame(&mut scene, &view, now, &mut boxes);
+        assert_eq!(stats.rendered, 0);
+        assert_eq!(scene.texture_renders(), 0);
+        assert!(
+            scene
+                .texture_work()
+                .iter()
+                .any(|work| matches!(work, TextureWork::Free(_)))
+        );
+    }
+
+    #[test]
     fn the_cache_evicts_the_least_recently_drawn_tiles() {
-        let mut canvas = Canvas::new().with_limits(1_000, 40);
+        let mut canvas = Canvas::new()
+            .with_limits(1_000, 40)
+            .with_render_budget(UNLIMITED);
         let (_, mut boxes) = board(2_000);
         for (id, bounds) in &boxes.bounds {
             canvas.upsert(*id, id.0, *bounds);
@@ -818,7 +1101,7 @@ mod tests {
                 1..60,
             )
         ) {
-            let mut canvas = Canvas::new().with_limits(64, 10_000);
+            let mut canvas = Canvas::new().with_limits(64, 10_000).with_render_budget(UNLIMITED);
             let mut boxes = Boxes { bounds: HashMap::new(), painted: Vec::new() };
             let mut rendered: HashMap<TileKey, Vec<(ItemId, [i64; 4])>> = HashMap::new();
             let now = Instant::now();
@@ -852,7 +1135,11 @@ mod tests {
                 }
                 for (key, tile) in &canvas.tiles {
                     if !tile.stale {
-                        let shown = rendered.get(key).cloned().unwrap_or_default();
+                        // A tile without a texture shows nothing.
+                        let shown = match tile.texture {
+                            Some(_) => rendered.get(key).cloned().unwrap_or_default(),
+                            None => Vec::new(),
+                        };
                         proptest::prop_assert_eq!(&shown, &content_of(&canvas, *key), "tile {:?} is valid but stale", key);
                     }
                 }

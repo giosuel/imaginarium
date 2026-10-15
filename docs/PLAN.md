@@ -394,6 +394,11 @@ Decided (2026-10-12):
   runs a prebuilt gate binary that writes a report. It is checked on
   Linux only for now; Windows and macOS follow when hardware is available.
 
+Decided (2026-10-13):
+- **The M2 gate's cold start** (criterion 6) is measured without the GPU's
+  setup (drivers, device, surface, the renderer's pipelines), which costs
+  any GPU toolkit the same (ADR-0007, amendment).
+
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
 

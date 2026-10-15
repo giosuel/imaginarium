@@ -15,17 +15,25 @@ with the M2 gate, ADR-0007). Crates: `imaginarium-ui`, `imaginarium-text`,
 ```
 
 - **Shell** (`window.rs`): one winit window. `ControlFlow::Wait`; a frame
-  only for a resize, a scale change, handled input, a view timer, or
-  `request_frame()`. The view paints one scene in logical pixels, drawn at
-  the scale factor. It forwards IME events, places the candidate window
-  (`View::ime_area`), and sends the accessibility tree after frames while
-  a screen reader listens.
+  only for a resize (to another size), a scale change, handled input, a
+  view timer, or `request_frame()`; `FrameInfo::causes` says which. The
+  view paints one scene in logical pixels, drawn at the scale factor. It
+  forwards IME events, places the candidate window (`View::ime_area`), and
+  sends the accessibility tree after frames while a screen reader listens.
+- **Startup:** the GPU opens on a thread of its own (`GpuStart`: drivers,
+  device, Vello's pipelines), started first thing (`run_with_gpu`), while
+  the program loads fonts, builds its view and lays out the first frame;
+  the first frame then waits for it and creates the window's surface.
+  `View::opened` comes after that first layout.
 - **Widget tree** (`tree.rs`): the retained UI. Widgets live in an arena
   with generational ids. The tree owns layout, input routing, focus,
   painting and the accessibility tree; widgets implement only what they
   need of the `Widget` trait.
 - **Text** (`imaginarium-text`): fonts (bundled Inter, then system fonts
-  with per-script fallback), `TextBlock` and `Editor` on Parley 0.12.
+  with per-script fallback), `TextBlock` and `Editor` on Parley 0.12. The
+  font stack names no generic family: with fontconfig, `sans-serif` is
+  every installed family, and a character Inter lacks was looked up in
+  each of them (a one-second freeze with 2,000 families; M2.7).
   `TextField` (ui) adds focus, keys, IME, clipboard, caret blinking and
   the accessibility node; `TextInput` is the widget around it.
 

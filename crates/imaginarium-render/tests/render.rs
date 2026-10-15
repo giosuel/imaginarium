@@ -13,8 +13,20 @@ use imaginarium_render::kurbo::{Affine, Circle, Rect, RoundedRect};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::peniko::color::palette::css;
 use imaginarium_render::{
-    CpuMode, CpuRenderer, GpuOptions, OffscreenRenderer, Pixmap, Scene, TextureKey,
+    CpuMode, CpuRenderer, GpuOptions, OffscreenRenderer, Pixmap, RenderError, Scene, TextureKey,
 };
+
+/// Opens the GPU for one test at a time: the tests share this lock until
+/// they finish. Mesa's software Vulkan driver (lavapipe, the VM's GPU)
+/// crashed now and then (SIGSEGV) when test threads opened GPUs at once;
+/// programs open one.
+fn open_gpu() -> Result<(std::sync::MutexGuard<'static, ()>, OffscreenRenderer), RenderError> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    OffscreenRenderer::new(&GpuOptions::default()).map(|gpu| (guard, gpu))
+}
 
 const WIDTH: u16 = 160;
 const HEIGHT: u16 = 120;
@@ -122,8 +134,8 @@ fn compare(a: &Pixmap, b: &Pixmap, tolerance: u8) -> (u8, f64) {
 #[test]
 fn the_gpu_backend_draws_what_the_cpu_backend_draws() {
     // CI runners have no GPU; on machines without one this is skipped.
-    let mut gpu = match OffscreenRenderer::new(&GpuOptions::default()) {
-        Ok(gpu) => gpu,
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
         Err(err) => {
             eprintln!("skipped: {err}");
             return;
@@ -234,8 +246,8 @@ fn a_texture_follows_the_transform_and_its_destination() {
 
 #[test]
 fn the_gpu_draws_textures_like_the_cpu() {
-    let mut gpu = match OffscreenRenderer::new(&GpuOptions::default()) {
-        Ok(gpu) => gpu,
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
         Err(err) => {
             eprintln!("skipped: {err}");
             return;
@@ -265,8 +277,8 @@ fn drawing_a_missing_texture_draws_nothing() {
     let on_cpu =
         CpuRenderer::new(CpuMode::Deterministic).render(&scene, WIDTH, HEIGHT, background());
     assert_eq!(compare(&empty, &on_cpu, 0).1, 0.0);
-    let mut gpu = match OffscreenRenderer::new(&GpuOptions::default()) {
-        Ok(gpu) => gpu,
+    let (_one_at_a_time, mut gpu) = match open_gpu() {
+        Ok(opened) => opened,
         Err(err) => {
             eprintln!("skipped: {err}");
             return;
@@ -293,7 +305,7 @@ fn bitmap_glyphs_draw_at_any_size() {
     let font = FontData::new(Blob::new(std::sync::Arc::new(FONT)), 0);
     let face = skrifa::FontRef::new(FONT).unwrap();
     let id = face.charmap().map('\u{1F7E5}').unwrap().to_u32();
-    let mut gpu = OffscreenRenderer::new(&GpuOptions::default())
+    let mut opened = open_gpu()
         .map_err(|err| eprintln!("GPU skipped: {err}"))
         .ok();
     // 20 pixels per em, and 13 × 12 = 156 (over the atlas limit).
@@ -320,7 +332,7 @@ fn bitmap_glyphs_draw_at_any_size() {
             "cpu",
             CpuRenderer::new(CpuMode::Deterministic).render(&scene, 200, 200, Color::WHITE),
         )];
-        if let Some(gpu) = &mut gpu {
+        if let Some((_, gpu)) = &mut opened {
             pixmaps.push(("gpu", gpu.render(&scene, 200, 200, Color::WHITE).unwrap()));
         }
         for (backend, pixmap) in pixmaps {

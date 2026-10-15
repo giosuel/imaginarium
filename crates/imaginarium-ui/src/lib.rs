@@ -51,6 +51,6 @@ pub use access::{AccessTree, ROOT, rect as access_rect};
 pub use text_field::{FieldResponse, TextField};
 
 pub use window::{
-    FrameInfo, Ime, Input, Key, Modifiers, RunStats, UiError, View, WindowOptions, request_frame,
-    run, scale_factor,
+    FrameCauses, FrameInfo, Ime, Input, Key, Modifiers, RunStats, UiError, View, WindowOptions,
+    request_frame, run, run_with_gpu, scale_factor,
 };
