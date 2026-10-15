@@ -34,7 +34,8 @@ impl View for Counter {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         // Lays out only if something changed, then repaints only the
         // widgets that changed.
-        self.ui.layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
+        self.ui
+            .layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
         self.ui.paint(&mut self.fonts, scene);
     }
 
