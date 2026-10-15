@@ -1,6 +1,6 @@
 # Rendering: display lists, tiles, compositor, backends
 
-- Status: **Draft** (2026-10-12, M2.2). Accepted once the M2 gate passes.
+- Status: **Implemented** in M2.5 (designed 2026-10-12 in M2.2). Accepted once the M2 gate passes.
 - Implements ADR-0003 (own render stack) for the UI toolkit of ADR-0007.
   Versions and crate choices: [`m2-ui-stack.md`](m2-ui-stack.md).
 - Crate: `imaginarium-render` (toolkit layer). It knows nothing about the
@@ -165,14 +165,34 @@ off-screen tiles and other levels moves to the worker pool later (PLAN
 already use several threads. Nothing in the design assumes threads, which
 also keeps a browser (wasm) build possible.
 
-## 10. What M2.2 delivers, and in which order
+## 10. What M2.5 implemented
 
-1. **Part 1** (no rasterizer): items, display lists, bounds, the grid
-   index, tile and level math, invalidation, the cache's bookkeeping and
-   budget, frame planning (visible tiles, budget, stand-ins), counters, and
-   the recording backend. Property tests: no change ever leaves a valid
-   tile showing stale content; panning invalidates nothing; the plan
-   covers the viewport. Benchmarks on `BoardFixture::LARGE`.
-2. **Part 2** (from 2026-10-16, `vello_cpu`/`vello_gpu` 0.3): the CPU
-   backend with golden images, then the GPU backend, then the first
-   pictures of the 10k-shape board.
+`imaginarium-render::canvas` (and the texture commands of `Scene`):
+
+- **Items** are an id, a z-order and bounds; the display list comes from a
+  `CanvasContent` that paints an item into a tile on demand, with the
+  level's scale, so content can pick a level of detail (cards drop their
+  text below 30 %) without keeping display lists for every item.
+- The **grid index**, **levels**, **tile keys**, **invalidation**
+  (old ∪ new bounds plus a device pixel), the **budget** (24 tile renders
+  per frame, nearest the middle first), **stand-ins** (a stale copy, or the
+  nearest coarser cached level, clipped), the **zoom pause** (150 ms, or
+  at once when tiles would be magnified), **LRU eviction** (1,000 tiles)
+  and the **counters** are as above.
+- **Tiles are textures:** `Scene::render_texture` renders a tile's scene
+  into a texture the backend keeps, `Scene::draw_texture` draws it,
+  `Scene::free_texture` releases it. On the GPU each tile render is its own
+  submission (Vello rewrites its buffers between renders) and tiles are
+  bound as external textures of the frame; the CPU backend keeps pixmaps,
+  so golden images cover it. A tile drawn at 1:1 on whole device pixels
+  equals drawing its items directly (tested).
+- **Overlays** (hover outlines, the edited card, drag handles) are drawn
+  live on top and never dirty tiles.
+- Not yet: rendering tiles on worker threads, prefetching the margin ring,
+  drawing the dragged item as an overlay until the drag ends (a drag
+  re-renders 1–2 tiles per frame today), and partial tile updates.
+
+Measured in the gate app (llvmpipe VM, M2.5): with tiles, a pan frame
+encodes in 1.4 ms instead of 4.7 ms for the 10,000 shapes, and 1.6 ms
+instead of 4.4 ms for the text cards; a drag renders at most 2 tiles per
+frame (criterion 2).

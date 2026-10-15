@@ -18,7 +18,7 @@ use imaginarium_ui::{
     Ui, WidgetId, label,
 };
 
-use crate::board::{ACCENT, Board, INK, PAPER};
+use crate::board::{ACCENT, Board, INK, Mode, PAPER};
 use crate::commands::Commands;
 use crate::widgets::{BoardWidget, Logo, Palette, ResultList, Results};
 
@@ -44,6 +44,8 @@ pub(crate) struct App {
     pub(crate) last_palette_search: Rc<Cell<Duration>>,
     gpu: Signal<String>,
     size: Size,
+    mode_request: Rc<Cell<Option<Mode>>>,
+    updates_request: Rc<Cell<bool>>,
 }
 
 fn input_colors() -> InputColors {
@@ -57,10 +59,20 @@ fn input_colors() -> InputColors {
 
 impl App {
     /// The content, with a board of `cards` and a palette of `commands`.
-    pub(crate) fn new(mut fonts: Fonts, cards: usize, commands: usize) -> Self {
+    pub(crate) fn new(
+        mut fonts: Fonts,
+        cards: usize,
+        shapes: usize,
+        commands: usize,
+        tiles: bool,
+    ) -> Self {
         let _ = &mut fonts;
         let mut ui = Ui::new();
-        let board = Rc::new(RefCell::new(Board::new(cards)));
+        let board = Rc::new(RefCell::new(Board::new(cards, shapes, tiles)));
+        // Requests from the toolbar's mode buttons, applied by the app
+        // (they need the fonts).
+        let mode_request: Rc<Cell<Option<Mode>>> = Rc::new(Cell::new(None));
+        let updates_request = Rc::new(Cell::new(false));
         let commands = Rc::new(RefCell::new(Commands::new(commands)));
         let command_count = commands.borrow().len();
 
@@ -144,6 +156,34 @@ impl App {
             ui.add(input)
         };
         let search_box = ui.add_with_children(Flex::row().width(320.0), &[search]);
+        let mode_button = |ui: &mut Ui, text: &str, action: Box<dyn FnMut()>| {
+            ui.add(Button::new(
+                text,
+                TextStyle::new(13.0),
+                button_colors,
+                action,
+            ))
+        };
+        let cards_button = {
+            let request = mode_request.clone();
+            mode_button(
+                &mut ui,
+                "Cards",
+                Box::new(move || request.set(Some(Mode::Cards))),
+            )
+        };
+        let shapes_button = {
+            let request = mode_request.clone();
+            mode_button(
+                &mut ui,
+                &format!("Shapes ({shapes})"),
+                Box::new(move || request.set(Some(Mode::Shapes))),
+            )
+        };
+        let updates_button = {
+            let request = updates_request.clone();
+            mode_button(&mut ui, "Tile updates", Box::new(move || request.set(true)))
+        };
         let toolbar = ui.add_with_children(
             Flex::row()
                 .height(48.0)
@@ -151,7 +191,17 @@ impl App {
                 .gap(10.0)
                 .background(CHROME)
                 .role(accesskit::Role::Toolbar, "Toolbar"),
-            &[logo, title, spacer, count, commands_button, search_box],
+            &[
+                logo,
+                title,
+                cards_button,
+                shapes_button,
+                updates_button,
+                spacer,
+                count,
+                commands_button,
+                search_box,
+            ],
         );
         let toolbar_edge = ui.add(Flex::row().height(1.0).background(CHROME_EDGE));
 
@@ -164,11 +214,31 @@ impl App {
                 TextStyle::new(12.0).color(INK.with_alpha(0.65)),
                 move || {
                     let (paint, encode) = frame.get();
-                    let zoom = board.try_borrow().map_or(1.0, |board| board.zoom());
+                    let (zoom, mode, canvas, selected) = board.try_borrow().map_or(
+                        (1.0, Mode::Cards, Default::default(), 0),
+                        |board| {
+                            (
+                                board.zoom(),
+                                board.mode(),
+                                board.last_canvas.clone(),
+                                board.selection_len(),
+                            )
+                        },
+                    );
+                    let what = match mode {
+                        Mode::Cards => format!("{cards} cards"),
+                        Mode::Shapes if selected > 0 => {
+                            format!("{shapes} shapes, {selected} selected")
+                        }
+                        Mode::Shapes => format!("{shapes} shapes"),
+                    };
                     let mut text = format!(
-                        "{} cards · {command_count} commands · zoom {:.0} % · last frame: paint {paint:.2} ms, encode {encode:.2} ms",
-                        cards,
-                        zoom * 100.0
+                        "{what} · zoom {:.0} % · tiles: {} drawn, {} rendered, {} owed (level {}) · last frame: paint {paint:.2} ms, encode {encode:.2} ms",
+                        zoom * 100.0,
+                        canvas.reused + canvas.rendered,
+                        canvas.rendered,
+                        canvas.owed,
+                        canvas.level,
                     );
                     let gpu = gpu.get();
                     if !gpu.is_empty() {
@@ -280,6 +350,31 @@ impl App {
             last_palette_search,
             gpu,
             size: Size::ZERO,
+            mode_request,
+            updates_request,
+        }
+    }
+
+    /// Shows the cards or the shapes.
+    pub(crate) fn set_mode(&mut self, mode: Mode) {
+        self.board.borrow_mut().set_mode(&mut self.fonts, mode);
+        self.ui.refresh(self.board_id);
+        imaginarium_ui::request_frame();
+    }
+
+    /// Toggles tinting the tiles each frame renders.
+    pub(crate) fn toggle_tile_updates(&mut self) {
+        self.board.borrow_mut().toggle_tile_updates();
+        self.ui.refresh(self.board_id);
+        imaginarium_ui::request_frame();
+    }
+
+    fn apply_requests(&mut self) {
+        if let Some(mode) = self.mode_request.take() {
+            self.set_mode(mode);
+        }
+        if self.updates_request.take() {
+            self.toggle_tile_updates();
         }
     }
 
@@ -293,6 +388,28 @@ impl App {
     pub(crate) fn set_frame(&mut self, paint: Duration, encode: Duration) {
         self.frame
             .set((paint.as_secs_f64() * 1000.0, encode.as_secs_f64() * 1000.0));
+    }
+
+    /// The board widget.
+    pub(crate) fn board_id(&self) -> WidgetId {
+        self.board_id
+    }
+
+    /// Zooms the board about the middle of its view (scripted
+    /// measurement).
+    pub(crate) fn zoom_board(&mut self, factor: f64) {
+        let center = self.ui.bounds(self.board_id).map_or(
+            imaginarium_render::kurbo::Point::new(640.0, 400.0),
+            |bounds| bounds.center(),
+        );
+        self.board.borrow_mut().zoom_about(factor, center);
+        self.ui.refresh(self.board_id);
+    }
+
+    /// Back to 100 % at the board's start.
+    pub(crate) fn reset_view(&mut self) {
+        self.board.borrow_mut().reset_view();
+        self.ui.refresh(self.board_id);
     }
 
     /// Pans the board (scripted measurement) and marks it for painting.
@@ -412,6 +529,14 @@ impl App {
                 }
                 return true;
             }
+            if c == "1" || c == "2" {
+                self.set_mode(if c == "1" { Mode::Cards } else { Mode::Shapes });
+                return true;
+            }
+            if c.eq_ignore_ascii_case("t") {
+                self.toggle_tile_updates();
+                return true;
+            }
             if c.eq_ignore_ascii_case("f") && !was_open {
                 self.focus_search();
                 if let Some(input) = self.ui.widget_mut::<TextInput>(self.search_id) {
@@ -423,8 +548,8 @@ impl App {
                 return true;
             }
         }
-        // While the palette is open, a press outside it closes it.
         let handled = self.ui.input(&mut self.fonts, input);
+        self.apply_requests();
         let open = self.palette_open.get_untracked();
         if !was_open && open {
             // Opened by the button.

@@ -17,8 +17,8 @@ GeForce RTX 3050 Laptop GPU, 32 GB RAM.
 
 | Criterion (ADR-0007) | How | Since |
 |---|---|---|
-| 1. 10,000 shapes pan and zoom at ≥ 60 fps, p99 < 16 ms | Board of 2,000 text cards now; the 10k-shape canvas with tiles is M2.5 | partly, M2.2 |
-| 2. Dragging re-renders only dirty tiles | M2.5 | – |
+| 1. 10,000 shapes pan and zoom at ≥ 60 fps, p99 < 16 ms | Shapes board (Ctrl+2) through the tile cache: `shapes.criterion_1_pass`, intervals | M2.5 |
+| 2. Dragging re-renders only dirty tiles | Scripted drag: `shapes.criterion_2_pass` (≤ 4 tiles per frame); Tile updates (Ctrl+T) shows them | M2.5 |
 | 3. Palette: 2,000 commands, < 1 ms per keystroke | Command palette (Ctrl+K) over 2,000 commands: `palette.pass` | M2.4 |
 | 4. Text field with IME (CJK) and a screen reader | Search field and card editing; checklist below | M2.3 |
 | 5. HiDPI and mixed-DPI monitors | Checklist below | M2.2 |
@@ -53,10 +53,12 @@ should stay visible and unobstructed.
 ./imaginarium-gate --measure --gpu high --report gate-report-dgpu.json      # the RTX 3050
 ./imaginarium-gate --measure --no-glyph-atlas --report gate-report-noatlas.json
 ./imaginarium-gate --measure --no-vsync --report gate-report-novsync.json   # how fast frames could be
+./imaginarium-gate --measure --no-tiles --report gate-report-notiles.json   # without the tile cache, to compare
 ```
 
-The scripted run pans, types into the search field, types into the
-command palette, and idles. The report has, per phase, the toolkit's
+The scripted run pans the cards, types into the search field, types into
+the command palette, pans, zooms and drags on the 10,000-shape board, and
+idles (about a minute). The report has, per phase, the toolkit's
 share of each frame (`paint`, and the widget tree's `layout`)
 apart from the renderer's (`encode`, `submit`), the wait for the
 swapchain (`acquire`, which is vertical sync when everything keeps up)
@@ -77,6 +79,20 @@ works, odd (what), or broken.
 3. Hovering outlines the card under the pointer.
 4. The status line shows the last frame's paint and encode time and the
    GPU's name. Note the typical numbers while panning.
+
+**Shapes and tiles (criteria 1 and 2)**
+5a. Ctrl+2 (or "Shapes" in the toolbar) shows 10,000 shapes. Pan and
+    zoom from 800 % down to all of them: smooth? Any tiles that show up
+    late or blurry, or seams between tiles?
+5b. Drag shapes around. Turn on "Tile updates" (Ctrl+T): tiles flash red
+    when they re-render. A drag flashes the tiles under the shapes when it
+    starts and ends, none while they move (they are drawn live on top);
+    panning flashes only the tiles coming into view.
+5b2. Editing: click selects, Shift+click adds, Shift+drag on empty board
+    draws a selection rectangle, Ctrl+A selects all; drag moves the
+    selection, arrow keys nudge (Shift: 10), Delete removes, Ctrl+Z /
+    Ctrl+Shift+Z undo and redo.
+5c. Ctrl+1 goes back to the cards (their tiles are kept).
 
 **HiDPI (criterion 5)**
 5. With the laptop panel at a fractional scale (Hyprland `monitor=…,1.25`
@@ -134,8 +150,8 @@ works, odd (what), or broken.
 22. Does it open quickly? (The report has the number.)
 
 **Known gaps (not bugs yet):** no pinch zoom, no context menus, no
-scrolling lists (the palette shows the best 10), and the board is one big
-scene (tiles come in M2.5).
+scrolling lists (the palette shows the best 10), no undo for moved shapes,
+and tiles render on the UI thread (workers come later).
 
 ## What to send back
 

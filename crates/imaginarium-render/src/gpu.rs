@@ -9,7 +9,7 @@ use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
 
 use crate::RenderError;
-use crate::scene::{Scene, Target, replay};
+use crate::scene::{Scene, Target, TextureKey, TextureWork, replay};
 
 /// Which GPU to prefer on machines with more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +146,11 @@ pub struct FrameTiming {
     pub encode: Duration,
     /// Submitting the work and presenting.
     pub submit: Duration,
+    /// Rendering textures (canvas tiles) before the frame: encoding and
+    /// submitting each.
+    pub textures: Duration,
+    /// How many textures were rendered.
+    pub texture_renders: u32,
 }
 
 /// What happened to a frame.
@@ -173,6 +178,129 @@ pub struct WindowRenderer {
     info: GpuInfo,
     glyph_atlas: bool,
     frames: u64,
+    textures: Textures,
+}
+
+/// Textures kept for their owners across frames (canvas tiles).
+struct Textures {
+    entries: std::collections::HashMap<TextureKey, (wgpu::Texture, u16, u16)>,
+    bindings: vello_gpu::TextureBindings,
+    /// Depth views by size, shared by textures of that size.
+    depths: std::collections::HashMap<(u16, u16), wgpu::TextureView>,
+    /// Scratch scene the textures' content is encoded in.
+    scene: vello_gpu::Scene,
+}
+
+impl Textures {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            bindings: vello_gpu::TextureBindings::new(),
+            depths: std::collections::HashMap::new(),
+            scene: vello_gpu::Scene::new(1, 1),
+        }
+    }
+
+    /// Renders and frees textures as `work` says, one submission each:
+    /// Vello rewrites its buffers between renders, so renders sharing one
+    /// submission would see the last one's data.
+    fn process(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &mut vello_gpu::Renderer,
+        resources: &mut vello_gpu::Resources,
+        format: wgpu::TextureFormat,
+        glyph_atlas: bool,
+        work: &[TextureWork],
+    ) -> Result<u32, RenderError> {
+        let mut renders = 0;
+        for item in work {
+            match item {
+                TextureWork::Free(key) => {
+                    self.entries.remove(key);
+                    self.bindings.remove(vello_common::TextureId(key.0));
+                }
+                TextureWork::Render {
+                    key,
+                    width,
+                    height,
+                    scene,
+                } => {
+                    let (w, h) = ((*width).max(1), (*height).max(1));
+                    let fits = self
+                        .entries
+                        .get(key)
+                        .is_some_and(|(_, tw, th)| (*tw, *th) == (w, h));
+                    if !fits {
+                        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("canvas texture"),
+                            size: wgpu::Extent3d {
+                                width: u32::from(w),
+                                height: u32::from(h),
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                | wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        });
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        self.bindings.insert(vello_common::TextureId(key.0), view);
+                        self.entries.insert(*key, (texture, w, h));
+                    }
+                    let Some((texture, _, _)) = self.entries.get(key) else {
+                        continue;
+                    };
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let size = vello_gpu::RenderSize {
+                        width: w,
+                        height: h,
+                    };
+                    let depth = self.depths.entry((w, h)).or_insert_with(|| {
+                        vello_gpu::Renderer::create_depth_texture_view(&gpu.device, &size)
+                    });
+                    self.scene.reset_and_resize(w, h);
+                    replay(
+                        scene,
+                        &mut Target {
+                            context: &mut self.scene,
+                            resources: &mut *resources,
+                            glyph_atlas,
+                            pixmaps: None,
+                        },
+                        Affine::IDENTITY,
+                    );
+                    let mut encoder =
+                        gpu.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("canvas texture"),
+                            });
+                    renderer
+                        .render(
+                            &self.scene,
+                            resources,
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut encoder,
+                            &size,
+                            &view,
+                            Some(depth),
+                            &vello_gpu::TextureBindings::new(),
+                            vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::Viewport {
+                                color: Color::TRANSPARENT,
+                            }),
+                        )
+                        .map_err(|err| RenderError::Render(err.to_string()))?;
+                    gpu.queue.submit([encoder.finish()]);
+                    renders += 1;
+                }
+            }
+        }
+        Ok(renders)
+    }
 }
 
 impl WindowRenderer {
@@ -258,6 +386,7 @@ impl WindowRenderer {
             info,
             glyph_atlas: options.glyph_atlas,
             frames: 0,
+            textures: Textures::new(),
         })
     }
 
@@ -314,6 +443,16 @@ impl WindowRenderer {
             _ => return Ok(FrameOutcome::Skipped), // timeout, occluded
         };
         let acquired = Instant::now();
+        let glyph_atlas = self.glyph_atlas && self.frames > 0;
+        let texture_renders = self.textures.process(
+            &self.gpu,
+            &mut self.renderer,
+            &mut self.resources,
+            self.view_format,
+            glyph_atlas,
+            scene.texture_work(),
+        )?;
+        let textured = Instant::now();
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
@@ -325,7 +464,8 @@ impl WindowRenderer {
             &mut Target {
                 context: &mut self.scene,
                 resources: &mut self.resources,
-                glyph_atlas: self.glyph_atlas && self.frames > 0,
+                glyph_atlas,
+                pixmaps: None,
             },
             transform,
         );
@@ -348,7 +488,7 @@ impl WindowRenderer {
                 },
                 &view,
                 Some(&self.depth),
-                &vello_gpu::TextureBindings::new(),
+                &self.textures.bindings,
                 vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::Viewport {
                     color: background,
                 }),
@@ -360,8 +500,10 @@ impl WindowRenderer {
         self.frames += 1;
         Ok(FrameOutcome::Presented(FrameTiming {
             acquire: acquired - start,
-            encode: encoded - acquired,
+            encode: encoded - textured,
             submit: encoded.elapsed(),
+            textures: textured - acquired,
+            texture_renders,
         }))
     }
 }
@@ -426,12 +568,22 @@ impl OffscreenRenderer {
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(device, &size);
         let mut vello_scene = vello_gpu::Scene::new(w, h);
+        let mut textures = Textures::new();
+        textures.process(
+            &self.gpu,
+            &mut renderer,
+            &mut resources,
+            format,
+            false,
+            scene.texture_work(),
+        )?;
         replay(
             scene,
             &mut Target {
                 context: &mut vello_scene,
                 resources: &mut resources,
                 glyph_atlas: false,
+                pixmaps: None,
             },
             Affine::IDENTITY,
         );
@@ -448,7 +600,7 @@ impl OffscreenRenderer {
                 &size,
                 &view,
                 Some(&depth),
-                &vello_gpu::TextureBindings::new(),
+                &textures.bindings,
                 vello_gpu::TargetInit::Clear(vello_gpu::ClearSettings::Viewport {
                     color: background,
                 }),

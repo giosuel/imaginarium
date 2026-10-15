@@ -27,6 +27,7 @@
 //! - Windows and input: `imaginarium-ui` creates the window and hands only
 //!   its handle here, so this crate doesn't depend on `winit`.
 
+pub mod canvas;
 mod cpu;
 mod error;
 mod gpu;
@@ -37,6 +38,6 @@ pub use error::RenderError;
 pub use gpu::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, OffscreenRenderer, Power, WindowRenderer,
 };
-pub use scene::{GlyphRun, Scene};
+pub use scene::{GlyphRun, Scene, TextureKey};
 pub use vello_common::{kurbo, peniko};
 pub use vello_cpu::{Glyph, Pixmap};

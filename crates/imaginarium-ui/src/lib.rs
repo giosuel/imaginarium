@@ -52,5 +52,5 @@ pub use text_field::{FieldResponse, TextField};
 
 pub use window::{
     FrameInfo, Ime, Input, Key, Modifiers, RunStats, UiError, View, WindowOptions, request_frame,
-    run,
+    run, scale_factor,
 };

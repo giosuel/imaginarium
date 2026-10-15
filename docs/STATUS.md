@@ -10,7 +10,7 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.5 Canvas** (tiles; see the M2 checklist below; the order changed on 2026-10-12).
+- **Next step:** **M2.7 Gate run** by the owner with the M2.5 test binary (see the M2 checklist below). Meanwhile: the remaining M2.6 items.
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -734,13 +734,46 @@ app runs. Two owner exceptions for M2:
     wait for the next wake-up; per-frame timings in a signal would have
     caused endless frames (they are read from a cell and refreshed with
     `Ui::refresh`).
-- [ ] **M2.5 Canvas** ← **next**: display lists, the 256-px tile cache, invalidation
-  and the compositor (`docs/design/rendering.md`) on the 10k-shape board,
-  with pan, zoom, drag and a dirty-tile overlay. Criteria 1 and 2.
-- [ ] **M2.6 Gate binary**: complete `imaginarium-gate` (started in
-  M2.2, grows with each step): scripted scenarios for every criterion,
-  `gate-report.json` (renderer and toolkit numbers apart, `--backend
-  gpu|cpu`, integrated and discrete GPU), a manual checklist.
+- [x] **M2.5 Canvas** (done 2026-10-13):
+  - `imaginarium-render`: textures kept across frames (`Scene::
+    render_texture`, `draw_texture`, `free_texture`; one GPU submission
+    per texture render, external texture bindings; pixmaps on the CPU),
+    and `canvas::Canvas`: items in a 512-unit grid, 256-px tiles at
+    half-octave levels, old ∪ new invalidation, a budget of 24 renders per
+    frame with stand-ins, the 150 ms zoom pause, LRU eviction at 1,000
+    tiles, counters, a tile-updates tint, and `draw_direct` without tiles.
+    Content paints items on demand (level of detail per level).
+  - Gate app: both boards on the tile cache (hover and editing are live
+    overlays); a 10,000-shape board (Ctrl+2) with dragging; Tile updates
+    (Ctrl+T); `--measure` pans, zooms and drags the shapes and checks
+    criteria 1 and 2; `--no-tiles` to compare.
+  - Measured on this VM (llvmpipe): a drag renders at most 2 tiles per
+    frame (**criterion 2 passes**); panning renders 0.3 tiles per frame on
+    average. Encode per pan frame 1.4 ms with tiles vs 4.7 ms without
+    (shapes), 1.6 vs 4.4 ms (cards). Criterion 1 can't be judged here:
+    llvmpipe rasterizes inside `submit` (~23 ms of a 27 ms frame); the
+    UI thread's own work is 2.5–5 ms. Cold start 378 ms, idle 0 %.
+  - Then: shape editing (selection by click, Shift+click, rubber band,
+    Ctrl+A; drag, nudge, delete, undo/redo). A drag lifts the selection
+    out of the tiles and draws it live, so it renders tiles only at its
+    start and end (scripted drag: 2 tile renders in 240 frames). The
+    board's first frame is drawn without tiles (cold start 324–351 ms
+    instead of 404–428 ms with 24 tile submissions on llvmpipe).
+  - Property tests: no valid tile ever shows stale content (a planted
+    missing invalidation fails it), and panning invalidates nothing.
+  - Not yet (design §10): tile rendering on workers, margin prefetch.
+  - Disk full during M2.5 (2026-10-13 ~01:55 UTC): accumulated Cargo
+    output (another project's `~/.cache/somedesk-target*`, 77 GB; ours
+    `target/`, 42 GB). Freed our `target/debug/incremental` (9.3 GB).
+    Clean `target/debug` between milestones.
+- [ ] **M2.6 Gate binary** (mostly done along the way): scripted
+  scenarios for criteria 1, 2, 3 and 6, `gate-report.json` with toolkit
+  and renderer numbers apart, `--gpu low|high`, `--adapter`, `--no-vsync`,
+  `--no-glyph-atlas`, `--no-tiles`, the manual checklist
+  (`docs/design/m2-gate.md`). Left: `--backend cpu` (a window drawn by
+  `vello_cpu` needs a software presenter such as `softbuffer`; proposed to
+  drop, since the gate machine has two GPUs; owner to decide), and
+  mixed-DPI checks (manual for now).
 - [ ] **M2.7 Gate run** on the owner's laptop: results in
   `docs/design/m2-gate.md`, one focused fix round for failed criteria,
   then the decision. ADR-0007 notes that the gate evaluates the renderer
