@@ -49,23 +49,31 @@ impl AccessTree {
 
     /// The whole tree as an AccessKit update, under a window node named
     /// `title` scaled by `scale` (AccessKit wants physical pixels).
-    pub(crate) fn into_update(self, title: &str, scale: f64, initial: bool) -> TreeUpdate {
+    ///
+    /// Every update is a whole tree with its [`TreeInfo`]: AccessKit
+    /// builds its tree from whichever update comes first once a screen
+    /// reader starts, which needn't be the one it asked for. The focus
+    /// falls back to the window when no node has it, as AccessKit
+    /// requires.
+    pub(crate) fn into_update(self, title: &str, scale: f64) -> TreeUpdate {
         let mut root = Node::new(Role::Window);
         root.set_label(title);
         root.set_children(self.children);
         root.set_transform(Affine::scale(scale));
         let mut nodes = self.nodes;
+        let focus = self
+            .focus
+            .filter(|focus| nodes.iter().any(|(id, _)| id == focus))
+            .unwrap_or(ROOT);
         nodes.push((ROOT, root));
+        let mut tree = TreeInfo::new(ROOT);
+        tree.toolkit_name = Some("Imaginarium".into());
+        tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").into());
         TreeUpdate {
             nodes,
-            tree: initial.then(|| {
-                let mut tree = TreeInfo::new(ROOT);
-                tree.toolkit_name = Some("Imaginarium".into());
-                tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").into());
-                tree
-            }),
+            tree: Some(tree),
             tree_id: TreeId::ROOT,
-            focus: self.focus.unwrap_or(ROOT),
+            focus,
         }
     }
 }

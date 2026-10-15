@@ -38,6 +38,8 @@
 
 mod access;
 mod clipboard;
+#[cfg(test)]
+mod tests;
 mod text_field;
 mod tree;
 mod widgets;

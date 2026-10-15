@@ -285,10 +285,16 @@ pub struct Ui {
     focus: Option<WidgetId>,
     hover: Option<WidgetId>,
     capture: Option<WidgetId>,
-    /// The press that started a capture (implicit capture ends on release).
+    /// The press that started a capture (implicit capture ends once every
+    /// button is up).
     implicit_capture: bool,
+    /// Pointer buttons held down.
+    buttons_held: u8,
     area: Rect,
     layout_dirty: bool,
+    /// Widgets changed through [`Ui::widget_mut`], whose style is read
+    /// again at the next layout (after the change).
+    restyle: Vec<WidgetId>,
     clipboard: Clipboard,
     stats: TreeStats,
 }
@@ -311,8 +317,10 @@ impl Ui {
             hover: None,
             capture: None,
             implicit_capture: false,
+            buttons_held: 0,
             area: Rect::ZERO,
             layout_dirty: true,
+            restyle: Vec::new(),
             clipboard: Clipboard::default(),
             stats: TreeStats::default(),
         }
@@ -410,19 +418,28 @@ impl Ui {
 
     /// Removes `id` and everything below it, disposing their effects.
     pub fn remove(&mut self, id: WidgetId) {
-        let Some(node) = self.node(id) else {
+        let Some(parent) = self.node(id).map(|node| node.parent) else {
             return;
         };
-        let children = node.children.clone();
-        let parent = node.parent;
-        for child in children {
-            self.remove(child);
-        }
         if let Some(parent) = parent
             && let Some(node) = self.node(parent)
         {
             let rest: Vec<WidgetId> = node.children.iter().copied().filter(|&c| c != id).collect();
             self.set_children(parent, &rest);
+        }
+        self.remove_subtree(id);
+    }
+
+    /// Removes `id` and its descendants, without detaching it from its
+    /// parent (the parent is going too, or did that already): detaching
+    /// each child from a dying parent would be quadratic.
+    fn remove_subtree(&mut self, id: WidgetId) {
+        let Some(node) = self.node_mut(id) else {
+            return;
+        };
+        let children = std::mem::take(&mut node.children);
+        for child in children {
+            self.remove_subtree(child);
         }
         let slot = &mut self.slots[id.index as usize];
         if let Some(node) = slot.node.take() {
@@ -448,14 +465,12 @@ impl Ui {
     }
 
     /// The widget `id` as its concrete type, to change it. Marks it for
-    /// layout and paint.
+    /// layout and paint; the next layout reads its style again.
     pub fn widget_mut<W: Widget>(&mut self, id: WidgetId) -> Option<&mut W> {
-        self.layout_dirty = true;
         let node = self.node_mut(id)?;
         node.paint_dirty = true;
-        let layout = node.layout;
-        let style = node.widget.style();
-        let _ = self.taffy.set_style(layout, style);
+        self.layout_dirty = true;
+        self.restyle.push(id);
         let node = self.node_mut(id)?;
         (&mut *node.widget as &mut dyn Any).downcast_mut::<W>()
     }
@@ -608,6 +623,9 @@ impl Ui {
             return;
         }
         let start = Instant::now();
+        for id in std::mem::take(&mut self.restyle) {
+            self.mark(id, true);
+        }
         let Some(root_layout) = self.node(root).map(|node| node.layout) else {
             return;
         };
@@ -658,6 +676,37 @@ impl Ui {
         self.place(root, area.origin());
         self.layout_dirty = false;
         self.stats.layout = Some(start.elapsed());
+        // Keys must not go to a widget nobody sees, and a screen reader's
+        // focus must be on a node that exists.
+        if let Some(focus) = self.focus
+            && !self.is_shown(focus)
+        {
+            self.set_focus(fonts, None);
+        }
+        if let Some(capture) = self.capture
+            && !self.is_shown(capture)
+        {
+            self.capture = None;
+        }
+    }
+
+    /// Whether `id` is in the tree under the root and has a box (it and
+    /// its ancestors aren't hidden). Detached widgets keep their old
+    /// bounds, so the walk has to reach the root.
+    fn is_shown(&self, id: WidgetId) -> bool {
+        let mut current = id;
+        loop {
+            let Some(node) = self.node(current) else {
+                return false;
+            };
+            if node.bounds.width() <= 0.0 || node.bounds.height() <= 0.0 {
+                return false;
+            }
+            match node.parent {
+                Some(parent) => current = parent,
+                None => return self.root == Some(current),
+            }
+        }
     }
 
     /// Computes window coordinates from Taffy's parent-relative ones.
@@ -740,17 +789,22 @@ impl Ui {
     }
 
     /// The deepest visible widget at `point`, later siblings first (they
-    /// are drawn on top).
+    /// are drawn on top). Children may stick out of a parent that doesn't
+    /// clip them, as they are drawn.
     fn hit(&self, id: WidgetId, point: Point) -> Option<WidgetId> {
         let node = self.node(id)?;
-        if !node.bounds.contains(point) {
+        if node.bounds.width() <= 0.0 || node.bounds.height() <= 0.0 {
+            return None; // hidden (display: none), and so are its children
+        }
+        let inside = node.bounds.contains(point);
+        if !inside && node.widget.clips() {
             return None;
         }
         node.children
             .iter()
             .rev()
             .find_map(|&child| self.hit(child, point))
-            .or(Some(id))
+            .or(inside.then_some(id))
     }
 
     fn ancestors(&self, id: WidgetId) -> Vec<WidgetId> {
@@ -811,6 +865,11 @@ impl Ui {
             Input::PointerButton {
                 pressed, position, ..
             } => {
+                self.buttons_held = if *pressed {
+                    self.buttons_held.saturating_add(1)
+                } else {
+                    self.buttons_held.saturating_sub(1)
+                };
                 let target = self.capture.or_else(|| self.hit(root, *position));
                 if *pressed && self.capture.is_none() {
                     // Click to focus: the nearest focusable widget, or none.
@@ -827,7 +886,9 @@ impl Ui {
                     Some(target) => self.bubble(fonts, target, input),
                     None => false,
                 };
-                if !*pressed && self.implicit_capture {
+                // A drag with the left button doesn't end when the right
+                // one is released.
+                if !*pressed && self.implicit_capture && self.buttons_held == 0 {
                     self.capture = None;
                     self.implicit_capture = false;
                 }
@@ -837,6 +898,19 @@ impl Ui {
                 Some(target) => self.bubble(fonts, target, input),
                 None => false,
             },
+            Input::WindowFocus(false) => {
+                // Buttons released in another window never reach us.
+                let handled = match self.focus {
+                    Some(target) => self.bubble(fonts, target, input),
+                    None => self.bubble(fonts, root, input),
+                };
+                self.buttons_held = 0;
+                if self.implicit_capture {
+                    self.capture = None;
+                    self.implicit_capture = false;
+                }
+                handled
+            }
             Input::Key { .. } | Input::Ime(_) | Input::WindowFocus(_) => {
                 let handled = match self.focus {
                     Some(target) => self.bubble(fonts, target, input),
@@ -1009,6 +1083,11 @@ impl Ui {
             generation: slot.generation,
         };
         if request.action == Action::Focus {
+            // A request about a removed widget can arrive late, and its
+            // slot may be empty or hold another widget by then.
+            if !self.node(id).is_some_and(|node| node.widget.focusable()) {
+                return false;
+            }
             self.set_focus(fonts, Some(id));
             return true;
         }

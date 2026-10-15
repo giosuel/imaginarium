@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use imaginarium_render::kurbo::{Affine, Point, Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::{
-    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, RenderError, Scene,
+    FrameOutcome, FrameTiming, GpuInfo, GpuOptions, GpuStart, GpuStartup, RenderError, Scene, Skip,
     WindowRenderer,
 };
 use winit::application::ApplicationHandler;
@@ -422,6 +422,10 @@ thread_local! {
     static SCALE_FACTOR: Cell<f64> = const { Cell::new(1.0) };
 }
 
+/// How long to wait before drawing again after the GPU gave no texture in
+/// time.
+const RETRY_AFTER_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// The window's scale factor (device pixels per logical pixel), for
 /// content that snaps to device pixels (canvas tiles).
 pub fn scale_factor() -> f64 {
@@ -472,7 +476,8 @@ pub fn run_with_gpu(
         ime: None,
         proxy,
         access: None,
-        access_initial: false,
+        occluded: false,
+        retry_at: None,
         started: Instant::now(),
         stats: RunStats::default(),
         error: None,
@@ -509,8 +514,11 @@ struct Shell<V> {
     proxy: EventLoopProxy<UserEvent>,
     /// The screen reader bridge; idle until a screen reader asks.
     access: Option<accesskit_winit::Adapter>,
-    /// The next tree update must be a full one.
-    access_initial: bool,
+    /// The last frame was skipped because the window is hidden: draw again
+    /// when it shows (or something else asks), not in a loop.
+    occluded: bool,
+    /// After a frame skipped for a timeout: when to try again.
+    retry_at: Option<Instant>,
     started: Instant,
     stats: RunStats,
     error: Option<UiError>,
@@ -579,17 +587,11 @@ impl<V: View> Shell<V> {
             return;
         };
         let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
-        let initial = self.access_initial;
-        let mut sent = false;
         adapter.update_if_active(|| {
-            sent = true;
             let mut tree = AccessTree::default();
             view.accessibility(&mut tree);
-            tree.into_update(title, scale, initial)
+            tree.into_update(title, scale)
         });
-        if sent {
-            self.access_initial = false;
-        }
     }
 
     fn deliver(&mut self, input: Input) {
@@ -642,8 +644,19 @@ impl<V: View> Shell<V> {
         );
         let render = match outcome {
             Ok(FrameOutcome::Presented(timing)) => timing,
-            Ok(FrameOutcome::Skipped) => {
-                window.request_redraw(); // try again when the surface is ready
+            // The causes stay: the frame that is drawn counts them.
+            Ok(FrameOutcome::Skipped(skip)) => {
+                match skip {
+                    Skip::Reconfigured => window.request_redraw(),
+                    Skip::Lost => match renderer.recreate_surface(window.clone()) {
+                        Ok(()) => window.request_redraw(),
+                        Err(err) => self.fail(event_loop, err.into()),
+                    },
+                    // Asking again at once would spin while it's minimized
+                    // (winit delivers redraws to hidden windows too).
+                    Skip::Occluded => self.occluded = true,
+                    Skip::Timeout => self.retry_at = Some(Instant::now() + RETRY_AFTER_TIMEOUT),
+                }
                 return;
             }
             Err(err) => {
@@ -651,6 +664,7 @@ impl<V: View> Shell<V> {
                 return;
             }
         };
+        self.occluded = false;
         self.stats.frames += 1;
         let mut causes = std::mem::take(&mut self.causes);
         if causes == FrameCauses::default() {
@@ -720,10 +734,7 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
         let UserEvent::Access(event) = event;
         match event.window_event {
-            accesskit_winit::WindowEvent::InitialTreeRequested => {
-                self.access_initial = true;
-                self.update_access();
-            }
+            accesskit_winit::WindowEvent::InitialTreeRequested => self.update_access(),
             accesskit_winit::WindowEvent::ActionRequested(request) => {
                 if self.view.accessibility_action(&request) {
                     self.request_redraw(Cause::Access);
@@ -758,6 +769,10 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 // new physical size follows as a `Resized` event.
                 self.scale = scale_factor;
                 self.note_monitor();
+                self.request_redraw(Cause::Resize);
+            }
+            WindowEvent::Occluded(false) if self.occluded => {
+                self.occluded = false;
                 self.request_redraw(Cause::Resize);
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
@@ -828,6 +843,12 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if self.retry_at.is_some_and(|at| at <= now) {
+            self.retry_at = None;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
         let mut wake_at = self.view.wake_at();
         if wake_at.is_some_and(|at| at <= now) {
             if self.view.wake(now) {
@@ -847,6 +868,10 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
         self.update_ime();
         // Sleep until input arrives or the view's timer runs out: nothing
         // is drawn unless something changed (gate criterion 6).
+        let wake_at = match (wake_at, self.retry_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,

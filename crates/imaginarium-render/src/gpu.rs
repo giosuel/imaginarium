@@ -279,6 +279,13 @@ fn clamp_size(width: u32, height: u32) -> (u16, u16) {
     (clamp(width), clamp(height))
 }
 
+/// A surface size the device can make textures of: a window bigger than
+/// the GPU's limit (a huge virtual desktop) would fail validation.
+fn surface_size(device: &wgpu::Device, width: u32, height: u32) -> (u16, u16) {
+    let max = device.limits().max_texture_dimension_2d.max(1);
+    clamp_size(width.min(max), height.min(max))
+}
+
 /// Where a presented frame's time went on the calling thread. The GPU's
 /// own work isn't included: it runs after `submit`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -333,16 +340,36 @@ pub struct FrameTiming {
 pub enum FrameOutcome {
     /// It is on its way to the screen.
     Presented(FrameTiming),
-    /// The window wasn't ready (minimized, resized meanwhile, …): draw
-    /// again on the next redraw.
-    Skipped,
+    /// The window wasn't ready: nothing was drawn.
+    Skipped(Skip),
+}
+
+/// Why a frame was skipped, which says when to draw again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skip {
+    /// The surface changed (a resize under way) and was set up again:
+    /// draw again now.
+    Reconfigured,
+    /// The surface was lost: call [`WindowRenderer::recreate_surface`],
+    /// then draw again.
+    Lost,
+    /// The window is hidden (minimized, on another workspace): draw again
+    /// once it shows.
+    Occluded,
+    /// No texture came in time (the GPU is busy): draw again a little
+    /// later, not at once.
+    Timeout,
 }
 
 /// Draws scenes into a window with `vello_gpu`.
 pub struct WindowRenderer {
+    instance: wgpu::Instance,
     gpu: Gpu,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// The last texture was suboptimal: set the surface up again before
+    /// the next one.
+    reconfigure: bool,
     /// The format Vello renders in: never sRGB, because Vello's colors are
     /// sRGB-encoded already and must not be encoded twice.
     view_format: wgpu::TextureFormat,
@@ -641,7 +668,9 @@ impl WindowRenderer {
             device: opening.elapsed(),
             ..GpuStartup::default()
         };
-        Self::finish(surface, gpu, None, width, height, options, startup)
+        Self::finish(
+            instance, surface, gpu, None, width, height, options, startup,
+        )
     }
 
     /// Opens the window's renderer on the GPU that `start` opened in the
@@ -679,6 +708,7 @@ impl WindowRenderer {
         };
         startup.surface = creating.elapsed();
         Self::finish(
+            instance,
             surface,
             gpu,
             renderer,
@@ -690,7 +720,9 @@ impl WindowRenderer {
     }
 
     /// The surface's configuration and the renderer, on an open GPU.
+    #[expect(clippy::too_many_arguments, reason = "the parts of a renderer, once")]
     fn finish(
+        instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         gpu: Gpu,
         built: Option<(vello_gpu::Renderer, vello_gpu::Resources)>,
@@ -719,7 +751,7 @@ impl WindowRenderer {
             .or_else(|| capabilities.formats.first().copied())
             .ok_or_else(|| RenderError::Surface("the surface supports no format".into()))?;
         let view_format = format.remove_srgb_suffix();
-        let (w, h) = clamp_size(width, height);
+        let (w, h) = surface_size(&gpu.device, width, height);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -777,9 +809,11 @@ impl WindowRenderer {
         let textures = Textures::new(view_format, &gpu);
         Ok(Self {
             timer,
+            instance,
             gpu,
             surface,
             config,
+            reconfigure: false,
             view_format,
             renderer,
             resources,
@@ -809,9 +843,28 @@ impl WindowRenderer {
         (self.config.width, self.config.height)
     }
 
+    /// Makes a new surface for `window` after [`Skip::Lost`], with the
+    /// same setup.
+    ///
+    /// # Errors
+    /// If the window has no surface any more.
+    pub fn recreate_surface(
+        &mut self,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+    ) -> Result<(), RenderError> {
+        let surface = self
+            .instance
+            .create_surface(window)
+            .map_err(|err| RenderError::Surface(err.to_string()))?;
+        surface.configure(&self.gpu.device, &self.config);
+        self.surface = surface;
+        self.reconfigure = false;
+        Ok(())
+    }
+
     /// Follows a window resize (physical pixels).
     pub fn resize(&mut self, width: u32, height: u32) {
-        let (w, h) = clamp_size(width, height);
+        let (w, h) = surface_size(&self.gpu.device, width, height);
         if (u32::from(w), u32::from(h)) == self.size() {
             return;
         }
@@ -857,23 +910,35 @@ impl WindowRenderer {
             scene.texture_work(),
         )?;
         let textured = Instant::now();
-        let texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.gpu.device, &self.config);
-                self.finish_timing();
-                return Ok(FrameOutcome::Skipped);
+        if std::mem::take(&mut self.reconfigure) {
+            self.surface.configure(&self.gpu.device, &self.config);
+        }
+        let skip = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => Ok(texture),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                // Still drawable: draw it, and set up the surface again
+                // before the next frame.
+                self.reconfigure = true;
+                Ok(texture)
             }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.gpu.device, &self.config);
+                Err(Skip::Reconfigured)
+            }
+            wgpu::CurrentSurfaceTexture::Lost => Err(Skip::Lost),
+            wgpu::CurrentSurfaceTexture::Occluded => Err(Skip::Occluded),
+            wgpu::CurrentSurfaceTexture::Timeout => Err(Skip::Timeout),
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(RenderError::Surface(
                     "the surface texture failed validation".into(),
                 ));
             }
-            _ => {
-                // A timeout, or the window is occluded.
+        };
+        let texture = match skip {
+            Ok(texture) => texture,
+            Err(skip) => {
                 self.finish_timing();
-                return Ok(FrameOutcome::Skipped);
+                return Ok(FrameOutcome::Skipped(skip));
             }
         };
         let acquired = Instant::now();
