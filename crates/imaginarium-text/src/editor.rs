@@ -62,13 +62,15 @@ pub enum Edit {
 /// navigate text by line and character.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccessLine {
-    /// The line's text (a range of [`Editor::text`]).
+    /// The line's text (a range of [`Editor::shown_text`]).
     pub text: String,
-    /// Where the line starts in the editor's text, in bytes.
+    /// Where the line starts in [`Editor::shown_text`], in bytes.
     pub start: usize,
     /// The line's box, relative to the editor's origin.
     pub bounds: Rect,
-    /// The UTF-8 length of each character, in order.
+    /// The UTF-8 length of each character, in order. A character is what
+    /// the caret steps over: a grapheme cluster ("é" written as `e` plus a
+    /// combining accent is one, and so is a family emoji).
     pub character_lengths: Vec<u8>,
 }
 
@@ -99,11 +101,20 @@ impl Editor {
         }
     }
 
+    /// Line breaks as the editor keeps them: `\n` in a multi-line editor,
+    /// a space in a single-line one (for every mandatory break of UAX #14,
+    /// so a pasted paragraph separator doesn't start a second line).
     fn clean(text: &str, multiline: bool) -> String {
+        let text = text.replace("\r\n", "\n");
         if multiline {
-            text.replace("\r\n", "\n")
+            text.replace('\r', "\n")
         } else {
-            text.replace(['\r', '\n'], " ")
+            text.replace(
+                [
+                    '\r', '\n', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+                ],
+                " ",
+            )
         }
     }
 
@@ -116,9 +127,22 @@ impl Editor {
         self.editor.text().to_string()
     }
 
-    /// Replaces the whole text (the caret stays where it is if it still
-    /// fits).
-    pub fn set_text(&mut self, text: &str) {
+    /// The text as shown: [`Editor::text`] with the input method's
+    /// composition in it, if there is one. [`Editor::selection`],
+    /// [`Editor::select_bytes`] and [`AccessLine`] offsets are in this
+    /// text.
+    pub fn shown_text(&self) -> &str {
+        self.editor.raw_text()
+    }
+
+    /// Replaces the whole text, ending a composition in progress (the
+    /// caret stays where it is if it still fits).
+    pub fn set_text(&mut self, fonts: &mut Fonts, text: &str) {
+        if self.editor.is_composing() {
+            // Parley's `set_text` drops the composition but not the hidden
+            // caret that came with it.
+            self.driver(fonts).clear_compose();
+        }
         self.editor.set_text(&Self::clean(text, self.multiline));
     }
 
@@ -143,14 +167,16 @@ impl Editor {
         self.editor.selected_text()
     }
 
-    /// The selection as byte offsets: (anchor, focus). Equal for a caret.
+    /// The selection as byte offsets in [`Editor::shown_text`]: (anchor,
+    /// focus). Equal for a caret.
     pub fn selection(&self) -> (usize, usize) {
         let selection = self.editor.raw_selection();
         (selection.anchor().index(), selection.focus().index())
     }
 
-    /// Selects from byte `anchor` to byte `focus` (a screen reader moving
-    /// the caret). Offsets that aren't character boundaries are ignored.
+    /// Selects from byte `anchor` to byte `focus` of [`Editor::shown_text`]
+    /// (a screen reader moving the caret). Offsets that aren't character
+    /// boundaries are ignored.
     pub fn select_bytes(&mut self, fonts: &mut Fonts, anchor: usize, focus: usize) {
         self.driver(fonts).select_byte_range(anchor, focus);
     }
@@ -332,6 +358,26 @@ impl Editor {
             let range = line.text_range();
             let metrics = line.metrics();
             let line_text = text.get(range.clone()).unwrap_or_default();
+            // The caret's steps: the layout's clusters, in text order.
+            let mut clusters: Vec<_> = line
+                .runs()
+                .flat_map(|run| run.clusters().map(|cluster| cluster.text_range()))
+                .filter(|cluster| !cluster.is_empty())
+                .collect();
+            clusters.sort_by_key(|cluster| cluster.start);
+            let tiles = clusters
+                .first()
+                .is_none_or(|first| first.start == range.start)
+                && clusters.windows(2).all(|pair| pair[0].end == pair[1].start)
+                && clusters.last().is_none_or(|last| last.end == range.end)
+                && clusters
+                    .iter()
+                    .all(|cluster| cluster.len() <= usize::from(u8::MAX));
+            let character_lengths = if tiles && !clusters.is_empty() {
+                clusters.iter().map(|cluster| cluster.len() as u8).collect()
+            } else {
+                line_text.chars().map(|c| c.len_utf8() as u8).collect()
+            };
             lines.push(AccessLine {
                 text: line_text.to_owned(),
                 start: range.start,
@@ -341,7 +387,7 @@ impl Editor {
                     width,
                     f64::from(metrics.block_max_coord),
                 ),
-                character_lengths: line_text.chars().map(|c| c.len_utf8() as u8).collect(),
+                character_lengths,
             });
         }
         if lines.is_empty() {

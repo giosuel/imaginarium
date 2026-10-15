@@ -9,7 +9,7 @@ use accesskit::{Action, ActionRequest, Node, NodeId, Role};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, RoundedRect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_text::{TextBlock, TextStyle};
+use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use taffy::prelude::{FlexDirection, length, percent};
 use taffy::{AlignItems, AvailableSpace, JustifyContent, Style};
 
@@ -538,9 +538,10 @@ impl TextInput {
         self.field.text()
     }
 
-    /// Replaces the text (no change callback).
-    pub fn set_text(&mut self, text: &str) {
-        self.field.editor().set_text(text);
+    /// Replaces the text (no change callback), ending a composition in
+    /// progress.
+    pub fn set_text(&mut self, fonts: &mut Fonts, text: &str) {
+        self.field.editor().set_text(fonts, text);
     }
 
     /// The field inside.

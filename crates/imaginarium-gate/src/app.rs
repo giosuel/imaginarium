@@ -469,7 +469,7 @@ impl App {
     /// Empties and leaves the search field.
     pub(crate) fn clear_search(&mut self) {
         if let Some(input) = self.ui.widget_mut::<TextInput>(self.search_id) {
-            input.set_text("");
+            input.set_text(&mut self.fonts, "");
         }
         self.board.borrow_mut().search("");
         self.ui.set_focus(&mut self.fonts, None);
@@ -480,7 +480,7 @@ impl App {
     pub(crate) fn close_palette(&mut self) {
         self.palette_open.set(false);
         if let Some(input) = self.ui.widget_mut::<TextInput>(self.palette_input) {
-            input.set_text("");
+            input.set_text(&mut self.fonts, "");
         }
         self.query.set(String::new());
         self.ui.set_focus(&mut self.fonts, None);
@@ -494,7 +494,7 @@ impl App {
 
     fn open_palette(&mut self) {
         if let Some(input) = self.ui.widget_mut::<TextInput>(self.palette_input) {
-            input.set_text("");
+            input.set_text(&mut self.fonts, "");
         }
         self.query.set(String::new());
         self.palette_open.set(true);
