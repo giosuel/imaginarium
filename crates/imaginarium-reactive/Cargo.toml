@@ -1,0 +1,25 @@
+[package]
+name = "imaginarium-reactive"
+description = "Fine-grained reactivity for the UI toolkit: signals, memos, effects, scopes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# Criterion benches only. Keeps `cargo bench -p … -- <criterion flags>` working.
+bench = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "reactive"
+harness = false

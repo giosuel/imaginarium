@@ -10,8 +10,8 @@ Last updated: 2026-10-12
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.1 `imaginarium-reactive`** (see the M2 checklist below).
-- **Code status:** Cargo workspace with 11 crates. Working: `xtask` (repo
+- **Next step:** **M2.2 `imaginarium-render`** (see the M2 checklist below), starting with the CPU backend, the display list and the tile cache.
+- **Code status:** Cargo workspace with 12 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -19,8 +19,9 @@ Last updated: 2026-10-12
   `imaginarium-format` (the `.imag` container), `imaginarium-crypto`
   (encryption, keyrings, signatures, ACL chain) and `imaginarium-model`
   (the document on Loro, view model, undo), `imaginarium-io-native`
-  (`.imag` files as documents) and `imaginarium-cli` (`imag inspect`,
-  `verify`, `export-json`). The app only prints its version.
+  (`.imag` files as documents), `imaginarium-cli` (`imag inspect`,
+  `verify`, `export-json`) and `imaginarium-reactive` (signals, memos,
+  effects, scopes). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -579,11 +580,31 @@ point: after M2.5, one focused fix round for failed criteria, then decide.
     backend and the tile cache, so the GPU backend starts on `vello_gpu`
     0.3. M2.3 waits for parley 0.12 (10-23) if it would otherwise start
     on 0.11.
-- [ ] **M2.1 `imaginarium-reactive`** ← **next**: signals, memos, effects, batching,
-  ownership scopes (disposal) and untracked reads, glitch-free (no
-  stale or doubled updates). Proptests for those invariants, benchmarks for
-  propagation cost with 10k signals. No UI dependencies.
-- [ ] **M2.2 `imaginarium-render`**:
+- [x] **M2.1 `imaginarium-reactive`** (done 2026-10-12): `Signal`,
+  `Trigger`, `Memo` (lazy, cut off by `PartialEq`), `Effect`, `Scope`,
+  `batch`, `untrack`, `on_cleanup`. No dependencies outside `std`.
+  - Push-pull coloring (as in Reactively and Solid 2): glitch-free, at
+    most once per batch, only when an input really changed; dependencies
+    follow the latest run. One graph per thread, `Copy` and `!Send`
+    handles.
+  - Unchanged re-runs keep their edges, and disposal unsubscribes lazily,
+    so 10k readers of one signal cost linear time.
+  - **Module review** (separate agent, medium effort) found 2 critical,
+    2 high and 3 medium bugs. The worst: a write during a computation's
+    run was lost and could leave an effect stuck forever, and a child
+    effect could run before its parent disposed it. All fixed, each with
+    a regression test that failed first (`6c1d13b`). Writes are now
+    allowed anywhere, and panics leave nodes usable.
+  - Tests: 24 behaviour tests, and property tests on random graphs
+    against a direct evaluation, including effects that write signals
+    (also their own source). Planted versions of the bugs make them fail.
+  - Benchmarks: write to effect 110 ns; 10k effects on one signal
+    0.88 ms; a batch of 10k signal → memo → effect chains 2.8 ms; a
+    1,000-memo chain 132 µs; a 1,000-row scope created and disposed
+    0.53 ms. Later optimization if needed: fewer `RefCell` round trips per
+    node, and an iterative `update` for memo chains deeper than a few
+    thousand.
+- [ ] **M2.2 `imaginarium-render`** ← **next**:
   - a display list per node and Vello scene building;
   - a 256² tile cache per zoom bucket, dirty-tile tracking and a
     compositor that pans without re-rasterizing;
