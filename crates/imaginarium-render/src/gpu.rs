@@ -9,6 +9,7 @@ use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
 
 use crate::RenderError;
+use crate::gpu_timer::{GpuFrameTime, GpuTimer};
 use crate::scene::{Scene, Target, TextureKey, TextureWork, Textures as SceneTextures, replay};
 
 /// Which GPU to prefer on machines with more than one.
@@ -39,6 +40,10 @@ pub struct GpuOptions {
     /// atlas makes the frame that first uses it slower, so the first frame
     /// (cold start) is drawn without it.
     pub glyph_atlas: bool,
+    /// Time the GPU's work for each frame with timestamp queries, if the
+    /// GPU can ([`FrameTiming::gpu`]). For measuring; it costs a few
+    /// timestamps and a small read-back per frame.
+    pub gpu_times: bool,
 }
 
 /// What the GPU is, for reports.
@@ -140,14 +145,7 @@ impl GpuStart {
                 let loaded = started.elapsed();
                 let gpu = pollster::block_on(open(&instance, &wanted, None))?;
                 let opened = started.elapsed();
-                let renderer = vello_gpu::Renderer::new(
-                    &gpu.device,
-                    &vello_gpu::RenderTargetConfig {
-                        format: LIKELY_FORMAT,
-                        width: 1,
-                        height: 1,
-                    },
-                );
+                let renderer = new_renderer(&gpu.device, LIKELY_FORMAT, 1, 1);
                 Ok(OpenedGpu {
                     instance,
                     gpu,
@@ -209,9 +207,15 @@ async fn open(
             .await
             .map_err(|err| RenderError::NoAdapter(err.to_string()))?,
     };
+    let required_features = if options.gpu_times {
+        adapter.features() & GpuTimer::FEATURES
+    } else {
+        wgpu::Features::empty()
+    };
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("imaginarium"),
+            required_features,
             ..Default::default()
         })
         .await
@@ -222,6 +226,35 @@ async fn open(
         queue,
     })
 }
+
+/// A Vello renderer for targets of `format`.
+///
+/// Its glyph atlas (which takes the image atlas's settings) has pages of
+/// 2048² rather than Vello's 4096²: a page is created when a glyph first
+/// needs it, and wgpu clears the whole texture on its first use, which made
+/// the first frame with text stall for 70 ms on the VM (64 MB). A quarter
+/// of that holds the UI's and a board's glyphs; more pages come as needed.
+fn new_renderer(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u16,
+    height: u16,
+) -> (vello_gpu::Renderer, vello_gpu::Resources) {
+    let mut settings = vello_gpu::RenderSettings::default();
+    settings.memory_settings.image_atlas_config.atlas_size = (ATLAS_PAGE, ATLAS_PAGE);
+    vello_gpu::Renderer::new_with(
+        device,
+        &vello_gpu::RenderTargetConfig {
+            format,
+            width,
+            height,
+        },
+        settings,
+    )
+}
+
+/// The side of a glyph (and image) atlas page, in pixels.
+const ATLAS_PAGE: u16 = 2048;
 
 /// Vello works with `u16` sizes; a zero-sized surface is invalid.
 fn clamp_size(width: u32, height: u32) -> (u16, u16) {
@@ -241,13 +274,24 @@ pub struct FrameTiming {
     pub encode: Duration,
     /// Submitting the work and presenting.
     pub submit: Duration,
+    /// Of `submit`: presenting. Some systems block here until the GPU or
+    /// the display catches up (Mesa's software GPU on X11): a wait, not
+    /// work.
+    pub present: Duration,
     /// Rendering textures (canvas tiles) before the frame: encoding and
     /// submitting each.
     pub textures: Duration,
     /// How many textures were rendered.
     pub texture_renders: u32,
+    /// Of `textures`: creating textures (a tile's first render).
+    pub textures_create: Duration,
+    /// Of `textures`: submitting the renders, one submission each.
+    pub textures_submit: Duration,
     /// Draws of textures that don't exist, skipped (a bug in their owner).
     pub missing_textures: u32,
+    /// The GPU's time for an earlier frame, read back by now (with
+    /// [`GpuOptions::gpu_times`]); its number says which.
+    pub gpu: Option<GpuFrameTime>,
 }
 
 /// What happened to a frame.
@@ -278,6 +322,7 @@ pub struct WindowRenderer {
     textures: Textures,
     bitmap_fonts: BitmapFonts,
     startup: GpuStartup,
+    timer: Option<GpuTimer>,
 }
 
 /// Which fonts have bitmap glyphs (color emoji in CBDT or sbix, EBDT), by
@@ -300,6 +345,14 @@ impl BitmapFonts {
                 })
             })
     }
+}
+
+/// What [`Textures::process`] did, and where its time went.
+#[derive(Clone, Copy, Debug, Default)]
+struct TextureStats {
+    renders: u32,
+    create: Duration,
+    submit: Duration,
 }
 
 /// A texture kept for its owner, and its size.
@@ -328,6 +381,10 @@ impl Textures {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the window renderer's parts, borrowed apart from each other"
+    )]
     /// Renders and frees textures as `work` says, one submission each:
     /// Vello rewrites its buffers between renders, so renders sharing one
     /// submission would see the last one's data.
@@ -337,11 +394,12 @@ impl Textures {
         renderer: &mut vello_gpu::Renderer,
         resources: &mut vello_gpu::Resources,
         bitmap_fonts: &mut BitmapFonts,
+        mut timer: Option<&mut GpuTimer>,
         glyph_atlas: bool,
         work: &[TextureWork],
-    ) -> Result<u32, RenderError> {
+    ) -> Result<TextureStats, RenderError> {
         let format = self.format;
-        let mut renders = 0;
+        let mut stats = TextureStats::default();
         for item in work {
             match item {
                 TextureWork::Free(key) => {
@@ -360,6 +418,7 @@ impl Textures {
                         .get(key)
                         .is_some_and(|(_, tw, th)| (*tw, *th) == (w, h));
                     if !fits {
+                        let creating = Instant::now();
                         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                             label: Some("canvas texture"),
                             size: wgpu::Extent3d {
@@ -379,6 +438,7 @@ impl Textures {
                         self.bindings
                             .insert(vello_common::TextureId(key.id()), view);
                         self.entries.insert(*key, (texture, w, h));
+                        stats.create += creating.elapsed();
                     }
                     let Some((texture, _, _)) = self.entries.get(key) else {
                         continue;
@@ -410,6 +470,9 @@ impl Textures {
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("canvas texture"),
                             });
+                    let timed = timer
+                        .as_deref_mut()
+                        .and_then(|timer| timer.texture_start(&mut encoder));
                     renderer
                         .render(
                             &self.scene,
@@ -426,12 +489,17 @@ impl Textures {
                             }),
                         )
                         .map_err(|err| RenderError::Render(err.to_string()))?;
+                    if let Some(timer) = timer.as_deref_mut() {
+                        timer.end(&mut encoder, timed);
+                    }
+                    let submitting = Instant::now();
                     gpu.queue.submit([encoder.finish()]);
-                    renders += 1;
+                    stats.submit += submitting.elapsed();
+                    stats.renders += 1;
                 }
             }
         }
-        Ok(renders)
+        Ok(stats)
     }
 }
 
@@ -548,11 +616,21 @@ impl WindowRenderer {
                 wgpu::PresentMode::AutoVsync
             },
             desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities
+            // Opaque where offered: the frame covers the window, and a
+            // compositor treats a window with alpha as see-through (it
+            // blends, maybe blurs, what is behind it every frame).
+            alpha_mode: if capabilities
                 .alpha_modes
-                .first()
-                .copied()
-                .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+                .contains(&wgpu::CompositeAlphaMode::Opaque)
+            {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                capabilities
+                    .alpha_modes
+                    .first()
+                    .copied()
+                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+            },
             view_formats: if view_format == format {
                 Vec::new()
             } else {
@@ -566,14 +644,7 @@ impl WindowRenderer {
         let creating = Instant::now();
         let (renderer, resources) = match built {
             Some(built) if view_format == LIKELY_FORMAT => built,
-            _ => vello_gpu::Renderer::new(
-                &gpu.device,
-                &vello_gpu::RenderTargetConfig {
-                    format: view_format,
-                    width: w,
-                    height: h,
-                },
-            ),
+            _ => new_renderer(&gpu.device, view_format, w, h),
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(
             &gpu.device,
@@ -584,7 +655,12 @@ impl WindowRenderer {
         );
         startup.renderer += creating.elapsed();
         let info = GpuInfo::of(&gpu.adapter);
+        let timer = options
+            .gpu_times
+            .then(|| GpuTimer::new(&gpu.device, &gpu.queue))
+            .flatten();
         Ok(Self {
+            timer,
             gpu,
             surface,
             config,
@@ -647,12 +723,20 @@ impl WindowRenderer {
         // Texture work first, even if this frame is then skipped: the
         // owners count on it being done.
         let start = Instant::now();
+        let gpu = self
+            .timer
+            .as_mut()
+            .and_then(|timer| timer.collect(&self.gpu.device));
+        if let Some(timer) = &mut self.timer {
+            timer.begin_frame(self.frames + 1);
+        }
         let glyph_atlas = self.glyph_atlas && self.frames > 0;
-        let texture_renders = self.textures.process(
+        let texture_stats = self.textures.process(
             &self.gpu,
             &mut self.renderer,
             &mut self.resources,
             &mut self.bitmap_fonts,
+            self.timer.as_mut(),
             glyph_atlas,
             scene.texture_work(),
         )?;
@@ -662,6 +746,7 @@ impl WindowRenderer {
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.gpu.device, &self.config);
+                self.finish_timing();
                 return Ok(FrameOutcome::Skipped);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -669,7 +754,11 @@ impl WindowRenderer {
                     "the surface texture failed validation".into(),
                 ));
             }
-            _ => return Ok(FrameOutcome::Skipped), // timeout, occluded
+            _ => {
+                // A timeout, or the window is occluded.
+                self.finish_timing();
+                return Ok(FrameOutcome::Skipped);
+            }
         };
         let acquired = Instant::now();
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
@@ -695,6 +784,10 @@ impl WindowRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+        let timed = self
+            .timer
+            .as_mut()
+            .and_then(|timer| timer.scene_start(&mut encoder));
         self.renderer
             .render(
                 &self.scene,
@@ -714,18 +807,47 @@ impl WindowRenderer {
                 }),
             )
             .map_err(|err| RenderError::Render(err.to_string()))?;
+        if let Some(timer) = &mut self.timer {
+            timer.end(&mut encoder, timed);
+            timer.finish(&mut encoder);
+        }
         let encoded = Instant::now();
         self.gpu.queue.submit([encoder.finish()]);
+        if let Some(timer) = &mut self.timer {
+            timer.submitted();
+        }
+        let presenting = Instant::now();
         self.gpu.queue.present(texture);
+        let present = presenting.elapsed();
         self.frames += 1;
         Ok(FrameOutcome::Presented(FrameTiming {
             acquire: acquired - textured,
             encode: encoded - acquired,
             submit: encoded.elapsed(),
+            present,
             textures: textured - start,
-            texture_renders,
+            texture_renders: texture_stats.renders,
+            textures_create: texture_stats.create,
+            textures_submit: texture_stats.submit,
             missing_textures,
+            gpu,
         }))
+    }
+
+    /// Sends a skipped frame's timestamps (its texture renders) on their
+    /// way back.
+    fn finish_timing(&mut self) {
+        if let Some(timer) = &mut self.timer {
+            let mut encoder =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("frame timestamps"),
+                    });
+            timer.finish(&mut encoder);
+            self.gpu.queue.submit([encoder.finish()]);
+            timer.submitted();
+        }
     }
 }
 
@@ -775,14 +897,7 @@ impl OffscreenRenderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let (mut renderer, mut resources) = vello_gpu::Renderer::new(
-            device,
-            &vello_gpu::RenderTargetConfig {
-                format,
-                width: w,
-                height: h,
-            },
-        );
+        let (mut renderer, mut resources) = new_renderer(device, format, w, h);
         let size = vello_gpu::RenderSize {
             width: w,
             height: h,
@@ -796,6 +911,7 @@ impl OffscreenRenderer {
             &mut renderer,
             &mut resources,
             &mut bitmap_fonts,
+            None,
             false,
             scene.texture_work(),
         )?;

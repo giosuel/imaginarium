@@ -388,6 +388,33 @@ pub struct RunStats {
     pub gpu_startup: Option<GpuStartup>,
     /// The GPU that drew them.
     pub gpu: Option<GpuInfo>,
+    /// The monitor the window was last on, if the window system says.
+    pub monitor: Option<MonitorInfo>,
+}
+
+/// A monitor, as the window system describes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonitorInfo {
+    /// Its name (a connector such as `eDP-1` on Wayland), if it has one.
+    pub name: Option<String>,
+    /// Its size in physical pixels.
+    pub physical_size: (u32, u32),
+    /// Its scale factor (physical pixels per logical pixel).
+    pub scale: f64,
+    /// Its refresh rate in millihertz, if known.
+    pub refresh_millihertz: Option<u32>,
+}
+
+impl MonitorInfo {
+    fn of(monitor: &winit::monitor::MonitorHandle) -> Self {
+        let size = monitor.size();
+        Self {
+            name: monitor.name(),
+            physical_size: (size.width, size.height),
+            scale: monitor.scale_factor(),
+            refresh_millihertz: monitor.refresh_rate_millihertz(),
+        }
+    }
 }
 
 thread_local! {
@@ -508,6 +535,18 @@ impl<V: View> Shell<V> {
         }
     }
 
+    /// Notes the monitor the window is on, for the statistics. Wayland
+    /// knows it only once the window is shown, so this follows resizes.
+    fn note_monitor(&mut self) {
+        if let Some(monitor) = self
+            .window
+            .as_ref()
+            .and_then(|window| window.current_monitor())
+        {
+            self.stats.monitor = Some(MonitorInfo::of(&monitor));
+        }
+    }
+
     fn logical(&self, position: PhysicalPosition<f64>) -> Point {
         Point::new(position.x / self.scale, position.y / self.scale)
     }
@@ -620,6 +659,7 @@ impl<V: View> Shell<V> {
         let now = Instant::now();
         if self.stats.first_frame.is_none() {
             self.stats.first_frame = Some(now - self.started);
+            self.note_monitor();
         }
         let frame = FrameInfo {
             number: self.stats.frames,
@@ -710,12 +750,14 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.note_monitor();
                 self.request_redraw(Cause::Resize);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // A move to a monitor with another scale (criterion 5). The
                 // new physical size follows as a `Resized` event.
                 self.scale = scale_factor;
+                self.note_monitor();
                 self.request_redraw(Cause::Resize);
             }
             WindowEvent::RedrawRequested => self.redraw(event_loop),

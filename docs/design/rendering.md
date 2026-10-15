@@ -183,7 +183,12 @@ also keeps a browser (wasm) build possible.
   (the gate laptop: about 12 µs per unit, in panning and zooming alike),
   and follows the renderer's measured time for the last frame's tiles
   (`Canvas::note_render_time`, from `FrameTiming::textures`). Once a tile
-  doesn't fit, the rest wait.
+  doesn't fit, the rest wait. Since M2.8, tile work also leaves room for
+  the rest of the frame (painting, encoding, submitting;
+  `Canvas::note_rest_of_frame`): it gets 12 ms minus that, between 1 and
+  6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
+  the VM's software GPU it waits 12–14 ms for the frame). A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
+  full 6 ms on top made the p99 17.5–17.8 ms.
 - **Stand-ins:** a stale copy, the nearest coarser cached level (zooming
   in) or the nearest finer level's cached tiles (zooming out), clipped.
   Tiles with no stand-in render first, then stale ones, then those another
@@ -229,3 +234,31 @@ encodes in 1.4 ms instead of 4.7 ms for the 10,000 shapes, and 1.6 ms
 instead of 4.4 ms for the text cards; a drag renders at most 2 tiles per
 frame (criterion 2); with the drag lift, 2 tile renders in 240 drag
 frames.
+
+**Since M2.8 (the canvas on the integrated GPU, from the gate's fourth
+run):**
+- **Clips aren't layers.** `Scene::push_clip` used Vello clip layers.
+  Each one costs a layer draw, a composite and a clear on the GPU. The
+  canvas had two over the whole viewport every frame, one per stand-in,
+  and one per card.
+  - Clips are now Vello's clip rectangles (free on whole pixels) and clip
+    paths, which clip each thing drawn.
+  - Only `push_opacity` makes a layer.
+  - On the VM's llvmpipe at 1280×800 this halved the GPU's time per
+    frame (shapes pan 25 → 12 ms, cards pan 26 → 14 ms).
+- **Glyph atlas pages are 2048²** (Vello's default is 4096², 64 MB).
+  - A page is created when a glyph first needs it, and wgpu clears the
+    whole texture on its first use.
+  - On the VM the first tile frame with text stalled in one submit for
+    71 ms; with 16 MB pages it stalls for 23 ms, and peak memory drops by
+    51 MB.
+- **The window surface is opaque** where offered. With premultiplied
+  alpha, a compositor blends (and maybe blurs) what is behind the window
+  every frame.
+- **The GPU's own time:**
+  - With `GpuOptions::gpu_times`, timestamp queries around each tile
+    render and the frame's render are read back a few frames later
+    without blocking. `FrameTiming::gpu` reports tiles, scene and span by
+    frame number.
+  - `FrameTiming::textures_create` and `textures_submit` split the tile
+    work's CPU time.

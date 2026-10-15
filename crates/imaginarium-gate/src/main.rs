@@ -10,8 +10,9 @@
 //!   the toolkit stays or GPUI replaces it.
 //!
 //! # Non-goals
-//! - Not a product binary, and nothing depends on it. It is deleted or
-//!   folded into a benchmark once the gate is decided.
+//! - Not a product binary, and nothing depends on it. The gate is decided
+//!   (we keep the toolkit); the binary measures the canvas work of M2.8,
+//!   then is folded into a benchmark or deleted.
 //!
 //! # Measurements so far (M2.3)
 //! - Cold start: process start (`/proc/self/stat`) and `main` until the
@@ -23,7 +24,8 @@
 //! - Scripted typing into the command palette (criterion 3): the search
 //!   over 2,000 commands, the widget tree's layout, paint and encode.
 //! - The 10,000-shape board through the tile cache (criteria 1 and 2):
-//!   scripted pan, zoom and drag, with tiles rendered per frame.
+//!   scripted pan, zoom and drag, each started once no tiles are owed,
+//!   with tiles rendered per frame.
 //! - Idle: CPU used and frames drawn while nothing happens (criterion 6).
 //! - The GPU and machine it ran on.
 
@@ -43,7 +45,7 @@ use clap::{Parser, ValueEnum};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{GpuInfo, GpuOptions, GpuStart, Power};
+use imaginarium_render::{GpuFrameTime, GpuInfo, GpuOptions, GpuStart, Power};
 use imaginarium_text::Fonts;
 use imaginarium_ui::{AccessTree, FrameCauses, FrameInfo, Input, View, WindowOptions};
 
@@ -104,6 +106,10 @@ struct Args {
     /// (experimental) glyph atlas.
     #[arg(long)]
     no_glyph_atlas: bool,
+    /// Don't time the GPU's work with timestamp queries (to check that
+    /// timing it changes nothing).
+    #[arg(long)]
+    no_gpu_times: bool,
     /// Where to write the report.
     #[arg(long, default_value = "gate-report.json")]
     report: PathBuf,
@@ -135,6 +141,13 @@ const MAX_SETTLE_FRAMES: u32 = 600;
 /// In a manual session, a frame interval longer than this is a pause.
 const MANUAL_GAP: Duration = Duration::from_millis(100);
 
+/// What follows a [`Phase::Settle`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Next {
+    Shapes(ShapePhase),
+    Idle,
+}
+
 /// Where the scripted run is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
@@ -150,9 +163,9 @@ enum Phase {
     /// many frames to go.
     Shapes(ShapePhase, u32),
     /// Waiting until nothing is left to draw (the cleared search, tiles
-    /// the time budget left over), so the idle measurement starts idle;
-    /// with the frames waited so far.
-    Settle(u32),
+    /// the time budget left over), so the next phase measures only its own
+    /// work; with the frames waited so far and the phase that follows.
+    Settle(u32, Next),
     /// Idling since the instant, with the CPU time and frame count then.
     Idle {
         since: Instant,
@@ -175,6 +188,7 @@ struct Gate {
     phase: Phase,
     frames: u64,
     first_frame: Option<FrameInfo>,
+    last_frame: Option<FrameInfo>,
     last_at: Option<Duration>,
     pan: Vec<FrameSample>,
     /// Layouts built during the pan (text cache misses).
@@ -184,6 +198,9 @@ struct Gate {
     palette: Vec<PaletteSample>,
     shape_frames: u32,
     shape_samples: [Vec<CanvasSample>; 3],
+    /// Frames and time waited for owed tiles before each shapes phase.
+    settled: [Option<(u32, Duration)>; 3],
+    settle_started: Option<Instant>,
     /// Tiles rendered during the cards pan.
     pan_canvas: Vec<CanvasSample>,
     dragged: Option<usize>,
@@ -197,6 +214,9 @@ struct Gate {
     manual: [Vec<CanvasSample>; 2],
     /// Draws of textures that didn't exist (skipped; a tile cache bug).
     missing_textures: u64,
+    /// The GPU's time per frame, by frame number (they come back a few
+    /// frames late).
+    gpu_times: std::collections::HashMap<u64, GpuFrameTime>,
     /// Why the frames during the idle phase were drawn.
     idle_causes: CauseCounts,
 }
@@ -260,10 +280,21 @@ struct CanvasSample {
     paint: Duration,
     textures: Duration,
     encode: Duration,
+    /// The wait for the window's texture (vertical sync, or the GPU).
+    acquire: Duration,
+    /// Presenting (part of the frame time; blocks on some systems).
+    present: Duration,
     interval: Duration,
     rendered: usize,
     owed: usize,
     items: usize,
+    /// The surface size in physical pixels.
+    size: (u32, u32),
+    /// The frame's number, for its GPU time.
+    number: u64,
+    /// Of `textures`: creating textures, and submitting the renders.
+    textures_create: Duration,
+    textures_submit: Duration,
 }
 
 /// One scripted palette keystroke and the frame after it.
@@ -326,22 +357,32 @@ impl Gate {
             paint: frame.paint,
             textures: frame.render.textures,
             encode: frame.render.encode,
+            acquire: frame.render.acquire,
+            present: frame.render.present,
             interval,
             rendered: canvas.rendered,
             owed: canvas.owed,
             items: canvas.items_painted,
+            size: frame.physical_size,
+            number: frame.number,
+            textures_create: frame.render.textures_create,
+            textures_submit: frame.render.textures_submit,
         }
     }
 
     fn start_shapes(&mut self) {
         if self.shape_frames == 0 {
-            self.phase = Phase::Settle(0);
+            self.settle(Next::Idle);
             return;
         }
         self.app.set_mode(crate::board::Mode::Shapes);
         self.app.reset_view();
-        self.phase = Phase::Shapes(ShapePhase::Pan, self.shape_frames);
-        self.shape_step(ShapePhase::Pan, self.shape_frames);
+        self.settle(Next::Shapes(ShapePhase::Pan));
+    }
+
+    fn settle(&mut self, next: Next) {
+        self.phase = Phase::Settle(0, next);
+        self.settle_started = Some(Instant::now());
     }
 
     /// Moves the shapes board on for the next frame of a phase.
@@ -424,17 +465,24 @@ impl View for Gate {
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
         self.app.set_frame(frame.paint, frame.render.encode);
-        self.app
-            .board
-            .borrow_mut()
-            .note_render_time(frame.render.textures);
+        self.app.board.borrow_mut().note_render_time(
+            frame.render.textures,
+            // Work, not waits: a blocking present isn't tile time lost.
+            frame.paint
+                + frame.render.encode
+                + frame.render.submit.saturating_sub(frame.render.present),
+        );
         self.missing_textures += u64::from(frame.render.missing_textures);
+        if let Some(gpu) = frame.render.gpu {
+            self.gpu_times.insert(gpu.frame, gpu);
+        }
         if matches!(self.phase, Phase::Idle { .. }) {
             self.idle_causes.add(&frame.causes);
         }
         if self.first_frame.is_none() {
             self.first_frame = Some(*frame);
         }
+        self.last_frame = Some(*frame);
         // `--frames N`: draw N frames back to back, then close.
         if let Some(limit) = self.close_after_frames {
             return frame.number < limit;
@@ -482,14 +530,25 @@ impl View for Gate {
                     self.after_pan()
                 }
             }
-            Phase::Settle(frames) => {
+            Phase::Settle(frames, next) => {
                 // The board draws again by itself while tiles are owed.
                 if self.app.board.borrow().owed && frames < MAX_SETTLE_FRAMES {
-                    self.phase = Phase::Settle(frames + 1);
-                } else {
-                    self.start_idle();
+                    self.phase = Phase::Settle(frames + 1, next);
+                    return false;
                 }
-                false
+                let waited = self.settle_started.take().map(|at| at.elapsed());
+                match next {
+                    Next::Idle => {
+                        self.start_idle();
+                        false
+                    }
+                    Next::Shapes(which) => {
+                        self.settled[which as usize] = waited.map(|waited| (frames, waited));
+                        self.phase = Phase::Shapes(which, self.shape_frames);
+                        self.shape_step(which, self.shape_frames);
+                        true
+                    }
+                }
             }
             Phase::Type(left) => {
                 if let Some((handle, search)) = self.pending_key.take() {
@@ -548,12 +607,11 @@ impl View for Gate {
                     match next {
                         Some(next) => {
                             self.app.reset_view();
-                            self.phase = Phase::Shapes(next, self.shape_frames);
-                            self.shape_step(next, self.shape_frames);
+                            self.settle(Next::Shapes(next));
                         }
                         None => {
                             self.app.set_mode(crate::board::Mode::Cards);
-                            self.phase = Phase::Settle(0);
+                            self.settle(Next::Idle);
                         }
                     }
                 }
@@ -626,8 +684,13 @@ fn percentile(mut samples: Vec<Duration>, q: f64) -> Option<Duration> {
     Some(samples[((samples.len() - 1) as f64 * q).round() as usize])
 }
 
-/// Timings and tile counts of a canvas phase.
-fn canvas_report(samples: &[CanvasSample]) -> serde_json::Value {
+/// Timings and tile counts of a canvas phase, and the frames and time
+/// waited for owed tiles before it.
+fn canvas_report(
+    samples: &[CanvasSample],
+    settled: Option<(u32, Duration)>,
+    gpu: &std::collections::HashMap<u64, GpuFrameTime>,
+) -> serde_json::Value {
     if samples.is_empty() {
         return serde_json::Value::Null;
     }
@@ -646,6 +709,25 @@ fn canvas_report(samples: &[CanvasSample]) -> serde_json::Value {
         "paint": summary(field(|s| s.paint)),
         "textures": summary(field(|s| s.textures)),
         "encode": summary(field(|s| s.encode)),
+        "acquire": summary(field(|s| s.acquire)),
+        "present": summary(field(|s| s.present)),
+        // The GPU's own time (timestamp queries), for the frames it came
+        // back for.
+        "gpu": gpu_report(samples, gpu),
+        // Where the slowest tile work went: a first render per board can
+        // be much slower than the rest.
+        "slowest_textures": samples
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, s)| s.textures)
+            .map(|(index, s)| serde_json::json!({
+                "frame_in_phase": index,
+                "textures_ms": millis(s.textures),
+                "create_ms": millis(s.textures_create),
+                "submit_ms": millis(s.textures_submit),
+                "rendered": s.rendered,
+                "gpu_textures_ms": gpu.get(&s.number).map(|t| millis(t.textures)),
+            })),
         // Zero: the first frame, or one after a pause.
         "interval": summary(samples.iter().map(|s| s.interval).filter(|i| !i.is_zero()).collect()),
         // Frames that took longer than a 60 Hz refresh on the UI thread,
@@ -655,6 +737,34 @@ fn canvas_report(samples: &[CanvasSample]) -> serde_json::Value {
         "tiles_rendered": counts(|s| s.rendered),
         "tiles_owed": counts(|s| s.owed),
         "items_painted": counts(|s| s.items),
+        // At the phase's end: the window can change size meanwhile (a
+        // compositor making it fullscreen after the first frame).
+        "physical_size": samples.last().map(|s| [s.size.0, s.size.1]),
+        "settled_before": settled.map(|(frames, waited)| serde_json::json!({
+            "frames": frames,
+            "ms": millis(waited),
+        })),
+    })
+}
+
+/// The GPU's own time (timestamp queries) for the frames of `samples` it
+/// came back for.
+fn gpu_report(
+    samples: &[CanvasSample],
+    gpu: &std::collections::HashMap<u64, GpuFrameTime>,
+) -> serde_json::Value {
+    let times: Vec<&GpuFrameTime> = samples.iter().filter_map(|s| gpu.get(&s.number)).collect();
+    if times.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let field = |f: fn(&GpuFrameTime) -> Duration| times.iter().map(|t| f(t)).collect::<Vec<_>>();
+    serde_json::json!({
+        "frames": times.len(),
+        "scene": summary(field(|t| t.scene)),
+        "textures": summary(field(|t| t.textures)),
+        "span": summary(field(|t| t.span)),
+        "span_p99_ms": percentile(field(|t| t.span), 0.99).map(millis),
+        "untimed_texture_renders": times.iter().map(|t| t.untimed).sum::<u32>(),
     })
 }
 
@@ -687,6 +797,7 @@ fn main() -> anyhow::Result<()> {
         adapter: args.adapter.clone(),
         no_vsync: args.no_vsync,
         glyph_atlas: !args.no_glyph_atlas,
+        gpu_times: !args.no_gpu_times,
     };
     // The drivers load while the fonts load and the view is built.
     let gpu_start = GpuStart::spawn(&gpu);
@@ -712,6 +823,8 @@ fn main() -> anyhow::Result<()> {
         palette: Vec::new(),
         shape_frames: args.shape_frames,
         shape_samples: [Vec::new(), Vec::new(), Vec::new()],
+        settled: [None; 3],
+        settle_started: None,
         pan_canvas: Vec::new(),
         dragged: None,
         measure: args.measure,
@@ -722,6 +835,7 @@ fn main() -> anyhow::Result<()> {
         phase: Phase::Start,
         frames: 0,
         first_frame: None,
+        last_frame: None,
         last_at: None,
         pan: Vec::new(),
         pan_layouts: 0,
@@ -733,6 +847,7 @@ fn main() -> anyhow::Result<()> {
         inputs_during_idle: 0,
         manual: [Vec::new(), Vec::new()],
         missing_textures: 0,
+        gpu_times: std::collections::HashMap::new(),
         idle_causes: CauseCounts::default(),
     };
     // The time from exec to `main` (loading the binary and its libraries)
@@ -815,10 +930,22 @@ fn main() -> anyhow::Result<()> {
             "requested": format!("{:?}", args.gpu).to_lowercase(),
             "vsync": !args.no_vsync,
             "glyph_atlas": !args.no_glyph_atlas,
+            "gpu_times": !args.no_gpu_times,
+            "gpu_frames_timed": gate.gpu_times.len(),
         })),
-        "window": first.map(|frame| serde_json::json!({
+        // The last frame's size and scale: the first frame can come before
+        // the compositor sets the final size (Hyprland tiles the window
+        // first, then makes it fullscreen).
+        "window": gate.last_frame.map(|frame| serde_json::json!({
             "scale": frame.scale,
             "physical_size": [frame.physical_size.0, frame.physical_size.1],
+            "first_frame_physical_size": first.map(|first| [first.physical_size.0, first.physical_size.1]),
+        })),
+        "monitor": stats.monitor.as_ref().map(|monitor| serde_json::json!({
+            "name": monitor.name,
+            "physical_size": [monitor.physical_size.0, monitor.physical_size.1],
+            "scale": monitor.scale,
+            "refresh_hz": monitor.refresh_millihertz.map(|mhz| f64::from(mhz) / 1000.0),
         })),
         "cold_start": {
             "exec_to_main_ms": before_main.map(millis),
@@ -868,18 +995,18 @@ fn main() -> anyhow::Result<()> {
             "interval": summary(gate.pan.iter().skip(1).map(|sample| sample.interval).collect()),
             // Card text laid out during the pan (cache misses).
             "layouts": gate.pan_layouts,
-            "canvas": canvas_report(&gate.pan_canvas),
+            "canvas": canvas_report(&gate.pan_canvas, None, &gate.gpu_times),
         },
         // A manual session's frames, by board.
         "manual": {
-            "cards": canvas_report(&gate.manual[0]),
-            "shapes": canvas_report(&gate.manual[1]),
+            "cards": canvas_report(&gate.manual[0], None, &gate.gpu_times),
+            "shapes": canvas_report(&gate.manual[1], None, &gate.gpu_times),
         },
         "missing_textures": gate.missing_textures,
         "shapes": {
-            "pan": canvas_report(&gate.shape_samples[0]),
-            "zoom": canvas_report(&gate.shape_samples[1]),
-            "drag": canvas_report(&gate.shape_samples[2]),
+            "pan": canvas_report(&gate.shape_samples[0], gate.settled[0], &gate.gpu_times),
+            "zoom": canvas_report(&gate.shape_samples[1], gate.settled[1], &gate.gpu_times),
+            "drag": canvas_report(&gate.shape_samples[2], gate.settled[2], &gate.gpu_times),
             "criterion_1_pass": criterion_1,
             "criterion_2_pass": criterion_2,
         },
