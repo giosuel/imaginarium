@@ -17,7 +17,9 @@ Imaginarium is a Rust workspace (AGPL-3.0-or-later). These pages explain
    one short record per significant decision, superseded rather than edited.
 4. [`.imag` file format](/developers/reference/design/file-format/):
    the encrypted, CRDT-based document format.
-5. [Contributing](/developers/contributing/): workflow, DCO,
+5. [The UI toolkit](/developers/ui-toolkit/): windows, widgets, signals,
+   text, accessibility and the canvas.
+6. [Contributing](/developers/contributing/): workflow, DCO,
    checks.
 
 ## Building and checking
