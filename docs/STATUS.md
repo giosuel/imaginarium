@@ -10,7 +10,7 @@ Last updated: 2026-10-12
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.0 Stack research** (see the M2 checklist below).
+- **Next step:** **M2.1 `imaginarium-reactive`** (see the M2 checklist below).
 - **Code status:** Cargo workspace with 11 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -541,27 +541,45 @@ Effort: **xhigh** for `reactive`, the `ui` core and `render`, **high** for
 `text` and the gate app. One branch and PR per step (or smaller).
 Screenshots go to the owner from M2.4 on (Xvfb + Mesa lavapipe).
 
-**This VM has no GPU** (and neither do the CI runners). Functional checks
-run here with lavapipe and the CPU backend. The frame-time criteria need
-real hardware (open question below). Until that's settled: measure
-everything we can here, and stop early if a criterion looks unfixable.
+**Gate machine** (owner's laptop, 2026-10-12): EndeavourOS (Arch, rolling,
+kernel 7.2), **Hyprland (Wayland)**, Intel Core i9-11900H with its **Intel
+UHD (Xe) integrated GPU** plus a GeForce RTX 3050 Laptop (hybrid graphics),
+32 GB RAM. The gate runs on the integrated GPU (ADR-0007) and reports the
+RTX 3050 as well. A workstation with the same setup (Ryzen 9 9950X3D, RTX
+5090, 96 GB) exists but isn't used for now. Binaries built on this VM
+(glibc 2.41) run on Arch's newer glibc. Wayland-specific risks for the
+gate: winit's idle-loop spin (#4668), text-input-v3 IME, fractional
+scaling.
 
-- [ ] **M2.0 Stack research** ← **next**, written up in
-  `docs/design/m2-ui-stack.md` (like `m1-dependencies.md`):
-  - current versions and their compatibility: winit, wgpu, Vello and
-    `vello_cpu`, Parley/fontique/swash, Taffy, AccessKit and
-    `accesskit_winit`, Masonry (M0 measured winit 0.30, Vello 0.11,
-    Parley 0.12, Taffy 0.14, AccessKit 0.25: a starting point only);
-  - MSRV against our pinned Rust 1.99, the two-week rule, licenses, build
-    cost against the M0 baseline (1,415 CPU-s for the heavy stack);
-  - Masonry as a dependency or only as a reference (ADR-0007 leaves this
-    open). A new ADR if it changes 0007;
-  - IME, Wayland/X11, multi-window and mixed-DPI support in winit;
-    AccessKit on Orca, NVDA and VoiceOver;
-  - how each pass criterion is measured (frame-time stats and HUD from
-    `imaginarium-profiling`, tracy, idle CPU, cold start), and what can run
-    on this VM.
-- [ ] **M2.1 `imaginarium-reactive`**: signals, memos, effects, batching,
+**This VM has no GPU** (and neither do the CI runners). Functional checks
+run here with lavapipe and the CPU backend. The real numbers come from the
+owner's Linux machine: a prebuilt gate binary writes a report (owner
+decision 2026-10-12, ADR-0007 "Procedure"). Windows and macOS are checked
+later, when hardware is available. There is no time box, but one decision
+point: after M2.5, one focused fix round for failed criteria, then decide.
+
+- [x] **M2.0 Stack research** (done 2026-10-12). See
+  [`docs/design/m2-ui-stack.md`](design/m2-ui-stack.md).
+  - The stack stays as decided (ADR-0007). Versions for the two-week
+    rule: winit 0.30.13, accesskit 0.25.1 / accesskit_winit 0.34.1 now;
+    **`vello_gpu` and `vello_cpu` 0.3 with wgpu 30 from 2026-10-16**,
+    parley 0.12 from 10-23, taffy 0.15 from 10-26. Pin each crate when it's
+    added, at the newest eligible version.
+  - Vello's sparse-strips renderers (`vello_gpu`, `vello_cpu`) for both
+    backends, not the compute renderer Vello now calls experimental
+    (noted in ADR-0003).
+  - Masonry only as a reference (a year-old release that would duplicate
+    wgpu, Vello, Parley and AccessKit). The text field builds on Parley's
+    `PlainEditor`. The gate app is its own binary, `imaginarium-gate`.
+  - Gate procedure (owner, ADR-0007): one decision point after M2.5,
+    Linux first, prebuilt binary with a report.
+  - Clean build of the stack: 1,477 CPU-s debug, 821 release. The machine
+    isn't the bottleneck.
+  - **Order:** M2.1 needs none of these crates. M2.2 starts with the CPU
+    backend and the tile cache, so the GPU backend starts on `vello_gpu`
+    0.3. M2.3 waits for parley 0.12 (10-23) if it would otherwise start
+    on 0.11.
+- [ ] **M2.1 `imaginarium-reactive`** ← **next**: signals, memos, effects, batching,
   ownership scopes (disposal) and untracked reads, glitch-free (no
   stale or doubled updates). Proptests for those invariants, benchmarks for
   propagation cost with 10k signals. No UI dependencies.
@@ -586,9 +604,11 @@ everything we can here, and stop early if a criterion looks unfixable.
   - the 10k-shape board from the fixtures, with pan, zoom and drag;
   - the command palette over 2,000 commands, and a text field;
   - the frame-time HUD (`F12`), and tracy zones that show dirty tiles.
-- [ ] **M2.6 Gate run**: the six criteria on the three OSes, results in
-  `docs/design/m2-gate.md`. Pass: ADR-0007 notes the passed gate. Fail on
-  a criterion we can't fix: a new ADR, fallback to GPUI.
+- [ ] **M2.6 Gate run**: the owner runs the prebuilt binary on Linux and
+  sends the report and the checklist. Results in `docs/design/m2-gate.md`.
+  Failed criteria get one focused fix round. Pass: ADR-0007 notes the
+  passed gate (Windows and macOS still open). Fail: a new ADR, fallback to
+  GPUI.
 - [ ] **M2.7 Wrap-up**: code review (separate reviewer agents, medium
   effort), developer docs on the website (`reactive`, `ui`, `render`),
   STATUS, tag `v0.0.3-m2`.
@@ -596,14 +616,6 @@ everything we can here, and stop early if a criterion looks unfixable.
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
-- **Which machines run the M2 gate?** It needs Linux, Windows and macOS
-  with integrated GPUs (ADR-0007). This VM has no GPU, and the CI runners
-  don't either. Options: the owner runs a prebuilt gate binary on their
-  machines and sends the report it writes, or a self-hosted runner.
-- **The M2 time box:** ADR-0007 asks for a time-boxed prototype but sets no
-  box. Default until decided: decide the gate after M2.5 at the latest, and
-  raise it early if a criterion looks unfixable.
-
 ## Known issues and notes
 
 - **Signatures are verified on open** (since M1.8: every record a document

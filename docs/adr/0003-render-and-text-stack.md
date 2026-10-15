@@ -16,6 +16,13 @@ provides this.
   - `GpuBackend`: Vello on wgpu (the default).
   - `CpuBackend`: vello_cpu or tiny-skia. Used for fallback, headless
     export and deterministic golden-image tests.
+
+  Note (2026-10-12, M2.0): since Vello's restructure in September 2026,
+  "Vello" means its sparse-strips renderers: `vello_gpu` for the
+  `GpuBackend` and `vello_cpu` for the `CpuBackend`, which share one scene
+  format. The compute-centric `vello` crate is now Vello's experimental
+  research renderer. Parley now shapes text with harfrust on skrifa, so
+  swash isn't needed. Details in `docs/design/m2-ui-stack.md`.
 - **`imaginarium-text`** wraps Parley (layout), fontique (font discovery) and swash
   (shaping/rasterization) behind our own traits, with per-paragraph layout
   caches.
