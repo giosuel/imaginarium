@@ -45,7 +45,9 @@ use clap::{Parser, ValueEnum};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
-use imaginarium_render::{GpuFrameTime, GpuInfo, GpuOptions, GpuStart, Power};
+use imaginarium_render::{
+    CpuMode, GpuFrameTime, GpuInfo, GpuOptions, GpuStart, Power, TileWorkers,
+};
 use imaginarium_text::Fonts;
 use imaginarium_ui::{AccessTree, FrameCauses, FrameInfo, Input, View, WindowOptions};
 
@@ -110,6 +112,10 @@ struct Args {
     /// timing it changes nothing).
     #[arg(long)]
     no_gpu_times: bool,
+    /// Threads that render tiles (on the CPU). 0: the frame renders them
+    /// on the GPU, as before M2.8. Default: half the cores, at most 8.
+    #[arg(long)]
+    tile_threads: Option<usize>,
     /// Where to write the report.
     #[arg(long, default_value = "gate-report.json")]
     report: PathBuf,
@@ -219,6 +225,40 @@ struct Gate {
     gpu_times: std::collections::HashMap<u64, GpuFrameTime>,
     /// Why the frames during the idle phase were drawn.
     idle_causes: CauseCounts,
+    /// Every frame's interval and parts, for the run's longest gaps.
+    gaps: Vec<Gap>,
+}
+
+/// A frame of any phase: the time since the one before, and its parts.
+#[derive(Clone, Copy, Debug)]
+struct Gap {
+    phase: &'static str,
+    number: u64,
+    interval: Duration,
+    paint: Duration,
+    textures: Duration,
+    acquire: Duration,
+    encode: Duration,
+    submit: Duration,
+}
+
+impl Phase {
+    /// The phase's name in the report.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Pan(_) => "cards pan",
+            Self::Type(_) => "typing",
+            Self::Palette(_) => "palette",
+            Self::Shapes(ShapePhase::Pan, _) => "shapes pan",
+            Self::Shapes(ShapePhase::Zoom, _) => "shapes zoom",
+            Self::Shapes(ShapePhase::Drag, _) => "shapes drag",
+            Self::Settle(..) => "settle",
+            Self::Idle { .. } => "idle",
+            Self::Done => "done",
+            Self::Manual => "manual",
+        }
+    }
 }
 
 /// Frames by cause (a frame can have several).
@@ -262,6 +302,9 @@ struct KeySample {
     search: Duration,
     paint: Duration,
     encode: Duration,
+    /// Tiles of the board the frame rendered (the search must not make
+    /// any render again).
+    rendered: usize,
 }
 
 /// The scripted phases on the shapes board.
@@ -280,6 +323,8 @@ struct CanvasSample {
     paint: Duration,
     textures: Duration,
     encode: Duration,
+    /// Submitting and presenting.
+    submit: Duration,
     /// The wait for the window's texture (vertical sync, or the GPU).
     acquire: Duration,
     /// Presenting (part of the frame time; blocks on some systems).
@@ -287,6 +332,8 @@ struct CanvasSample {
     interval: Duration,
     rendered: usize,
     owed: usize,
+    /// Of `owed`: tiles with nothing to stand in for them, left blank.
+    blank: usize,
     items: usize,
     /// The surface size in physical pixels.
     size: (u32, u32),
@@ -295,6 +342,23 @@ struct CanvasSample {
     /// Of `textures`: creating textures, and submitting the renders.
     textures_create: Duration,
     textures_submit: Duration,
+    /// With tile threads: tiles back from them, still with them after the
+    /// frame, and their time for those back.
+    arrived: usize,
+    in_flight: usize,
+    /// Of `in_flight`: back, waiting for a frame with time to upload them.
+    parked: usize,
+    worker_time: Duration,
+    /// Painting the tiles' items into their scenes (of `paint`).
+    build: Duration,
+    /// Waiting for tiles nothing stood in for (of `paint`).
+    waited: Duration,
+    /// Of `textures`: uploading tiles, and tile pages made in the frame.
+    textures_upload: Duration,
+    pages_made: u32,
+    /// Tile pages being made on their thread as the frame's uploads began.
+    pages_coming: u32,
+    pages: u32,
 }
 
 /// One scripted palette keystroke and the frame after it.
@@ -357,16 +421,28 @@ impl Gate {
             paint: frame.paint,
             textures: frame.render.textures,
             encode: frame.render.encode,
+            submit: frame.render.submit,
             acquire: frame.render.acquire,
             present: frame.render.present,
             interval,
             rendered: canvas.rendered,
             owed: canvas.owed,
+            blank: canvas.blank,
             items: canvas.items_painted,
             size: frame.physical_size,
             number: frame.number,
             textures_create: frame.render.textures_create,
             textures_submit: frame.render.textures_submit,
+            arrived: canvas.arrived,
+            in_flight: canvas.in_flight,
+            parked: canvas.parked,
+            worker_time: canvas.worker_time,
+            build: canvas.build,
+            waited: canvas.waited,
+            textures_upload: frame.render.textures_upload,
+            pages_made: frame.render.tile_pages_made,
+            pages_coming: frame.render.tile_pages_coming,
+            pages: frame.render.tile_pages,
         }
     }
 
@@ -464,6 +540,18 @@ impl View for Gate {
         self.frames = frame.number;
         let interval = self.last_at.map_or(Duration::ZERO, |last| frame.at - last);
         self.last_at = Some(frame.at);
+        if self.measure && !interval.is_zero() {
+            self.gaps.push(Gap {
+                phase: self.phase.name(),
+                number: frame.number,
+                interval,
+                paint: frame.paint,
+                textures: frame.render.textures,
+                acquire: frame.render.acquire,
+                encode: frame.render.encode,
+                submit: frame.render.submit,
+            });
+        }
         self.app.set_frame(frame.paint, frame.render.encode);
         self.app.board.borrow_mut().note_render_time(
             frame.render.textures,
@@ -557,6 +645,7 @@ impl View for Gate {
                         search,
                         paint: frame.paint,
                         encode: frame.render.encode,
+                        rendered: self.app.board.borrow().last_canvas.rendered,
                     });
                 }
                 if left > 1 {
@@ -703,6 +792,23 @@ fn canvas_report(
             "total": values.iter().sum::<usize>(),
         })
     };
+    let arrived: usize = samples.iter().map(|s| s.arrived).sum();
+    let worker_ms_per_tile = (arrived > 0)
+        .then(|| millis(samples.iter().map(|s| s.worker_time).sum::<Duration>()) / arrived as f64);
+    let rendered: usize = samples.iter().map(|s| s.rendered).sum();
+    let build_ms_per_tile = (rendered > 0)
+        .then(|| millis(samples.iter().map(|s| s.build).sum::<Duration>()) / rendered as f64);
+    let upload_ms_per_tile = (arrived > 0).then(|| {
+        millis(samples.iter().map(|s| s.textures_upload).sum::<Duration>()) / arrived as f64
+    });
+    // From the phase's first frame to the first one that `done` holds for:
+    // frames, and the time from the first frame's start to that one's.
+    let until = |done: fn(&CanvasSample) -> bool| {
+        samples.iter().position(done).map(|index| {
+            let waited: Duration = samples[1..=index].iter().map(|s| s.interval).sum();
+            serde_json::json!({ "frames": index, "ms": millis(waited) })
+        })
+    };
     serde_json::json!({
         "frame": summary(field(|s| s.frame)),
         "frame_p99_ms": percentile(field(|s| s.frame), 0.99).map(millis),
@@ -725,17 +831,53 @@ fn canvas_report(
                 "textures_ms": millis(s.textures),
                 "create_ms": millis(s.textures_create),
                 "submit_ms": millis(s.textures_submit),
+                "upload_ms": millis(s.textures_upload),
                 "rendered": s.rendered,
+                "arrived": s.arrived,
+                "pages_made": s.pages_made,
+                "pages_coming": s.pages_coming,
                 "gpu_textures_ms": gpu.get(&s.number).map(|t| millis(t.textures)),
             })),
+        // Where the slowest frames' time went, slowest first: which part
+        // of the frame to look at when the p99 is over budget.
+        "slowest_frames": slowest_frames(samples, 5),
         // Zero: the first frame, or one after a pause.
         "interval": summary(samples.iter().map(|s| s.interval).filter(|i| !i.is_zero()).collect()),
         // Frames that took longer than a 60 Hz refresh on the UI thread,
         // and gaps that missed one.
         "frames_over_16ms": samples.iter().filter(|s| s.frame > Duration::from_millis(16)).count(),
         "intervals_over_20ms": samples.iter().filter(|s| s.interval > Duration::from_millis(20)).count(),
+        // Tiles whose items were painted (and rendered in the frame, or
+        // handed to the tile threads).
         "tiles_rendered": counts(|s| s.rendered),
         "tiles_owed": counts(|s| s.owed),
+        // Owed tiles nothing stood in for (blank areas on screen), the
+        // frames that had any, and when the screen was first covered (no
+        // blank tile) and complete (none owed). The cards' pan starts with
+        // the board opening; the shapes phases start settled.
+        "tiles_blank": counts(|s| s.blank),
+        "frames_with_blanks": samples.iter().filter(|s| s.blank > 0).count(),
+        "covered_after": until(|s| s.blank == 0),
+        "complete_after": until(|s| s.owed == 0),
+        // With tile threads: tiles back and uploaded, tiles still with
+        // them, the threads' time per tile, the upload time per frame.
+        "tiles_arrived": counts(|s| s.arrived),
+        "tiles_in_flight": counts(|s| s.in_flight),
+        // Of those: back, waiting for a frame with time to upload them.
+        "tiles_parked": counts(|s| s.parked),
+        "worker_ms_per_tile": worker_ms_per_tile,
+        // Painting the tiles' items on the UI thread (part of `paint`).
+        "tile_build": summary(field(|s| s.build)),
+        "build_ms_per_tile": build_ms_per_tile,
+        // Waiting in the frame for tiles that would show blank otherwise
+        // (part of `paint`).
+        "blank_wait": summary(field(|s| s.waited)),
+        "upload": summary(field(|s| s.textures_upload)),
+        "upload_ms_per_tile": upload_ms_per_tile,
+        // Pages made in a frame because none was ready (each can stall
+        // it), and pages at the phase's end.
+        "tile_pages_made": samples.iter().map(|s| s.pages_made).sum::<u32>(),
+        "tile_pages": samples.last().map(|s| s.pages),
         "items_painted": counts(|s| s.items),
         // At the phase's end: the window can change size meanwhile (a
         // compositor making it fullscreen after the first frame).
@@ -745,6 +887,61 @@ fn canvas_report(
             "ms": millis(waited),
         })),
     })
+}
+
+/// The `count` longest intervals in `gaps`, longest first, with the phase
+/// each frame belonged to and its parts.
+fn longest_intervals(gaps: &[Gap], count: usize) -> serde_json::Value {
+    let mut order: Vec<&Gap> = gaps.iter().collect();
+    order.sort_by_key(|gap| std::cmp::Reverse(gap.interval));
+    order
+        .into_iter()
+        .take(count)
+        .map(|gap| {
+            serde_json::json!({
+                "phase": gap.phase,
+                "frame": gap.number,
+                "interval_ms": millis(gap.interval),
+                "paint_ms": millis(gap.paint),
+                "textures_ms": millis(gap.textures),
+                "acquire_ms": millis(gap.acquire),
+                "encode_ms": millis(gap.encode),
+                "submit_ms": millis(gap.submit),
+            })
+        })
+        .collect()
+}
+
+/// The `count` slowest frames of `samples` on the UI thread, slowest
+/// first, with their parts.
+fn slowest_frames(samples: &[CanvasSample], count: usize) -> serde_json::Value {
+    let mut order: Vec<usize> = (0..samples.len()).collect();
+    order.sort_by_key(|index| std::cmp::Reverse(samples[*index].frame));
+    order
+        .into_iter()
+        .take(count)
+        .map(|index| {
+            let s = &samples[index];
+            serde_json::json!({
+                "frame_in_phase": index,
+                "frame_ms": millis(s.frame),
+                "paint_ms": millis(s.paint),
+                "build_ms": millis(s.build),
+                "waited_ms": millis(s.waited),
+                "textures_ms": millis(s.textures),
+                "upload_ms": millis(s.textures_upload),
+                "encode_ms": millis(s.encode),
+                "submit_ms": millis(s.submit),
+                "interval_ms": millis(s.interval),
+                "rendered": s.rendered,
+                "arrived": s.arrived,
+                "parked": s.parked,
+                "owed": s.owed,
+                "blank": s.blank,
+                "items": s.items,
+            })
+        })
+        .collect()
 }
 
 /// The GPU's own time (timestamp queries) for the frames of `samples` it
@@ -811,6 +1008,10 @@ fn main() -> anyhow::Result<()> {
     let fonts_started = Instant::now();
     let fonts = Fonts::new();
     let fonts_time = fonts_started.elapsed();
+    let tile_threads = args
+        .tile_threads
+        .unwrap_or_else(TileWorkers::default_threads);
+    let workers = (tile_threads > 0).then(|| TileWorkers::new(tile_threads, CpuMode::Fast));
     let mut gate = Gate {
         app: App::new(
             fonts,
@@ -818,6 +1019,7 @@ fn main() -> anyhow::Result<()> {
             args.shapes,
             args.commands,
             !args.no_tiles,
+            workers.clone(),
         ),
         palette_keys: args.palette_keys,
         palette: Vec::new(),
@@ -849,6 +1051,7 @@ fn main() -> anyhow::Result<()> {
         missing_textures: 0,
         gpu_times: std::collections::HashMap::new(),
         idle_causes: CauseCounts::default(),
+        gaps: Vec::new(),
     };
     // The time from exec to `main` (loading the binary and its libraries)
     // is measured separately from the time in `main`.
@@ -919,7 +1122,7 @@ fn main() -> anyhow::Result<()> {
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
         "build": BUILD,
-        "milestone": "M2.7",
+        "milestone": "M2.8",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -980,6 +1183,8 @@ fn main() -> anyhow::Result<()> {
             "shapes": gate.app.board.borrow().shape_count(),
             "commands": args.commands,
             "tiles": !args.no_tiles,
+            // 0: tiles render in the frame, on the GPU.
+            "tile_threads": workers.as_ref().map_or(0, TileWorkers::threads),
         },
         "pan": {
             // The toolkit's share: the view building its scene.
@@ -1016,6 +1221,9 @@ fn main() -> anyhow::Result<()> {
             "search": summary(typing(|sample| sample.search)),
             "paint": summary(typing(|sample| sample.paint)),
             "encode": summary(typing(|sample| sample.encode)),
+            // Searching dims the cards it misses over the tiles, so no
+            // tile renders again.
+            "tiles_rendered": gate.typing.iter().map(|sample| sample.rendered).sum::<usize>(),
         },
         "palette": {
             // Criterion 3: the search over all commands per keystroke.
@@ -1033,6 +1241,9 @@ fn main() -> anyhow::Result<()> {
             "pass": palette_search_p95.map(|p95| p95 < Duration::from_millis(1)),
         },
         "idle": idle,
+        // The run's longest frame intervals, in any phase (including the
+        // unmeasured ones between phases): where it froze, and on what.
+        "longest_intervals": longest_intervals(&gate.gaps, 8),
         "frames": stats.frames,
         "inputs": gate.inputs,
         "peak_rss_bytes": proc::peak_rss_bytes(),

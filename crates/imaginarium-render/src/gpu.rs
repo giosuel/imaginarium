@@ -2,15 +2,20 @@
 
 //! The GPU backend: `vello_gpu` on `wgpu`.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use vello_common::geometry::RectU16;
 use vello_common::kurbo::Affine;
 use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
 
 use crate::RenderError;
 use crate::gpu_timer::{GpuFrameTime, GpuTimer};
-use crate::scene::{Scene, Target, TextureKey, TextureWork, Textures as SceneTextures, replay};
+use crate::scene::{
+    Placed, Scene, Target, TextureKey, TextureWork, Textures as SceneTextures, replay,
+};
+use crate::tile_pages::{PageStats, SLOT, TilePages, UPLOAD_FORMAT};
 
 /// Which GPU to prefer on machines with more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -216,6 +221,13 @@ async fn open(
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("imaginarium"),
             required_features,
+            // Smaller memory blocks (8 to 64 MB rather than 128 to 256 MB).
+            // A block's memory may be backed only when a submission first
+            // uses it, and an integrated GPU's driver then allocates and
+            // clears it in that submission: the bigger the block, the
+            // longer that frame (the gate laptop's Intel GPU stalled in
+            // single submissions for 58-117 ms).
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         })
         .await
@@ -233,7 +245,9 @@ async fn open(
 /// 2048² rather than Vello's 4096²: a page is created when a glyph first
 /// needs it, and wgpu clears the whole texture on its first use, which made
 /// the first frame with text stall for 70 ms on the VM (64 MB). A quarter
-/// of that holds the UI's and a board's glyphs; more pages come as needed.
+/// of that holds the UI's and a board's glyphs; more pages come as needed,
+/// up to 32 (Vello's 8 of 4096² hold as much). A full atlas draws glyphs
+/// directly, which vello_gpu can't do for bitmap glyphs (color emoji).
 fn new_renderer(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -242,6 +256,7 @@ fn new_renderer(
 ) -> (vello_gpu::Renderer, vello_gpu::Resources) {
     let mut settings = vello_gpu::RenderSettings::default();
     settings.memory_settings.image_atlas_config.atlas_size = (ATLAS_PAGE, ATLAS_PAGE);
+    settings.memory_settings.image_atlas_config.max_atlases = ATLAS_PAGES;
     vello_gpu::Renderer::new_with(
         device,
         &vello_gpu::RenderTargetConfig {
@@ -255,6 +270,8 @@ fn new_renderer(
 
 /// The side of a glyph (and image) atlas page, in pixels.
 const ATLAS_PAGE: u16 = 2048;
+/// Glyph atlas pages at most: 512 MB, as many glyphs as Vello's default.
+const ATLAS_PAGES: usize = 32;
 
 /// Vello works with `u16` sizes; a zero-sized surface is invalid.
 fn clamp_size(width: u32, height: u32) -> (u16, u16) {
@@ -287,6 +304,19 @@ pub struct FrameTiming {
     pub textures_create: Duration,
     /// Of `textures`: submitting the renders, one submission each.
     pub textures_submit: Duration,
+    /// How many textures were uploaded (canvas tiles rendered elsewhere).
+    pub texture_uploads: u32,
+    /// Of `textures`: handing uploads to the GPU (copying them for the
+    /// frame's submission).
+    pub textures_upload: Duration,
+    /// Tile pages (shared textures for uploaded tiles) in use.
+    pub tile_pages: u32,
+    /// Tile pages the frame made, or waited for, because none was ready:
+    /// each can make the frame slow.
+    pub tile_pages_made: u32,
+    /// Tile pages being made on their thread when the frame's texture work
+    /// began (whether a slow upload may have waited behind one).
+    pub tile_pages_coming: u32,
     /// Draws of textures that don't exist, skipped (a bug in their owner).
     pub missing_textures: u32,
     /// The GPU's time for an earlier frame, read back by now (with
@@ -296,6 +326,10 @@ pub struct FrameTiming {
 
 /// What happened to a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "returned once per frame and taken apart at once, never stored"
+)]
 pub enum FrameOutcome {
     /// It is on its way to the screen.
     Presented(FrameTiming),
@@ -329,7 +363,7 @@ pub struct WindowRenderer {
 /// font file and face: vello_gpu draws those only from its glyph atlas.
 #[derive(Debug, Default)]
 pub(crate) struct BitmapFonts {
-    known: std::collections::HashMap<(u64, u32), bool>,
+    known: HashMap<(u64, u32), bool>,
 }
 
 impl BitmapFonts {
@@ -353,31 +387,109 @@ struct TextureStats {
     renders: u32,
     create: Duration,
     submit: Duration,
+    uploads: u32,
+    upload: Duration,
+    pages: PageStats,
 }
-
-/// A texture kept for its owner, and its size.
-pub(crate) type GpuTexture = (wgpu::Texture, u16, u16);
 
 /// Textures kept for their owners across frames (canvas tiles).
 struct Textures {
-    /// Their pixel format (the window's).
+    /// The pixel format of rendered textures (the window's).
     format: wgpu::TextureFormat,
-    entries: std::collections::HashMap<TextureKey, GpuTexture>,
+    /// Textures of their own: rendered ones, and uploads that aren't a
+    /// tile's size.
+    own: HashMap<TextureKey, wgpu::Texture>,
+    /// Uploaded tiles, in shared pages.
+    pages: TilePages,
+    /// Where each texture's texels are, for drawing.
+    placed: HashMap<TextureKey, Placed>,
     bindings: vello_gpu::TextureBindings,
     /// Depth views by size, shared by textures of that size.
-    depths: std::collections::HashMap<(u16, u16), wgpu::TextureView>,
+    depths: HashMap<(u16, u16), wgpu::TextureView>,
     /// Scratch scene the textures' content is encoded in.
     scene: vello_gpu::Scene,
 }
 
 impl Textures {
-    fn new(format: wgpu::TextureFormat) -> Self {
+    fn new(format: wgpu::TextureFormat, gpu: &Gpu) -> Self {
         Self {
             format,
-            entries: std::collections::HashMap::new(),
+            own: HashMap::new(),
+            pages: TilePages::new(&gpu.device, &gpu.queue),
+            placed: HashMap::new(),
             bindings: vello_gpu::TextureBindings::new(),
-            depths: std::collections::HashMap::new(),
+            depths: HashMap::new(),
             scene: vello_gpu::Scene::new(1, 1),
+        }
+    }
+
+    fn free(&mut self, key: TextureKey) {
+        self.drop_own(key);
+        self.pages.free(key);
+        self.placed.remove(&key);
+    }
+
+    fn drop_own(&mut self, key: TextureKey) {
+        if self.own.remove(&key).is_some() {
+            self.bindings.remove(vello_common::TextureId(key.id()));
+        }
+    }
+
+    /// `key`'s own texture of `width × height` in `format`, made (and
+    /// bound) if it has none of that kind.
+    fn own_texture(
+        &mut self,
+        device: &wgpu::Device,
+        key: TextureKey,
+        (width, height): (u16, u16),
+        format: wgpu::TextureFormat,
+        stats: &mut TextureStats,
+    ) -> wgpu::Texture {
+        let fits = self.own.get(&key).is_some_and(|texture| {
+            (texture.width(), texture.height(), texture.format())
+                == (u32::from(width), u32::from(height), format)
+        });
+        if !fits {
+            let creating = Instant::now();
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("canvas texture"),
+                size: wgpu::Extent3d {
+                    width: u32::from(width),
+                    height: u32::from(height),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let id = vello_common::TextureId(key.id());
+            self.bindings.insert(
+                id,
+                texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            );
+            self.own.insert(key, texture);
+            self.placed.insert(
+                key,
+                Placed {
+                    id,
+                    region: RectU16 {
+                        x0: 0,
+                        y0: 0,
+                        x1: width,
+                        y1: height,
+                    },
+                },
+            );
+            stats.create += creating.elapsed();
+        }
+        match self.own.get(&key) {
+            Some(texture) => texture.clone(),
+            None => unreachable!("made above"),
         }
     }
 
@@ -385,9 +497,10 @@ impl Textures {
         clippy::too_many_arguments,
         reason = "the window renderer's parts, borrowed apart from each other"
     )]
-    /// Renders and frees textures as `work` says, one submission each:
-    /// Vello rewrites its buffers between renders, so renders sharing one
-    /// submission would see the last one's data.
+    /// Renders, uploads and frees textures as `work` says. Each render is a
+    /// submission of its own: Vello rewrites its buffers between renders,
+    /// so renders sharing one submission would see the last one's data.
+    /// Uploads go with the next submission.
     fn process(
         &mut self,
         gpu: &Gpu,
@@ -398,13 +511,42 @@ impl Textures {
         glyph_atlas: bool,
         work: &[TextureWork],
     ) -> Result<TextureStats, RenderError> {
-        let format = self.format;
         let mut stats = TextureStats::default();
+        self.pages.receive(&mut self.bindings);
+        stats.pages.coming = u32::try_from(self.pages.coming()).unwrap_or(u32::MAX);
         for item in work {
             match item {
-                TextureWork::Free(key) => {
-                    self.entries.remove(key);
-                    self.bindings.remove(vello_common::TextureId(key.id()));
+                TextureWork::Free(key) => self.free(*key),
+                TextureWork::Expect(count) => self.pages.expect(*count),
+                TextureWork::Upload { key, pixmap } => {
+                    let uploading = Instant::now();
+                    let pixmap = &pixmap.0;
+                    let size = (pixmap.width(), pixmap.height());
+                    if size.0 == 0 || size.1 == 0 {
+                        self.free(*key);
+                    } else if size == (SLOT, SLOT) {
+                        self.drop_own(*key);
+                        let placed =
+                            self.pages
+                                .upload(&mut self.bindings, *key, pixmap, &mut stats.pages);
+                        self.placed.insert(*key, placed);
+                    } else {
+                        self.pages.free(*key);
+                        let texture =
+                            self.own_texture(&gpu.device, *key, size, UPLOAD_FORMAT, &mut stats);
+                        gpu.queue.write_texture(
+                            texture.as_image_copy(),
+                            pixmap.data_as_u8_slice(),
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(u32::from(size.0) * 4),
+                                rows_per_image: None,
+                            },
+                            texture.size(),
+                        );
+                    }
+                    stats.uploads += 1;
+                    stats.upload += uploading.elapsed();
                 }
                 TextureWork::Render {
                     key,
@@ -413,36 +555,9 @@ impl Textures {
                     scene,
                 } => {
                     let (w, h) = ((*width).max(1), (*height).max(1));
-                    let fits = self
-                        .entries
-                        .get(key)
-                        .is_some_and(|(_, tw, th)| (*tw, *th) == (w, h));
-                    if !fits {
-                        let creating = Instant::now();
-                        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("canvas texture"),
-                            size: wgpu::Extent3d {
-                                width: u32::from(w),
-                                height: u32::from(h),
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format,
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                                | wgpu::TextureUsages::TEXTURE_BINDING,
-                            view_formats: &[],
-                        });
-                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        self.bindings
-                            .insert(vello_common::TextureId(key.id()), view);
-                        self.entries.insert(*key, (texture, w, h));
-                        stats.create += creating.elapsed();
-                    }
-                    let Some((texture, _, _)) = self.entries.get(key) else {
-                        continue;
-                    };
+                    self.pages.free(*key);
+                    let texture =
+                        self.own_texture(&gpu.device, *key, (w, h), self.format, &mut stats);
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let size = vello_gpu::RenderSize {
                         width: w,
@@ -659,6 +774,7 @@ impl WindowRenderer {
             .gpu_times
             .then(|| GpuTimer::new(&gpu.device, &gpu.queue))
             .flatten();
+        let textures = Textures::new(view_format, &gpu);
         Ok(Self {
             timer,
             gpu,
@@ -672,7 +788,7 @@ impl WindowRenderer {
             info,
             glyph_atlas: options.glyph_atlas,
             frames: 0,
-            textures: Textures::new(view_format),
+            textures,
             bitmap_fonts: BitmapFonts::default(),
             startup,
         })
@@ -773,7 +889,7 @@ impl WindowRenderer {
             glyph_atlas,
             bitmap_fonts: Some(&mut self.bitmap_fonts),
             transform: Affine::IDENTITY,
-            textures: SceneTextures::Bound(&self.textures.entries),
+            textures: SceneTextures::Bound(&self.textures.placed),
             missing: 0,
         };
         replay(scene, &mut target, transform);
@@ -829,6 +945,11 @@ impl WindowRenderer {
             texture_renders: texture_stats.renders,
             textures_create: texture_stats.create,
             textures_submit: texture_stats.submit,
+            texture_uploads: texture_stats.uploads,
+            textures_upload: texture_stats.upload,
+            tile_pages: u32::try_from(self.textures.pages.len()).unwrap_or(u32::MAX),
+            tile_pages_made: texture_stats.pages.made,
+            tile_pages_coming: texture_stats.pages.coming,
             missing_textures,
             gpu,
         }))
@@ -904,7 +1025,7 @@ impl OffscreenRenderer {
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(device, &size);
         let mut vello_scene = vello_gpu::Scene::new(w, h);
-        let mut textures = Textures::new(format);
+        let mut textures = Textures::new(format, &self.gpu);
         let mut bitmap_fonts = BitmapFonts::default();
         textures.process(
             &self.gpu,
@@ -923,7 +1044,7 @@ impl OffscreenRenderer {
                 glyph_atlas: false,
                 bitmap_fonts: Some(&mut bitmap_fonts),
                 transform: Affine::IDENTITY,
-                textures: SceneTextures::Bound(&textures.entries),
+                textures: SceneTextures::Bound(&textures.placed),
                 missing: 0,
             },
             Affine::IDENTITY,

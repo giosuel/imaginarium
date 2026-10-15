@@ -7,9 +7,10 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use vello_common::geometry::RectU16;
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use vello_common::paint::{Image, ImageSource};
-use vello_common::peniko::{Color, FontData, ImageSampler};
+use vello_common::peniko::{Color, FontData, ImageQuality, ImageSampler};
 use vello_cpu::{Glyph, Pixmap};
 
 /// Curves are flattened to this tolerance (in the scene's units) when a
@@ -89,8 +90,26 @@ pub(crate) enum TextureWork {
         height: u16,
         scene: Scene,
     },
+    /// Makes `pixmap` texture `key`'s pixels, creating or resizing it.
+    Upload {
+        key: TextureKey,
+        pixmap: SharedPixmap,
+    },
     /// Releases texture `key`.
     Free(TextureKey),
+    /// About this many uploads of new canvas tiles are coming in the next
+    /// frames ([`Scene::expect_uploads`]).
+    Expect(usize),
+}
+
+/// A pixmap a scene shares; scenes compare it by identity.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedPixmap(pub(crate) Arc<Pixmap>);
+
+impl PartialEq for SharedPixmap {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// The attributes shared by a run of glyphs (see [`Scene::glyphs`]).
@@ -138,6 +157,11 @@ pub struct Scene {
     open_layers: u32,
     /// The transform in effect at the end, restored after [`Scene::append`].
     current: Affine,
+    /// Under every transform set while [`Scene::paint_with`] runs.
+    base: Affine,
+    /// The layers open when [`Scene::paint_with`] began, which a pop in it
+    /// can't end.
+    floor: u32,
 }
 
 impl Scene {
@@ -154,6 +178,8 @@ impl Scene {
         self.textures.clear();
         self.open_layers = 0;
         self.current = Affine::IDENTITY;
+        self.base = Affine::IDENTITY;
+        self.floor = 0;
     }
 
     /// The number of drawing commands.
@@ -168,8 +194,8 @@ impl Scene {
 
     /// Sets the transform for the commands that follow.
     pub fn set_transform(&mut self, transform: Affine) {
-        self.current = transform;
-        self.commands.push(Command::Transform(transform));
+        self.current = self.base * transform;
+        self.commands.push(Command::Transform(self.current));
     }
 
     /// Fills `shape` with `color`.
@@ -225,6 +251,26 @@ impl Scene {
         });
     }
 
+    /// Makes `pixmap` texture `key`'s pixels (premultiplied, as Vello
+    /// renders them), before this scene is drawn: content rendered
+    /// elsewhere, such as canvas tiles rendered on worker threads. The
+    /// texture stays until [`Scene::free_texture`].
+    pub fn upload_texture(&mut self, key: TextureKey, pixmap: Arc<Pixmap>) {
+        self.textures.push(TextureWork::Upload {
+            key,
+            pixmap: SharedPixmap(pixmap),
+        });
+    }
+
+    /// Tells the renderer that about `count` uploads of new canvas tiles
+    /// (256² pixmaps, for textures that have none yet) are coming in the
+    /// next frames, so it can make room for them ahead: on the GPU, that
+    /// room takes a while to make. Say it again each frame with the number
+    /// still to come; it doesn't add up.
+    pub fn expect_uploads(&mut self, count: usize) {
+        self.textures.push(TextureWork::Expect(count));
+    }
+
     /// Draws texture `key` (`width × height` texels) into `dest`, in the
     /// current transform. A texture drawn at 1:1 on whole device pixels is
     /// copied exactly.
@@ -247,6 +293,14 @@ impl Scene {
         self.textures
             .iter()
             .filter(|work| matches!(work, TextureWork::Render { .. }))
+            .count()
+    }
+
+    /// Texture uploads queued by this scene.
+    pub fn texture_uploads(&self) -> usize {
+        self.textures
+            .iter()
+            .filter(|work| matches!(work, TextureWork::Upload { .. }))
             .count()
     }
 
@@ -288,7 +342,7 @@ impl Scene {
     /// Ends the latest [`Scene::push_clip`] or [`Scene::push_opacity`].
     /// Extra pops are ignored.
     pub fn pop(&mut self) {
-        if self.open_layers > 0 {
+        if self.open_layers > self.floor {
             self.open_layers -= 1;
             self.commands.push(Command::Pop);
         }
@@ -297,6 +351,7 @@ impl Scene {
     /// Appends `other`'s commands, drawn with `transform` applied after
     /// their own (for composing widgets or tiles).
     pub fn append(&mut self, other: &Scene, transform: Affine) {
+        let transform = self.base * transform;
         // `other` starts with the identity transform.
         self.commands.push(Command::Transform(transform));
         let (glyph_base, coord_base) = (self.glyphs.len(), self.coords.len());
@@ -329,6 +384,43 @@ impl Scene {
             self.commands.push(Command::Pop);
         }
         self.commands.push(Command::Transform(self.current));
+    }
+
+    /// Lets `paint` draw into this scene with `transform` under all it
+    /// draws, as if it drew a scene of its own that is then appended with
+    /// `transform` ([`Scene::append`]), without the copy: its transforms
+    /// apply after `transform`, its pops can't end layers opened before,
+    /// and layers it leaves open close at its end.
+    ///
+    /// ```
+    /// use imaginarium_render::{Scene, kurbo::{Affine, Rect}, peniko::Color};
+    ///
+    /// let mut tile = Scene::new();
+    /// tile.paint_with(Affine::scale(2.0), |item| {
+    ///     item.push_clip(&Rect::new(0.0, 0.0, 10.0, 10.0));
+    ///     item.fill(&Rect::new(1.0, 1.0, 4.0, 4.0), Color::BLACK);
+    /// });
+    /// let mut item = Scene::new();
+    /// item.push_clip(&Rect::new(0.0, 0.0, 10.0, 10.0));
+    /// item.fill(&Rect::new(1.0, 1.0, 4.0, 4.0), Color::BLACK);
+    /// let mut appended = Scene::new();
+    /// appended.append(&item, Affine::scale(2.0));
+    /// assert_eq!(tile, appended);
+    /// ```
+    pub fn paint_with<R>(&mut self, transform: Affine, paint: impl FnOnce(&mut Self) -> R) -> R {
+        let (base, floor, current) = (self.base, self.floor, self.current);
+        self.base = base * transform;
+        self.floor = self.open_layers;
+        self.set_transform(Affine::IDENTITY);
+        let painted = paint(self);
+        while self.open_layers > self.floor {
+            self.pop();
+        }
+        self.base = base;
+        self.floor = floor;
+        self.current = current;
+        self.commands.push(Command::Transform(current));
+        painted
     }
 
     pub(crate) fn commands(&self) -> &[Command] {
@@ -377,15 +469,23 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) missing: u32,
 }
 
+/// Where a texture's texels are on the GPU: a texture bound for the frame,
+/// and the region of it (all of it, or a slot of a tile page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub(crate) id: vello_common::TextureId,
+    pub(crate) region: RectU16,
+}
+
 /// The textures a backend can draw.
 pub(crate) enum Textures<'a> {
     /// None (inside a texture's own content).
     None,
     /// The CPU backend's pixmaps.
     Pixmaps(&'a HashMap<TextureKey, Arc<Pixmap>>),
-    /// The GPU's, bound by key at render time. Drawing a key without a
+    /// The GPU's, bound at render time. Drawing a texture without a
     /// binding would fail the whole frame.
-    Bound(&'a HashMap<TextureKey, crate::gpu::GpuTexture>),
+    Bound(&'a HashMap<TextureKey, Placed>),
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -471,6 +571,26 @@ const MAX_ATLAS_GLYPH_SIZE: f32 = 128.0;
 fn device_size(size: f32, transform: Affine) -> f32 {
     let [a, b, c, d, _, _] = transform.as_coeffs();
     size * (a * d - b * c).abs().sqrt() as f32
+}
+
+/// How to sample a texture whose texels map to device pixels by
+/// `texels`: one texel per pixel on whole pixels needs no filtering, and the
+/// nearest texel is the same as filtering there. On the GPU that is one
+/// load per pixel instead of four (canvas tiles cover the window).
+fn sampling(texels: Affine) -> ImageQuality {
+    let [a, b, c, d, x, y] = texels.as_coeffs();
+    let near = |value: f64, to: f64| (value - to).abs() < 1e-6;
+    if near(a, 1.0)
+        && near(d, 1.0)
+        && near(b, 0.0)
+        && near(c, 0.0)
+        && near(x, x.round())
+        && near(y, y.round())
+    {
+        ImageQuality::Low
+    } else {
+        ImageQuality::Medium
+    }
 }
 
 macro_rules! impl_sink {
@@ -560,35 +680,34 @@ macro_rules! impl_sink {
                             return;
                         }
                     },
-                    Textures::Bound(bound) if bound.contains_key(&key) => {
-                        ImageSource::external_texture(
-                            vello_common::TextureId(key.id()),
-                            vello_common::geometry::RectU16 {
-                                x0: 0,
-                                y0: 0,
-                                x1: width,
-                                y1: height,
-                            },
-                            true,
-                        )
-                    }
-                    Textures::Bound(_) | Textures::None => {
+                    Textures::Bound(bound) => match bound.get(&key) {
+                        Some(placed) => {
+                            ImageSource::external_texture(placed.id, placed.region, true)
+                        }
+                        None => {
+                            self.missing += 1;
+                            return;
+                        }
+                    },
+                    Textures::None => {
                         self.missing += 1;
                         return;
                     }
                 };
+                // Texels to the destination rectangle.
+                let texels = Affine::translate(dest.origin().to_vec2())
+                    * Affine::scale_non_uniform(
+                        dest.width() / f64::from(width),
+                        dest.height() / f64::from(height),
+                    );
                 self.context.set_paint(Image {
                     image,
-                    sampler: ImageSampler::default(),
+                    sampler: ImageSampler {
+                        quality: sampling(self.transform * texels),
+                        ..ImageSampler::default()
+                    },
                 });
-                // Texels to the destination rectangle.
-                self.context.set_paint_transform(
-                    Affine::translate(dest.origin().to_vec2())
-                        * Affine::scale_non_uniform(
-                            dest.width() / f64::from(width),
-                            dest.height() / f64::from(height),
-                        ),
-                );
+                self.context.set_paint_transform(texels);
                 self.context.fill_rect(dest);
                 self.context.reset_paint_transform();
             }
@@ -598,3 +717,68 @@ macro_rules! impl_sink {
 
 impl_sink!(vello_cpu::RenderContext, vello_cpu::Resources);
 impl_sink!(vello_gpu::Scene, vello_gpu::Resources);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An item that sets its own transform, draws glyphs, pops more than
+    /// it pushed and leaves a layer open.
+    fn item(scene: &mut Scene, font: &FontData) {
+        scene.pop();
+        scene.push_opacity(0.5);
+        scene.fill(&Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+        scene.set_transform(Affine::translate((3.0, 1.0)));
+        scene.push_clip(&Rect::new(0.0, 0.0, 2.0, 2.0));
+        scene.pop();
+        scene.glyphs(
+            GlyphRun {
+                font,
+                size: 12.0,
+                coords: &[1, 2],
+                hint: false,
+                color: Color::WHITE,
+            },
+            [Glyph {
+                id: 7,
+                x: 1.0,
+                y: 2.0,
+            }],
+        );
+    }
+
+    /// A scene with a layer open and a transform of its own.
+    fn started() -> Scene {
+        let mut scene = Scene::new();
+        scene.push_clip(&Rect::new(0.0, 0.0, 100.0, 100.0));
+        scene.set_transform(Affine::rotate(0.1));
+        scene.fill(&Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        scene
+    }
+
+    #[test]
+    fn painting_in_place_is_appending_without_the_copy() {
+        let font = FontData::new(vello_common::peniko::Blob::new(Arc::new([0u8; 4])), 0);
+        let transform = Affine::scale(2.0) * Affine::translate((5.0, 0.0));
+        let mut drawn = Scene::new();
+        item(&mut drawn, &font);
+        let mut appended = started();
+        appended.append(&drawn, transform);
+        appended.append(&drawn, transform);
+        let mut painted = started();
+        painted.paint_with(transform, |scene| item(scene, &font));
+        painted.paint_with(transform, |scene| item(scene, &font));
+        assert_eq!(painted, appended);
+        assert_eq!(painted.open_layers, 1, "the outer clip is still open");
+        // Nested, the inner transform comes after the outer.
+        let mut nested = started();
+        nested.paint_with(Affine::scale(2.0), |scene| {
+            scene.paint_with(Affine::translate((5.0, 0.0)), |scene| item(scene, &font));
+        });
+        let mut inner = Scene::new();
+        inner.append(&drawn, Affine::translate((5.0, 0.0)));
+        let mut twice = started();
+        twice.append(&inner, Affine::scale(2.0));
+        assert_eq!(nested, twice);
+    }
+}

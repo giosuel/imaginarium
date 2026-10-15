@@ -402,6 +402,11 @@ Decided (2026-10-13):
   result). Criterion 1 on the integrated GPU is a canvas renderer problem,
   which falling back to GPUI wouldn't fix. It is the next step (M2.8).
 
+Decided (2026-10-14):
+- **Both canvas fixes go into M2.8:** removing the stalls on the
+  integrated GPU, and rendering tiles on worker threads instead of the
+  UI thread (ADR-0019).
+
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
 

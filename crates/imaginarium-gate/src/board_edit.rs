@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn a_drag_moves_the_selection_and_undo_puts_it_back() {
-        let mut board = Board::new(10, 100, true);
+        let mut board = Board::new(10, 100, true, None);
         let before = board.shapes[3].rect;
         board.select_only(3);
         board.select_only(3);
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn delete_and_undo_restore_shapes_and_their_selection() {
-        let mut board = Board::new(10, 100, true);
+        let mut board = Board::new(10, 100, true, None);
         board.select_in(Rect::new(-100.0, -100.0, 140.0, 140.0), false);
         let selected = board.selection_len();
         assert!(selected >= 2, "{selected}");

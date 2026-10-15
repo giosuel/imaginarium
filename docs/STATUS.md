@@ -4,14 +4,15 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 ## Current position
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.8 Canvas on the integrated GPU**. The M2 gate is
-  decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
+- **Next step:** **M2.9 Wrap-up** (see "Next" at the end of this item).
+  **M2.8, the canvas on the integrated GPU, is done (2026-10-14).** The M2
+  gate is decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
   result"). Criterion 1 fails on the iGPU with a fullscreen window,
   because the GPU can't keep up. Criterion 2 needs the script to settle
   before the drag. Start with GPU times in the gate report.
@@ -24,8 +25,66 @@ Last updated: 2026-10-13
   - the script settles before each shapes phase;
   - GPU times, the monitor and per-phase sizes in the report.
 
-  Next: the owner's three runs ("M2.8 run" in `m2-gate.md`). Then decide
-  whether tiles need their own compositor pass.
+  The owner's runs (2026-10-14, "M2.8 run" in `m2-gate.md`): criterion 1
+  passes on the dGPU; on the iGPU only the zoom misses (p99 17.7 ms), and
+  tiles filled the screen ring by ring over half a second. The owner
+  chose both fixes for M2.8 (ADR-0019). Done on `perf/m2.8-tile-workers`,
+  stacked on `perf/m2.8-canvas-igpu`:
+  - tiles render on worker threads with `vello_cpu`, and frames upload
+    them;
+  - uploaded tiles share pages on the GPU, made ahead on their own
+    thread;
+  - smaller GPU memory blocks, for the iGPU's submission stalls;
+  - nearest sampling for tiles drawn 1:1;
+  - items paint straight into their tile's scene;
+  - the glyph atlas takes up to 32 pages.
+
+  The owner's second runs (2026-10-14, "M2.8 run 2"): **criterion 1
+  passes on the iGPU** (zoom p99 11.0 ms), the fill is 3–4 times faster
+  and the big stalls are gone. Left: the first tile page made in the
+  cards board's first frame (32–52 ms), and tiles newly in view showing
+  blank for a frame (the owner's "minor glitching" zooming out, likely).
+  Done since, on the same branch:
+  - tile pages made as tiles go to the workers (`Scene::expect_uploads`);
+  - a frame waits up to 4 ms for tiles nothing stands in for;
+  - 8 tiles per thread; the frame budget no longer counts the canvas's
+    painting twice;
+  - blank tiles and fill times in the report.
+
+  The owner's third runs (2026-10-14, "M2.8 run 3"): zooming out is fine
+  now, but **criterion 1 misses on the iGPU in the zoom** (p99 19.3 ms;
+  the owner: zooming in is a bit laggy). Up to 57 tiles came back in one
+  frame and were all uploaded (13 ms), and building overshot its budget
+  (9.2 ms against 6). Done since, on the same branch:
+  - uploads take half a frame's tile time at most, by their measured
+    cost, and 16 tiles at most; the others wait for the next frame;
+  - the clock stops building where the estimate of a tile's cost is
+    wrong;
+  - the slowest frames' parts, parked tiles and the upload cost per tile
+    in the report.
+
+  The owner's fourth runs (2026-10-14, "M2.8 run 4"): **criterion 1
+  passes in all three** (iGPU zoom p99 13.5 ms). Zooming out is fine; while
+  zooming in, tiles or shapes "glitch in and out of existence" (what the
+  owner had called lag). The cause: a coarser stand-in drew only the tile
+  at the corner, though half-octave levels straddle up to four. Done
+  since: stand-ins cover the whole tile, or the tile counts as blank.
+
+  The owner's fifth runs (2026-10-14, "M2.8 run 5"): the zoom bug is
+  fixed in all three, and criterion 1 passes in all three again (iGPU
+  zoom p99 12.8 ms). **M2.8 is done** ("M2.8: done" in `m2-gate.md`).
+  The owner saw a freeze before the palette opened: the search re-rendered
+  every visible card tile per keystroke. Done since: the search dims over
+  the tiles; the report has the longest frame intervals of the run.
+
+  Next: **M2.9 Wrap-up**: the review of all M2 code, developer docs on the
+  website, a last gate run (with the search fix, and the manual checklist
+  for criteria 4 and 5, not reported yet), the tag `v0.0.3-m2`. For M3
+  (canvas), from M2.8: covering the fill as a board opens (the owner: maybe
+  an animation) and the cards' text layout on the UI thread that limits
+  it; the cards board's slow frames on the iGPU (its first frame, and the
+  pan's frame 198); rendering the next level ahead while zooming in, if
+  needed; a window-wide memory budget for tile pages (22 pages, 352 MB).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -827,8 +886,8 @@ app runs. Two owner exceptions for M2:
   - **Decision (owner, 2026-10-13): we keep our toolkit.** Criterion 1's
     failure is in the canvas renderer, which a GPUI shell would keep. The
     checklist notes for criteria 4 and 5 hadn't come in yet.
-- [ ] **M2.8 Canvas on the integrated GPU** (the gate's follow-up). The
-  steps:
+- [x] **M2.8 Canvas on the integrated GPU** (done 2026-10-14; the gate's
+  follow-up). The steps:
   - The script settles before each shapes phase, so criterion 2 is
     measured on its own.
   - The report times the GPU and records the monitor's size and scale.
@@ -843,6 +902,16 @@ app runs. Two owner exceptions for M2:
     the first-frame cause on the iGPU. On the VM the first text tile frame
     stalled in wgpu's clear of a 64 MB atlas page; it is now a 16 MB
     page.
+  - The owner's runs (2026-10-14): C1 passes on the dGPU, the iGPU misses
+    only the zoom's p99 (17.7 ms); C2 passes. Tiles filled the screen
+    over 22–31 frames, and single tile submissions stalled for 58–117 ms
+    on the iGPU.
+  - Done (2026-10-14, ADR-0019): tiles on worker threads (`vello_cpu`),
+    tile pages on the GPU, smaller GPU memory blocks, nearest sampling at
+    1:1, items painted in place, glyph atlas up to 32 pages. Whether
+    tiles still need a compositor pass of their own is for the next
+    run's GPU times to say.
+  - Next: the owner's fourth set of runs, criteria 1 and 2 on the iGPU.
 - [ ] **M2.9 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.

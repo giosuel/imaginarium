@@ -24,6 +24,71 @@ pub enum CpuMode {
     Fast,
 }
 
+impl CpuMode {
+    fn settings(self) -> (RenderSettings, RenderMode) {
+        match self {
+            Self::Deterministic => (
+                RenderSettings {
+                    level: Level::baseline(),
+                    num_threads: 0,
+                },
+                RenderMode::OptimizeQuality,
+            ),
+            Self::Fast => (
+                RenderSettings {
+                    num_threads: 0,
+                    ..RenderSettings::default()
+                },
+                RenderMode::OptimizeSpeed,
+            ),
+        }
+    }
+
+    /// A drawing context for `width × height` in this mode, on the calling
+    /// thread.
+    pub(crate) fn context(self, width: u16, height: u16) -> RenderContext {
+        RenderContext::new_with(width, height, self.settings().0)
+    }
+}
+
+/// Draws `scene` with `context` (reset first, at its size) into a new
+/// pixmap, cleared to `background`.
+pub(crate) fn draw(
+    context: &mut RenderContext,
+    resources: &mut Resources,
+    mode: CpuMode,
+    scene: &Scene,
+    textures: Textures<'_>,
+    background: Color,
+) -> Pixmap {
+    context.reset();
+    replay(
+        scene,
+        &mut Target {
+            context: &mut *context,
+            resources: &mut *resources,
+            glyph_atlas: false,
+            bitmap_fonts: None,
+            transform: Affine::IDENTITY,
+            textures,
+            missing: 0,
+        },
+        Affine::IDENTITY,
+    );
+    context.flush();
+    let mut pixmap = Pixmap::new(context.width(), context.height());
+    context.render_with(
+        &mut pixmap,
+        resources,
+        RasterizerSettings {
+            render_mode: mode.settings().1,
+            target_init: vello_cpu::TargetInit::Clear(background),
+            ..RasterizerSettings::default()
+        },
+    );
+    pixmap
+}
+
 /// Renders scenes into pixmaps on the CPU (`vello_cpu`): the fallback when
 /// there is no usable GPU, headless export, and golden-image tests (CI has
 /// no GPU).
@@ -44,48 +109,17 @@ impl CpuRenderer {
         }
     }
 
-    fn settings(&self) -> (RenderSettings, RenderMode) {
-        match self.mode {
-            CpuMode::Deterministic => (
-                RenderSettings {
-                    level: Level::baseline(),
-                    num_threads: 0,
-                },
-                RenderMode::OptimizeQuality,
-            ),
-            CpuMode::Fast => (RenderSettings::default(), RenderMode::OptimizeSpeed),
-        }
-    }
-
     /// Draws `scene` into a new pixmap, cleared to `background`.
     fn draw(&mut self, scene: &Scene, width: u16, height: u16, background: Color) -> Pixmap {
-        let (settings, render_mode) = self.settings();
-        let mut context = RenderContext::new_with(width, height, settings);
-        replay(
-            scene,
-            &mut Target {
-                context: &mut context,
-                resources: &mut self.resources,
-                glyph_atlas: false,
-                bitmap_fonts: None,
-                transform: Affine::IDENTITY,
-                textures: Textures::Pixmaps(&self.textures),
-                missing: 0,
-            },
-            Affine::IDENTITY,
-        );
-        context.flush();
-        let mut pixmap = Pixmap::new(width, height);
-        context.render_with(
-            &mut pixmap,
+        let mut context = self.mode.context(width, height);
+        draw(
+            &mut context,
             &mut self.resources,
-            RasterizerSettings {
-                render_mode,
-                target_init: vello_cpu::TargetInit::Clear(background),
-                ..RasterizerSettings::default()
-            },
-        );
-        pixmap
+            self.mode,
+            scene,
+            Textures::Pixmaps(&self.textures),
+            background,
+        )
     }
 
     /// Renders `scene` into a new `width × height` pixmap (premultiplied
@@ -107,6 +141,11 @@ impl CpuRenderer {
                         self.draw(scene, (*width).max(1), (*height).max(1), Color::TRANSPARENT);
                     self.textures.insert(*key, Arc::new(pixmap));
                 }
+                TextureWork::Upload { key, pixmap } => {
+                    self.textures.insert(*key, Arc::clone(&pixmap.0));
+                }
+                // Pixmaps need no room made ahead.
+                TextureWork::Expect(_) => {}
             }
         }
         self.draw(scene, width, height, background)

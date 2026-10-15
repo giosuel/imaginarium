@@ -159,11 +159,34 @@ trait Backend {
 
 ## 9. Threads
 
-M2 rasterizes on the UI thread within the per-frame budget. Prefetching
-off-screen tiles and other levels moves to the worker pool later (PLAN
-§4.3): tile rendering is independent per tile, and `vello_cpu` can
-already use several threads. Nothing in the design assumes threads, which
-also keeps a browser (wasm) build possible.
+Since M2.8, tiles render on **tile worker threads** with `vello_cpu`
+(ADR-0019; `TileWorkers`, `Canvas::with_workers`):
+
+1. The UI thread paints a tile's items into a scene, within the frame's
+   budget, and hands it over. The content stays on the UI thread: it
+   isn't shared between threads.
+2. A worker renders the scene into a pixmap and sends it back.
+3. Until then, frames show a stand-in. The frame after the tile comes
+   back uploads it (`Scene::upload_texture`) and draws it. Uploads take
+   half the frame's tile time at most, by their measured cost per tile
+   (`Canvas::note_render_time`), and 16 tiles at most. The others wait
+   for the next frame, the current level's first; building gets what
+   the uploads leave. On the gate laptop's Intel GPU, a frame that
+   uploaded all 57 tiles that came back took 13 ms for it.
+4. A tile nothing can stand in for (newly in view, or every tile when a
+   board opens) would show blank until then. For those, the frame that
+   hands them over waits up to 4 ms, within what the rest of the frame
+   leaves of 12 ms (their uploads included), and draws the ones back by
+   then (`Canvas::with_blank_wait`).
+5. Each thread has at most 8 tiles at once, counting those back and
+   waiting to be uploaded, so the queue follows what is on screen.
+6. On the GPU, uploaded tiles share pages of 64. The canvas says how many
+   new tiles are coming (`Scene::expect_uploads`), so pages are made on a
+   thread of their own while the workers render.
+
+Without workers, tiles render in the frame on the GPU, as in M2.5. That
+also keeps a browser (wasm) build possible. Prefetching off-screen tiles
+and other levels comes later, on the same workers.
 
 ## 10. What M2.5 implemented
 
@@ -183,16 +206,22 @@ also keeps a browser (wasm) build possible.
   (the gate laptop: about 12 µs per unit, in panning and zooming alike),
   and follows the renderer's measured time for the last frame's tiles
   (`Canvas::note_render_time`, from `FrameTiming::textures`). Once a tile
-  doesn't fit, the rest wait. Since M2.8, tile work also leaves room for
+  doesn't fit, the rest wait; and since M2.8 the clock stops building
+  where the estimate is wrong. Since M2.8, tile work also leaves room for
   the rest of the frame (painting, encoding, submitting;
-  `Canvas::note_rest_of_frame`): it gets 12 ms minus that, between 1 and
-  6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
+  `Canvas::note_rest_of_frame`, which leaves out the canvas's own part):
+  it gets 12 ms minus that, between 1 and 6 ms. A present that blocks doesn't count (`FrameTiming::present`; on
   the VM's software GPU it waits 12–14 ms for the frame). A fullscreen frame on the gate laptop encoded for 4–5 ms, and the
   full 6 ms on top made the p99 17.5–17.8 ms.
-- **Stand-ins:** a stale copy, the nearest coarser cached level (zooming
-  in) or the nearest finer level's cached tiles (zooming out), clipped.
-  Tiles with no stand-in render first, then stale ones, then those another
-  level stands in for; nearest the middle first within each.
+- **Stand-ins:** a stale copy, or the nearest level whose cached tiles
+  cover the whole tile, coarser first (zooming in), then finer (zooming
+  out), clipped. Levels are half octaves apart, so a tile straddles up to
+  four of the next level's: a stand-in needs them all (since M2.8; before,
+  a coarser stand-in was the one tile at the corner, and the rest of the
+  tile stayed empty). Failing that, the nearest level with any covers
+  part of it, and the tile counts as blank. Blank tiles (in whole or in
+  part) render first, then stale ones, then those another level stands
+  in for; nearest the middle first within each.
 - **Empty tiles** need no texture: valid at once, nothing drawn, no budget.
 - **Tiles are textures:** `Scene::render_texture` renders a tile's scene
   into a texture the backend keeps, `Scene::draw_texture` draws it,
@@ -201,8 +230,11 @@ also keeps a browser (wasm) build possible.
   bound as external textures of the frame; the CPU backend keeps pixmaps,
   so golden images cover it. A tile drawn at 1:1 on whole device pixels
   equals drawing its items directly (tested).
-- **Overlays** (hover outlines, the edited card, selection outlines) are
-  drawn live on top and never dirty tiles. A **drag lifts** the selected
+- **Overlays** (hover outlines, the edited card, selection outlines, the
+  search's dimming) are drawn live on top and never dirty tiles. State
+  that changes with every keystroke or pointer move belongs there: a
+  search that dimmed cards in the tiles made every visible tile render
+  again per keystroke (M2.8). A **drag lifts** the selected
   shapes out of the tiles: their tiles render once without them, the
   shapes are drawn live while they move, and they go back into the tiles
   when the drag ends.
@@ -226,8 +258,7 @@ also keeps a browser (wasm) build possible.
   atlas on the GPU, and bigger runs are cached at 128 and scaled up (emoji
   bitmaps are 109 pixels per em). Still unsupported: rotated or skewed
   bitmap glyphs (the atlas refuses them), which nothing draws yet.
-- Not yet: rendering tiles on worker threads, prefetching the margin ring,
-  and partial tile updates.
+- Not yet: prefetching the margin ring, and partial tile updates.
 
 Measured in the gate app (llvmpipe VM, M2.5): with tiles, a pan frame
 encodes in 1.4 ms instead of 4.7 ms for the 10,000 shapes, and 1.6 ms
@@ -262,3 +293,34 @@ run):**
     frame number.
   - `FrameTiming::textures_create` and `textures_submit` split the tile
     work's CPU time.
+- **Tiles render on worker threads** (section 9, ADR-0019), from the
+  gate's M2.8 run: a fullscreen board filled over about 30 frames,
+  ring by ring, and the UI thread rendered 1.4–3 tiles per frame.
+  - The workers have at most 4 tiles per thread at once; the rest wait
+    for a later frame.
+  - A tile whose items change while a worker has it comes back stale and
+    goes again.
+  - A tile a worker fails to render is left empty, not tried again in
+    every frame.
+  - The time budget now covers the UI thread's part: painting the items
+    (a tile's fixed cost is 8 units instead of 50) and the uploads.
+  - On the VM (4 threads, 1280×800) the shapes pan's tiles filled in
+    47 ms instead of 196 ms.
+- **Tile pages:** on the GPU, uploaded 256² textures share 2048² pages
+  (64 tiles, 16 MB). A frame draws a page's tiles with one binding,
+  instead of a draw and a bind group per tile. Pages are made ahead of
+  need on a thread of their own and cleared there: a screenful at the
+  first upload, then one in reserve.
+- **Smaller GPU memory blocks** (wgpu's `MemoryUsage` hint: 8–64 MB
+  rather than 128–256 MB). The laptop's Intel GPU stalled in single tile
+  submissions for 58–117 ms. The likely cause is new memory blocks backed
+  when a submission first uses them; that isn't proven.
+- **Nearest sampling at 1:1:** a texture drawn one texel per pixel on
+  whole pixels is sampled nearest. That gives the same pixels, with one
+  load per pixel on the GPU instead of four.
+- **Items paint straight into the tile's scene** (`Scene::paint_with`),
+  without a scene of their own that is then copied. A dense zoomed-out
+  tile's painting took 0.31 ms and now takes 0.21–0.23 ms on the VM.
+- **The glyph atlas takes up to 32 pages** (Vello's limit of 8 assumed
+  4096² pages). A full atlas would draw glyphs directly, which vello_gpu
+  can't do for color emoji.
