@@ -49,6 +49,10 @@ pub struct GpuOptions {
     /// GPU can ([`FrameTiming::gpu`]). For measuring; it costs a few
     /// timestamps and a small read-back per frame.
     pub gpu_times: bool,
+    /// Keep drawing into a surface the driver calls suboptimal, instead of
+    /// setting it up again before the next frame. For measuring what the
+    /// set-ups cost ([`FrameTiming::reconfigured`]).
+    pub keep_suboptimal: bool,
 }
 
 /// What the GPU is, for reports.
@@ -329,6 +333,14 @@ pub struct FrameTiming {
     /// The GPU's time for an earlier frame, read back by now (with
     /// [`GpuOptions::gpu_times`]); its number says which.
     pub gpu: Option<GpuFrameTime>,
+    /// The driver called this frame's texture suboptimal: it still works,
+    /// but the surface no longer matches what the window system wants.
+    pub suboptimal: bool,
+    /// The surface was set up again before this frame, because the last
+    /// texture was suboptimal. That is part of `acquire`.
+    pub reconfigured: bool,
+    /// Frames skipped since the last presented one ([`Skip`]).
+    pub skipped_before: u32,
 }
 
 /// What happened to a frame.
@@ -370,6 +382,10 @@ pub struct WindowRenderer {
     /// The last texture was suboptimal: set the surface up again before
     /// the next one.
     reconfigure: bool,
+    /// [`GpuOptions::keep_suboptimal`].
+    keep_suboptimal: bool,
+    /// Frames skipped since the last presented one.
+    skipped: u32,
     /// The format Vello renders in: never sRGB, because Vello's colors are
     /// sRGB-encoded already and must not be encoded twice.
     view_format: wgpu::TextureFormat,
@@ -829,6 +845,8 @@ impl WindowRenderer {
             surface,
             config,
             reconfigure: false,
+            keep_suboptimal: options.keep_suboptimal,
+            skipped: 0,
             view_format,
             renderer,
             resources,
@@ -925,15 +943,18 @@ impl WindowRenderer {
             scene.texture_work(),
         )?;
         let textured = Instant::now();
-        if std::mem::take(&mut self.reconfigure) {
+        let reconfigured = std::mem::take(&mut self.reconfigure);
+        if reconfigured {
             self.surface.configure(&self.gpu.device, &self.config);
         }
+        let mut suboptimal = false;
         let skip = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => Ok(texture),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                 // Still drawable: draw it, and set up the surface again
                 // before the next frame.
-                self.reconfigure = true;
+                suboptimal = true;
+                self.reconfigure = !self.keep_suboptimal;
                 Ok(texture)
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
@@ -952,6 +973,7 @@ impl WindowRenderer {
         let texture = match skip {
             Ok(texture) => texture,
             Err(skip) => {
+                self.skipped = self.skipped.saturating_add(1);
                 self.finish_timing();
                 return Ok(FrameOutcome::Skipped(skip));
             }
@@ -1032,6 +1054,9 @@ impl WindowRenderer {
             tile_pages_coming: texture_stats.pages.coming,
             missing_textures,
             gpu,
+            suboptimal,
+            reconfigured,
+            skipped_before: std::mem::take(&mut self.skipped),
         }))
     }
 
