@@ -669,9 +669,6 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if FRAME_REQUESTED.with(|requested| requested.replace(false)) {
-            self.request_redraw();
-        }
         let now = Instant::now();
         let mut wake_at = self.view.wake_at();
         if wake_at.is_some_and(|at| at <= now) {
@@ -679,6 +676,10 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 self.request_redraw();
             }
             wake_at = self.view.wake_at().filter(|at| *at > now);
+        }
+        // After the timer, which may have asked for a frame too.
+        if FRAME_REQUESTED.with(|requested| requested.replace(false)) {
+            self.request_redraw();
         }
         // After the timer: it may have ended a scripted run.
         if self.view.should_close() {

@@ -18,10 +18,13 @@ bench = false
 accesskit.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+imaginarium-commands.workspace = true
+imaginarium-reactive.workspace = true
 imaginarium-render.workspace = true
 imaginarium-text.workspace = true
 imaginarium-ui.workspace = true
 serde_json.workspace = true
+taffy.workspace = true
 
 [lints]
 workspace = true

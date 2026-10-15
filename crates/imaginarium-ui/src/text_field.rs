@@ -12,6 +12,7 @@ use imaginarium_render::peniko::Color;
 use imaginarium_text::{Edit, Editor, Fonts, Motion, TextStyle};
 
 use crate::access::{AccessTree, rect};
+use crate::clipboard::Clipboard;
 use crate::window::{Ime, Input, Key, Modifiers};
 
 /// The caret is on, then off, for this long.
@@ -113,6 +114,63 @@ impl TextField {
         self.fit(Rect::new(0.0, 0.0, width, 0.0));
         let size = self.editor.size(fonts);
         Size::new(width, size.height + 2.0 * self.padding)
+    }
+
+    /// Like [`TextField::input`], with copy, cut and paste (Ctrl/⌘ + C, X,
+    /// V; Shift+Delete and Shift+Insert as well).
+    pub fn input_with_clipboard(
+        &mut self,
+        fonts: &mut Fonts,
+        input: &Input,
+        bounds: Rect,
+        clipboard: &mut Clipboard,
+    ) -> FieldResponse {
+        if let Input::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = input
+            && self.focused
+        {
+            let command = |c: &str| {
+                modifiers.command()
+                    && matches!(key, Key::Character(typed) if typed.eq_ignore_ascii_case(c))
+            };
+            let copy = command("c") || (modifiers.ctrl && *key == Key::Other("Insert".into()));
+            let cut = command("x") || (modifiers.shift && *key == Key::Delete);
+            let paste = command("v") || (modifiers.shift && *key == Key::Other("Insert".into()));
+            if copy || cut {
+                if let Some(text) = self.editor.selected_text() {
+                    clipboard.set_text(text);
+                }
+                let before = self.editor.text();
+                if cut {
+                    self.editor.edit(fonts, Edit::Delete);
+                }
+                self.blink_epoch = Instant::now();
+                return FieldResponse {
+                    handled: true,
+                    repaint: cut,
+                    changed: self.editor.text() != before,
+                    ..FieldResponse::default()
+                };
+            }
+            if paste {
+                let before = self.editor.text();
+                if let Some(text) = clipboard.text() {
+                    self.editor.insert(fonts, &text);
+                }
+                self.blink_epoch = Instant::now();
+                return FieldResponse {
+                    handled: true,
+                    repaint: true,
+                    changed: self.editor.text() != before,
+                    ..FieldResponse::default()
+                };
+            }
+        }
+        self.input(fonts, input, bounds)
     }
 
     /// Handles an input for a field at `bounds`.

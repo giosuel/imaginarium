@@ -31,6 +31,10 @@ const SCORE_MATCH: f64 = 1.0;
 const BONUS_WORD_START: f64 = 6.0;
 const BONUS_CONSECUTIVE: f64 = 4.0;
 const BONUS_FIELD_START: f64 = 4.0;
+/// The whole query word is the start of a word in the field ("tab" in
+/// "table"): beats a scattered match that happens to hit two word starts
+/// ("tab" in "text box above").
+const BONUS_WORD_PREFIX: f64 = 6.0;
 const PENALTY_GAP: f64 = 0.2;
 const MAX_GAP_PENALTY: f64 = 3.0;
 
@@ -314,6 +318,7 @@ fn fuzzy_score(word: &[char], field: &Field) -> Option<f64> {
         }
         let mut previous = start;
         let mut matched = true;
+        let mut contiguous = field.word_start[start];
         for &c in rest {
             let Some(offset) = text[previous + 1..].iter().position(|&t| t == c) else {
                 matched = false;
@@ -324,6 +329,7 @@ fn fuzzy_score(word: &[char], field: &Field) -> Option<f64> {
             if offset == 0 {
                 score += BONUS_CONSECUTIVE;
             } else {
+                contiguous = false;
                 score -= (offset as f64 * PENALTY_GAP).min(MAX_GAP_PENALTY);
             }
             previous = position;
@@ -331,6 +337,9 @@ fn fuzzy_score(word: &[char], field: &Field) -> Option<f64> {
         if !matched {
             // Later starts only leave less text, so they can't match either.
             break;
+        }
+        if contiguous {
+            score += BONUS_WORD_PREFIX;
         }
         best = Some(best.map_or(score, |b: f64| b.max(score)));
     }
@@ -412,6 +421,22 @@ mod tests {
             "word-start initials"
         );
         assert_eq!(top(&index, "ins shp")[0], "board.insert_shape");
+    }
+
+    #[test]
+    fn a_word_prefix_beats_a_scattered_match_over_word_starts() {
+        // "tab" hits two word starts in "text box above" (t…a b), but is the
+        // start of "table": the table wins.
+        let mut index = SearchIndex::new();
+        index.insert(
+            CommandId::new("a.text_box"),
+            "Insert text box above",
+            &[],
+            "View",
+        );
+        index.insert(CommandId::new("b.table"), "Insert table", &[], "Edit");
+        assert_eq!(top(&index, "ins tab")[0], "b.table");
+        assert_eq!(top(&index, "tab")[0], "b.table");
     }
 
     #[test]

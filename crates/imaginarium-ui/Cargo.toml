@@ -15,8 +15,11 @@ bench = false
 [dependencies]
 accesskit.workspace = true
 accesskit_winit.workspace = true
+arboard.workspace = true
+imaginarium-reactive.workspace = true
 imaginarium-render.workspace = true
 imaginarium-text.workspace = true
+taffy.workspace = true
 thiserror.workspace = true
 winit.workspace = true
 

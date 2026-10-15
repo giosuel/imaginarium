@@ -20,13 +20,17 @@
 //!   swapchain wait, and frame-to-frame intervals.
 //! - Scripted typing into the search field: handling a keystroke
 //!   (editing, searching 2,000 cards) and the frame after it.
+//! - Scripted typing into the command palette (criterion 3): the search
+//!   over 2,000 commands, the widget tree's layout, paint and encode.
 //! - Idle: CPU used and frames drawn while nothing happens (criterion 6).
 //! - The GPU and machine it ran on.
 
 mod app;
 mod board;
+mod commands;
 mod content;
 mod proc;
+mod widgets;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -63,6 +67,12 @@ struct Args {
     /// How many cards the board shows.
     #[arg(long, default_value_t = 2_000)]
     cards: usize,
+    /// How many commands the palette searches.
+    #[arg(long, default_value_t = 2_000)]
+    commands: usize,
+    /// Keystrokes of scripted typing into the command palette to time.
+    #[arg(long, default_value_t = 60)]
+    palette_keys: u32,
     /// Which GPU: the power-saving one (usually integrated) or the fast one.
     #[arg(long, value_enum, default_value_t = GpuChoice::Low)]
     gpu: GpuChoice,
@@ -93,6 +103,8 @@ enum GpuChoice {
 
 /// What the scripted typing types, one character per frame.
 const TYPED: &str = "quarterly planning review notes";
+/// What the scripted palette typing types.
+const COMMAND: &str = "insert table rotate image align left";
 
 /// Where the scripted run is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,6 +115,8 @@ enum Phase {
     Pan(u32),
     /// Typing into the search field, with this many keystrokes to go.
     Type(u32),
+    /// Typing into the command palette, with this many keystrokes to go.
+    Palette(u32),
     /// Waiting for the frame that shows the cleared search, so the idle
     /// measurement starts with nothing left to draw.
     Settle,
@@ -133,6 +147,8 @@ struct Gate {
     /// Layouts built during the pan (text cache misses).
     pan_layouts: usize,
     typing: Vec<KeySample>,
+    palette_keys: u32,
+    palette: Vec<PaletteSample>,
     /// The handling time of the keystroke whose frame comes next.
     pending_key: Option<(Duration, Duration)>,
     typed: usize,
@@ -157,6 +173,17 @@ struct KeySample {
     search: Duration,
     paint: Duration,
     encode: Duration,
+}
+
+/// One scripted palette keystroke and the frame after it.
+#[derive(Clone, Copy, Debug)]
+struct PaletteSample {
+    handle: Duration,
+    search: Duration,
+    layout: Duration,
+    paint: Duration,
+    encode: Duration,
+    repainted: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -184,8 +211,33 @@ impl Gate {
         let c = chars[self.typed % chars.len()];
         let start = Instant::now();
         self.app.type_text(&c.to_string());
-        self.pending_key = Some((start.elapsed(), self.app.last_search));
+        self.pending_key = Some((start.elapsed(), self.app.last_search.get()));
         self.typed += 1;
+    }
+
+    /// Types the next character of [`COMMAND`] into the palette.
+    fn palette_key(&mut self) {
+        let chars: Vec<char> = COMMAND.chars().collect();
+        if self.typed > 0 && self.typed.is_multiple_of(chars.len()) {
+            self.app.close_palette();
+        }
+        let c = chars[self.typed % chars.len()];
+        let start = Instant::now();
+        self.app.type_command(&c.to_string());
+        self.pending_key = Some((start.elapsed(), Duration::ZERO));
+        self.typed += 1;
+    }
+
+    fn after_typing(&mut self) -> bool {
+        self.app.clear_search();
+        if self.palette_keys > 0 {
+            self.typed = 0;
+            self.phase = Phase::Palette(self.palette_keys);
+            self.palette_key();
+        } else {
+            self.phase = Phase::Settle;
+        }
+        true
     }
 
     fn after_pan(&mut self) -> bool {
@@ -241,7 +293,7 @@ impl View for Gate {
             }
             Phase::Start if self.pan_frames > 0 => {
                 self.phase = Phase::Pan(self.pan_frames);
-                self.app.board.pan(Vec2::new(-6.0, -3.0));
+                self.app.pan_board(Vec2::new(-6.0, -3.0));
                 true
             }
             Phase::Start => self.after_pan(),
@@ -253,10 +305,10 @@ impl View for Gate {
                     submit: frame.render.submit,
                     interval,
                 });
-                self.pan_layouts += self.app.board.last_layouts;
+                self.pan_layouts += self.app.board.borrow().last_layouts;
                 if left > 1 {
                     self.phase = Phase::Pan(left - 1);
-                    self.app.board.pan(Vec2::new(-6.0, -3.0));
+                    self.app.pan_board(Vec2::new(-6.0, -3.0));
                     true
                 } else {
                     self.after_pan()
@@ -282,10 +334,31 @@ impl View for Gate {
                 } else {
                     // Leave the field, or its caret would blink through
                     // the idle measurement.
-                    self.app.clear_search();
-                    self.phase = Phase::Settle;
-                    true
+                    self.after_typing()
                 }
+            }
+            Phase::Palette(left) => {
+                if let Some((handle, _)) = self.pending_key.take() {
+                    let tree = self.app.tree_stats();
+                    self.palette.push(PaletteSample {
+                        handle,
+                        // The memo searches when the list reads it (in
+                        // layout), so it is timed there.
+                        search: self.app.last_palette_search.get(),
+                        layout: tree.layout.unwrap_or_default(),
+                        paint: frame.paint,
+                        encode: frame.render.encode,
+                        repainted: tree.repainted,
+                    });
+                }
+                if left > 1 {
+                    self.phase = Phase::Palette(left - 1);
+                    self.palette_key();
+                } else {
+                    self.app.close_palette();
+                    self.phase = Phase::Settle;
+                }
+                true
             }
             _ => false,
         }
@@ -317,7 +390,8 @@ impl View for Gate {
             return false;
         }
         // A caret blink.
-        true
+        self.app.wake(now);
+        false
     }
 
     fn should_close(&mut self) -> bool {
@@ -383,7 +457,9 @@ fn main() -> anyhow::Result<()> {
     let fonts = Fonts::new();
     let fonts_time = fonts_started.elapsed();
     let mut gate = Gate {
-        app: App::new(fonts, args.cards),
+        app: App::new(fonts, args.cards, args.commands),
+        palette_keys: args.palette_keys,
+        palette: Vec::new(),
         measure: args.measure,
         pan_frames: args.pan_frames,
         type_keys: args.type_keys,
@@ -412,6 +488,15 @@ fn main() -> anyhow::Result<()> {
     let pan = |field: fn(&FrameSample) -> Duration| gate.pan.iter().map(field).collect::<Vec<_>>();
     let typing =
         |field: fn(&KeySample) -> Duration| gate.typing.iter().map(field).collect::<Vec<_>>();
+    let palette =
+        |field: fn(&PaletteSample) -> Duration| gate.palette.iter().map(field).collect::<Vec<_>>();
+    let palette_search_p95 = {
+        let mut searches = palette(|sample| sample.search);
+        searches.sort_unstable();
+        searches
+            .get((searches.len().saturating_sub(1)) * 95 / 100)
+            .copied()
+    };
     let idle = gate.idle_result.map(|idle| {
         serde_json::json!({
             "seconds": idle.wall.as_secs_f64(),
@@ -425,7 +510,7 @@ fn main() -> anyhow::Result<()> {
     });
     let report = serde_json::json!({
         "gate_version": env!("CARGO_PKG_VERSION"),
-        "milestone": "M2.3",
+        "milestone": "M2.4",
         "mode": if args.measure { "measure" } else { "manual" },
         "machine": proc::machine(),
         "gpu": stats.gpu.as_ref().map(|gpu| serde_json::json!({
@@ -451,7 +536,7 @@ fn main() -> anyhow::Result<()> {
             // Criterion 6: cold start under 400 ms.
             "pass": stats.first_frame.map(|first| before_main.unwrap_or_default() + before_run + first < Duration::from_millis(400)),
         },
-        "content": { "cards": gate.app.board.cards() },
+        "content": { "cards": gate.app.board.borrow().cards(), "commands": args.commands },
         "pan": {
             // The toolkit's share: the view building its scene.
             "paint": summary(pan(|sample| sample.paint)),
@@ -473,6 +558,21 @@ fn main() -> anyhow::Result<()> {
             "search": summary(typing(|sample| sample.search)),
             "paint": summary(typing(|sample| sample.paint)),
             "encode": summary(typing(|sample| sample.encode)),
+        },
+        "palette": {
+            // Criterion 3: the search over all commands per keystroke.
+            "search": summary(palette(|sample| sample.search)),
+            "handle": summary(palette(|sample| sample.handle)),
+            // The widget tree's share: Taffy layout, and painting the
+            // widgets that changed.
+            "layout": summary(palette(|sample| sample.layout)),
+            "paint": summary(palette(|sample| sample.paint)),
+            "encode": summary(palette(|sample| sample.encode)),
+            "repainted_widgets_mean": if gate.palette.is_empty() { 0.0 } else {
+                gate.palette.iter().map(|sample| sample.repainted as f64).sum::<f64>() / gate.palette.len() as f64
+            },
+            "widgets": gate.app.tree_stats().widgets,
+            "pass": palette_search_p95.map(|p95| p95 < Duration::from_millis(1)),
         },
         "idle": idle,
         "frames": stats.frames,
