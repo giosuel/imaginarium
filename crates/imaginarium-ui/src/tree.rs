@@ -604,6 +604,7 @@ impl Ui {
             self.call(fonts, new, |widget, cx| widget.focus_changed(cx, true));
             self.mark(new, false);
         }
+        crate::window::reset_ime();
         request_frame();
     }
 
