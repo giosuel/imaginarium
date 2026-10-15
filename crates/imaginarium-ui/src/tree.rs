@@ -912,7 +912,7 @@ impl Ui {
                 }
                 handled
             }
-            Input::Key { .. } | Input::Ime(_) | Input::WindowFocus(_) => {
+            Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
                 let handled = match self.focus {
                     Some(target) => self.bubble(fonts, target, input),
                     None => self.bubble(fonts, root, input),

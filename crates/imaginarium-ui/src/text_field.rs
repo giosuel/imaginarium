@@ -120,7 +120,8 @@ impl TextField {
     }
 
     /// Like [`TextField::input`], with copy, cut and paste (Ctrl/⌘ + C, X,
-    /// V; Shift+Delete and Shift+Insert as well).
+    /// V; Shift+Delete and Shift+Insert as well). A paste asks the
+    /// clipboard for its text, which comes back as [`Input::Paste`].
     pub fn input_with_clipboard(
         &mut self,
         fonts: &mut Fonts,
@@ -163,15 +164,11 @@ impl TextField {
                 };
             }
             if paste {
-                let before = self.editor.text();
-                if let Some(text) = clipboard.text() {
-                    self.editor.insert(fonts, &text);
-                }
-                self.blink_epoch = Instant::now();
+                // The text arrives as `Input::Paste`: reading the
+                // clipboard may wait for another app.
+                clipboard.request_text();
                 return FieldResponse {
                     handled: true,
-                    repaint: true,
-                    changed: self.editor.text() != before,
                     ..FieldResponse::default()
                 };
             }
@@ -251,6 +248,13 @@ impl TextField {
                         }
                     },
                 }
+            }
+            Input::Paste(text) if self.focused => {
+                if !self.editor.is_composing() {
+                    self.editor.insert(fonts, text);
+                }
+                response.handled = true;
+                response.repaint = true;
             }
             Input::Ime(ime) if self.focused => {
                 match ime {

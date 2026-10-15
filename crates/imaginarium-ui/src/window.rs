@@ -199,6 +199,10 @@ pub enum Input {
     /// Input method events, while [`View::ime_area`] says a text field
     /// has the focus.
     Ime(Ime),
+    /// Text read from the clipboard after a
+    /// [`Clipboard::request_text`](crate::Clipboard::request_text), for
+    /// the focused widget.
+    Paste(String),
     /// The window gained (`true`) or lost the keyboard focus.
     WindowFocus(bool),
 }
@@ -363,6 +367,8 @@ impl<V: View + ?Sized> View for &mut V {
 #[derive(Debug)]
 enum UserEvent {
     Access(accesskit_winit::Event),
+    /// The clipboard's thread read a text.
+    Pasted,
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -467,6 +473,10 @@ pub fn run_with_gpu(
         .map_err(|err| UiError::EventLoop(err.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    let waker = proxy.clone();
+    crate::clipboard::set_waker(move || {
+        let _ = waker.send_event(UserEvent::Pasted);
+    });
     let mut shell = Shell {
         options,
         view,
@@ -747,7 +757,15 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Access(event) = event;
+        let event = match event {
+            UserEvent::Access(event) => event,
+            UserEvent::Pasted => {
+                for text in crate::clipboard::take_pasted() {
+                    self.deliver(Input::Paste(text));
+                }
+                return;
+            }
+        };
         match event.window_event {
             accesskit_winit::WindowEvent::InitialTreeRequested => self.update_access(),
             accesskit_winit::WindowEvent::ActionRequested(request) => {
