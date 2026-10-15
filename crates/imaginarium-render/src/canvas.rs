@@ -1397,6 +1397,17 @@ mod tests {
         (canvas, boxes)
     }
 
+    /// The frame that rendered the most tiles of a few. Besides the
+    /// estimate, the clock stops a frame's tile renders, so a busy machine
+    /// (a CI runner) renders fewer: never more. The most is what the
+    /// estimate allows.
+    fn most_rendered(mut frame: impl FnMut() -> CanvasStats) -> CanvasStats {
+        (0..10)
+            .map(|_| frame())
+            .max_by_key(|stats| stats.rendered)
+            .unwrap_or_default()
+    }
+
     fn viewport(origin: Point, zoom: f64) -> Viewport {
         Viewport {
             origin,
@@ -1583,7 +1594,10 @@ mod tests {
         let now = Instant::now();
         let view = viewport(Point::ZERO, 1.0);
         // The first guess: a mid-range laptop.
-        let first = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        let first = most_rendered(|| {
+            canvas.invalidate_all();
+            canvas.frame(&mut Scene::new(), &view, now, &mut boxes)
+        });
         assert!(first.rendered > 1 && first.owed > 0, "{first:?}");
         // The renderer took 60 ms for them: far fewer next time.
         canvas.note_render_time(Duration::from_millis(60));
@@ -1598,8 +1612,10 @@ mod tests {
             canvas.invalidate_all();
             canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
         }
-        canvas.invalidate_all();
-        let fast = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+        let fast = most_rendered(|| {
+            canvas.invalidate_all();
+            canvas.frame(&mut Scene::new(), &view, now, &mut boxes)
+        });
         assert!(fast.rendered > slow.rendered, "{fast:?}");
     }
 
@@ -1610,14 +1626,15 @@ mod tests {
         let now = Instant::now();
         let view = viewport(Point::ZERO, 1.0);
         let mut rendered = |rest: Option<Duration>| {
-            if let Some(rest) = rest {
-                // The frame took this besides the canvas's own part.
-                canvas.note_rest_of_frame(rest + canvas.last_tile_work);
-            }
-            canvas.invalidate_all();
-            canvas
-                .frame(&mut Scene::new(), &view, now, &mut boxes)
-                .rendered
+            most_rendered(|| {
+                if let Some(rest) = rest {
+                    // The frame took this besides the canvas's own part.
+                    canvas.note_rest_of_frame(rest + canvas.last_tile_work);
+                }
+                canvas.invalidate_all();
+                canvas.frame(&mut Scene::new(), &view, now, &mut boxes)
+            })
+            .rendered
         };
         let unknown = rendered(None);
         // A light frame leaves the whole budget.
