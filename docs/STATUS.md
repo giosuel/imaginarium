@@ -8,13 +8,9 @@ Last updated: 2026-10-12
 
 ## Current position
 
-- **Phase:** **Phase A, M1 (Format, crypto, model)**. M0 is done (tag `v0.0.1-m0`).
-- **Next step:** finish **M1.8**: once the owner has merged PR #19 (tooling)
-  and the review PR (`fix/m1.8-review`), tag **`v0.0.2-m1`** (annotated, on
-  the merge commit in `main`). Then **M2: UI prototype gate** (PLAN §11,
-  ADR-0007): first break M2 into steps (`reactive`, a minimal `ui`, the tile
-  renderer, a stress-test app, the six pass criteria) and add them here as
-  a checklist.
+- **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
+  `v0.0.1-m0`, `v0.0.2-m1`).
+- **Next step:** **M2.0 Stack research** (see the M2 checklist below).
 - **Code status:** Cargo workspace with 11 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -263,7 +259,7 @@ Commit after each item. Each item lists its acceptance criteria (AC).
   - [x] #5–#8 merged. `main` CI green at `171c097`. Annotated tag
     **`v0.0.1-m0`** pushed.
 
-## M1: Format, crypto, model (checklist)
+## M1: Format, crypto, model ✅ (tag `v0.0.2-m1`)
 
 Use **xhigh/max effort** throughout. These crates are the hardest to change
 later. Commit after each item, and use one PR per item (or smaller). The
@@ -489,7 +485,7 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
       vectors);
     - 6 CLI tests running the binary: corrupt bytes, an interrupted save,
       a wrong password, and vectors 10a, 10b and 10c with the owner key.
-- [ ] **M1.8 Wrap-up** ← **next**:
+- [x] **M1.8 Wrap-up** (done 2026-10-12, PRs #19 and #20):
   - [x] **two-week rule automated**: `cargo xtask dep-age` checks every
     entry of every committed `Cargo.lock` against the crates.io sparse
     index `pubtime` (no API rate limit), and CI runs it in the deps job.
@@ -531,11 +527,82 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
       (Rust moves can't be zeroized reliably). Deferred: see Known issues.
   - [x] spec, schema and protobuf v1 **normative** (spec §14 records the
     review's changes); website `imag` page updated;
-  - [ ] tag `v0.0.2-m1` (after the merges).
+  - [x] tag `v0.0.2-m1` (annotated, on the merge commit `f95151c`).
+
+## M2: UI prototype gate (checklist)
+
+ADR-0007 makes our own toolkit conditional on a **time-boxed prototype**
+that meets six pass criteria on Linux, Windows and macOS with integrated
+GPUs. If a criterion fails in a way we can't fix, a new ADR switches the
+shell to GPUI. The prototype's crates are real crates, not throwaway code:
+they become the toolkit if the gate passes.
+
+Effort: **xhigh** for `reactive`, the `ui` core and `render`, **high** for
+`text` and the gate app. One branch and PR per step (or smaller).
+Screenshots go to the owner from M2.4 on (Xvfb + Mesa lavapipe).
+
+**This VM has no GPU** (and neither do the CI runners). Functional checks
+run here with lavapipe and the CPU backend. The frame-time criteria need
+real hardware (open question below). Until that's settled: measure
+everything we can here, and stop early if a criterion looks unfixable.
+
+- [ ] **M2.0 Stack research** ← **next**, written up in
+  `docs/design/m2-ui-stack.md` (like `m1-dependencies.md`):
+  - current versions and their compatibility: winit, wgpu, Vello and
+    `vello_cpu`, Parley/fontique/swash, Taffy, AccessKit and
+    `accesskit_winit`, Masonry (M0 measured winit 0.30, Vello 0.11,
+    Parley 0.12, Taffy 0.14, AccessKit 0.25: a starting point only);
+  - MSRV against our pinned Rust 1.99, the two-week rule, licenses, build
+    cost against the M0 baseline (1,415 CPU-s for the heavy stack);
+  - Masonry as a dependency or only as a reference (ADR-0007 leaves this
+    open). A new ADR if it changes 0007;
+  - IME, Wayland/X11, multi-window and mixed-DPI support in winit;
+    AccessKit on Orca, NVDA and VoiceOver;
+  - how each pass criterion is measured (frame-time stats and HUD from
+    `imaginarium-profiling`, tracy, idle CPU, cold start), and what can run
+    on this VM.
+- [ ] **M2.1 `imaginarium-reactive`**: signals, memos, effects, batching,
+  ownership scopes (disposal) and untracked reads, glitch-free (no
+  stale or doubled updates). Proptests for those invariants, benchmarks for
+  propagation cost with 10k signals. No UI dependencies.
+- [ ] **M2.2 `imaginarium-render`**:
+  - a display list per node and Vello scene building;
+  - a 256² tile cache per zoom bucket, dirty-tile tracking and a
+    compositor that pans without re-rasterizing;
+  - a backend trait: the `CpuBackend` first (golden-image tests), then the
+    `GpuBackend` on wgpu;
+  - benchmarks on `BoardFixture::LARGE` (10k shapes).
+- [ ] **M2.3 `imaginarium-text`** (minimal): Parley and fontique behind our
+  traits, a paragraph layout cache, and a bundled font for deterministic
+  tests. Enough for labels, the palette and one text field.
+- [ ] **M2.4 `imaginarium-ui`** (minimal):
+  - the winit event loop, and a retained widget tree bound to signals;
+  - Taffy layout, input routing, hit testing and focus;
+  - a text field with IME, and the AccessKit tree;
+  - HiDPI and per-monitor scale changes;
+  - one frame scheduler that sleeps when nothing changes.
+- [ ] **M2.5 Gate app** (a binary or an `imaginarium-app` mode, decided in
+  M2.0):
+  - the 10k-shape board from the fixtures, with pan, zoom and drag;
+  - the command palette over 2,000 commands, and a text field;
+  - the frame-time HUD (`F12`), and tracy zones that show dirty tiles.
+- [ ] **M2.6 Gate run**: the six criteria on the three OSes, results in
+  `docs/design/m2-gate.md`. Pass: ADR-0007 notes the passed gate. Fail on
+  a criterion we can't fix: a new ADR, fallback to GPUI.
+- [ ] **M2.7 Wrap-up**: code review (separate reviewer agents, medium
+  effort), developer docs on the website (`reactive`, `ui`, `render`),
+  STATUS, tag `v0.0.3-m2`.
 
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
+- **Which machines run the M2 gate?** It needs Linux, Windows and macOS
+  with integrated GPUs (ADR-0007). This VM has no GPU, and the CI runners
+  don't either. Options: the owner runs a prebuilt gate binary on their
+  machines and sends the report it writes, or a self-hosted runner.
+- **The M2 time box:** ADR-0007 asks for a time-boxed prototype but sets no
+  box. Default until decided: decide the gate after M2.5 at the latest, and
+  raise it early if a criterion looks unfixable.
 
 ## Known issues and notes
 
