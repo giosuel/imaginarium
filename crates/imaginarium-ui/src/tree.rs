@@ -712,6 +712,9 @@ impl Ui {
                 .unwrap_or_default();
             own.clear();
             self.call(fonts, id, |widget, cx| widget.paint(cx, &mut own));
+            // Texture work happens in this frame only; the cached scene is
+            // appended again in later frames.
+            own.move_texture_work(scene);
             if let Some(node) = self.node_mut(id) {
                 node.scene = own;
                 node.paint_dirty = false;

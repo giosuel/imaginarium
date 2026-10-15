@@ -159,7 +159,6 @@ pub struct Canvas {
     items: HashMap<ItemId, Item>,
     grid: HashMap<(i32, i32), Vec<ItemId>>,
     tiles: HashMap<TileKey, Tile>,
-    next_texture: u64,
     frame: u64,
     /// Tiles rendered per frame at most; the rest are owed.
     budget: usize,
@@ -188,7 +187,6 @@ impl Canvas {
             items: HashMap::new(),
             grid: HashMap::new(),
             tiles: HashMap::new(),
-            next_texture: 1 << 40,
             frame: 0,
             budget: 24,
             capacity: 1_000,
@@ -404,10 +402,7 @@ impl Canvas {
             }
             let texture = match self.tiles.get(&key) {
                 Some(tile) => tile.texture,
-                None => {
-                    self.next_texture += 1;
-                    TextureKey(self.next_texture)
-                }
+                None => TextureKey::unique(),
             };
             let mut tile_scene = Scene::new();
             // Document → level pixels → this tile's pixels.
@@ -460,9 +455,11 @@ impl Canvas {
             )
         };
         scene.push_clip(&viewport.screen);
-        // Stand-ins first: a stale copy, or the nearest coarser level.
+        // Stand-ins first: a stale copy, or the nearest coarser level. They
+        // count as drawn, so this frame's eviction keeps them.
         for key in &owed {
-            if let Some(tile) = self.tiles.get(key) {
+            if let Some(tile) = self.tiles.get_mut(key) {
+                tile.used = self.frame;
                 scene.draw_texture(tile.texture, TILE, TILE, dest(key));
                 continue;
             }
@@ -473,7 +470,8 @@ impl Canvas {
                     x: cx,
                     y: cy,
                 };
-                if let Some(tile) = self.tiles.get(&parent) {
+                if let Some(tile) = self.tiles.get_mut(&parent) {
+                    tile.used = self.frame;
                     scene.push_clip(&dest(key));
                     scene.draw_texture(tile.texture, TILE, TILE, dest(&parent));
                     scene.pop();
@@ -562,6 +560,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Command, TextureWork};
 
     /// Content that paints each item's bounds and counts paints.
     struct Boxes {
@@ -721,6 +720,56 @@ mod tests {
         assert_eq!(zoomed.level, level_for(1.3));
     }
 
+    /// Textures a scene both draws and frees (the renderer frees before it
+    /// draws).
+    fn drawn_and_freed(scene: &Scene) -> Vec<TextureKey> {
+        let freed: HashSet<TextureKey> = scene
+            .texture_work()
+            .iter()
+            .filter_map(|work| match work {
+                TextureWork::Free(key) => Some(*key),
+                TextureWork::Render { .. } => None,
+            })
+            .collect();
+        scene
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                Command::DrawTexture { key, .. } if freed.contains(key) => Some(*key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_stand_in_is_not_evicted_in_the_frame_it_is_drawn() {
+        let (mut canvas, mut boxes) = board(2_000);
+        let now = Instant::now();
+        // 5 × 4 tiles, all cached.
+        canvas.frame(
+            &mut Scene::new(),
+            &viewport(Point::ZERO, 1.0),
+            now,
+            &mut boxes,
+        );
+        assert_eq!(canvas.tiles.len(), 20);
+        // The corner tile goes stale; then a pan brings in a column of new
+        // tiles, but only one can render: the stale tile is owed, shown by
+        // its stale copy, and the cache is over capacity.
+        canvas.invalidate(Rect::new(10.0, 10.0, 20.0, 20.0));
+        canvas.budget = 1;
+        canvas.capacity = 20;
+        let mut scene = Scene::new();
+        let stats = canvas.frame(
+            &mut scene,
+            &viewport(Point::new(128.0, 0.0), 1.0),
+            now,
+            &mut boxes,
+        );
+        assert!(stats.owed > 0, "{stats:?}");
+        assert_eq!(drawn_and_freed(&scene), Vec::new());
+    }
+
     #[test]
     fn the_cache_evicts_the_least_recently_drawn_tiles() {
         let mut canvas = Canvas::new().with_limits(1_000, 40);
@@ -805,6 +854,72 @@ mod tests {
                     if !tile.stale {
                         let shown = rendered.get(key).cloned().unwrap_or_default();
                         proptest::prop_assert_eq!(&shown, &content_of(&canvas, *key), "tile {:?} is valid but stale", key);
+                    }
+                }
+            }
+        }
+
+        /// Every texture a frame draws exists when it is drawn: the frame's
+        /// texture work (renders, then releases) has been done, as a
+        /// renderer does it, and two canvases share the renderer. Small
+        /// limits make eviction and stand-ins (stale copies, coarser
+        /// levels) common.
+        #[test]
+        fn every_drawn_texture_exists(
+            ops in proptest::collection::vec(
+                (0u8..5, 0u64..60, -600.0f64..900.0, -600.0f64..900.0, 0.2f64..3.0, 0u64..400),
+                1..100,
+            )
+        ) {
+            let mut canvases = [Canvas::new().with_limits(3, 12), Canvas::new().with_limits(3, 12)];
+            let mut boxes = [
+                Boxes { bounds: HashMap::new(), painted: Vec::new() },
+                Boxes { bounds: HashMap::new(), painted: Vec::new() },
+            ];
+            let mut alive: HashSet<TextureKey> = HashSet::new();
+            let mut at = Instant::now();
+            for (op, id, x, y, zoom, millis) in ops {
+                let which = (id % 2) as usize;
+                let item = ItemId(id);
+                match op {
+                    0 | 1 => {
+                        // Revisiting the same few places keeps stale
+                        // copies and coarser levels around as stand-ins.
+                        let bounds = Rect::new(x, y, x + 80.0, y + 60.0);
+                        canvases[which].upsert(item, id, bounds);
+                        boxes[which].bounds.insert(item, bounds);
+                    }
+                    2 => {
+                        canvases[which].remove(item);
+                        boxes[which].bounds.remove(&item);
+                    }
+                    _ => {
+                        let view = Viewport {
+                            origin: Point::new((x / 300.0).round() * 300.0, (y / 300.0).round() * 300.0),
+                            zoom,
+                            screen: Rect::new(0.0, 0.0, 800.0, 600.0),
+                            scale_factor: 1.0,
+                        };
+                        // Sometimes within the zoom pause, so a held level
+                        // or a new one leaves tiles owed.
+                        at += Duration::from_millis(millis);
+                        let mut scene = Scene::new();
+                        canvases[which].frame(&mut scene, &view, at, &mut boxes[which]);
+                        for work in scene.texture_work() {
+                            match work {
+                                TextureWork::Render { key, .. } => {
+                                    alive.insert(*key);
+                                }
+                                TextureWork::Free(key) => {
+                                    alive.remove(key);
+                                }
+                            }
+                        }
+                        for command in scene.commands() {
+                            if let Command::DrawTexture { key, .. } = command {
+                                proptest::prop_assert!(alive.contains(key), "{:?} is drawn but doesn't exist", key);
+                            }
+                        }
                     }
                 }
             }

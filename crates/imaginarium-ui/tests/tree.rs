@@ -207,3 +207,44 @@ fn the_access_tree_has_roles_names_and_focus() {
     assert_eq!(button.1.label(), Some("Count"));
     assert_eq!(tree.focus().map(|id| id.0), Some(input.access_base()));
 }
+
+/// A widget that renders a texture once and draws it (what a canvas does).
+struct Textured(imaginarium_render::TextureKey);
+
+impl imaginarium_ui::Widget for Textured {
+    fn style(&self) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: taffy::style_helpers::length(64.0),
+                height: taffy::style_helpers::length(64.0),
+            },
+            ..taffy::Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut imaginarium_ui::Cx<'_>, scene: &mut Scene) {
+        let mut content = Scene::new();
+        content.fill(&Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+        scene.render_texture(self.0, 8, 8, content);
+        scene.draw_texture(self.0, 8, 8, cx.bounds());
+    }
+}
+
+#[test]
+fn a_cached_scene_does_not_render_its_textures_again() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let textured = ui.add(Textured(imaginarium_render::TextureKey::unique()));
+    let column = ui.add_with_children(Flex::column().fill(), &[textured]);
+    ui.set_root(column);
+    ui.layout(&mut fonts, AREA);
+    let mut first = Scene::new();
+    ui.paint(&mut fonts, &mut first);
+    assert_eq!(first.texture_renders(), 1);
+    let mut again = Scene::new();
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut again);
+    assert_eq!(ui.stats().repainted, 0);
+    assert_eq!(again.len(), first.len(), "still drawn, from the cache");
+    assert_eq!(again.texture_renders(), 0, "but not rendered again");
+}

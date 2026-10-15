@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use vello_common::paint::{Image, ImageSource};
@@ -55,10 +56,25 @@ pub(crate) enum Command {
 
 /// A texture the renderer keeps across frames for its owner (a canvas
 /// tile): rendered with [`Scene::render_texture`], drawn with
-/// [`Scene::draw_texture`], released with [`Scene::free_texture`]. The
-/// owner picks the keys.
+/// [`Scene::draw_texture`], released with [`Scene::free_texture`].
+///
+/// Keys are unique in the process ([`TextureKey::unique`]): one renderer
+/// holds the textures of every owner (all canvases of a window), so keys
+/// picked per owner would collide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TextureKey(pub u64);
+pub struct TextureKey(u64);
+
+impl TextureKey {
+    /// A key no other texture has.
+    pub fn unique() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn id(self) -> u64 {
+        self.0
+    }
+}
 
 /// Work on textures, done before the scene is drawn, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -236,6 +252,16 @@ impl Scene {
         &self.textures
     }
 
+    /// Moves the texture work queued in this scene to the end of `to`'s.
+    ///
+    /// For scenes kept and appended again in later frames (a widget's
+    /// cached drawing): the work must be done once, in the frame that
+    /// first draws the scene. Appended again with its work, the scene
+    /// would render its textures again in every frame.
+    pub fn move_texture_work(&mut self, to: &mut Scene) {
+        to.textures.append(&mut self.textures);
+    }
+
     /// Clips what follows to `shape`, until the matching [`Scene::pop`].
     pub fn push_clip(&mut self, shape: &impl Shape) {
         self.open_layers += 1;
@@ -334,9 +360,26 @@ pub(crate) struct Target<'a, C, R> {
     pub(crate) resources: &'a mut R,
     /// Draw glyphs from the backend's glyph atlas.
     pub(crate) glyph_atlas: bool,
-    /// Textures as pixmaps (the CPU backend); `None`: textures are the
-    /// GPU's, bound by key at render time.
-    pub(crate) pixmaps: Option<&'a HashMap<TextureKey, Arc<Pixmap>>>,
+    /// The GPU's fonts with bitmap glyphs, which it can only draw from
+    /// its glyph atlas; `None` on the CPU, which draws them directly.
+    pub(crate) bitmap_fonts: Option<&'a mut crate::gpu::BitmapFonts>,
+    /// The transform in effect (for glyphs' size on the device).
+    pub(crate) transform: Affine,
+    /// The textures the scene may draw.
+    pub(crate) textures: Textures<'a>,
+    /// Draws of textures that don't exist (skipped).
+    pub(crate) missing: u32,
+}
+
+/// The textures a backend can draw.
+pub(crate) enum Textures<'a> {
+    /// None (inside a texture's own content).
+    None,
+    /// The CPU backend's pixmaps.
+    Pixmaps(&'a HashMap<TextureKey, Arc<Pixmap>>),
+    /// The GPU's, bound by key at render time. Drawing a key without a
+    /// binding would fail the whole frame.
+    Bound(&'a HashMap<TextureKey, crate::gpu::GpuTexture>),
 }
 
 /// Replays `scene` into a backend, with `base` applied before every
@@ -391,10 +434,21 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
     }
 }
 
+/// The largest glyph (pixels per em) vello_gpu 0.3 keeps in its glyph atlas
+/// (glifo's default `max_cached_font_size`, not configurable there).
+const MAX_ATLAS_GLYPH_SIZE: f32 = 128.0;
+
+/// A font size in device pixels under `transform`.
+fn device_size(size: f32, transform: Affine) -> f32 {
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    size * (a * d - b * c).abs().sqrt() as f32
+}
+
 macro_rules! impl_sink {
     ($context:ty, $resources:ty) => {
         impl Sink for Target<'_, $context, $resources> {
             fn set_transform(&mut self, transform: Affine) {
+                self.transform = transform;
                 self.context.set_transform(transform);
             }
             fn set_color(&mut self, color: Color) {
@@ -427,36 +481,66 @@ macro_rules! impl_sink {
                 coords: &[i16],
                 glyphs: &[Glyph],
             ) {
-                // A glyph the backend can't draw (a bitmap format it lacks)
-                // is skipped; the rest of the run still draws.
-                let _ = self
+                // vello_gpu draws bitmap glyphs (color emoji) only from its
+                // glyph atlas, and panics on any other. The atlas takes
+                // glyphs up to MAX_ATLAS_GLYPH_SIZE pixels per em: bigger ones
+                // are cached at that size and scaled up. (Emoji bitmaps are
+                // about 109 pixels per em, so that loses nothing.) The
+                // 0.1 % stretch keeps the scale out of the font size, into
+                // which glifo folds uniform scales before it checks the
+                // limit.
+                let bitmaps = self
+                    .bitmap_fonts
+                    .as_deref_mut()
+                    .is_some_and(|fonts| fonts.has_bitmaps(font));
+                let run = self
                     .context
                     .glyph_run(self.resources, font)
-                    .font_size(size)
                     .hint(hint)
                     .normalized_coords(coords)
-                    .atlas_cache(self.glyph_atlas)
-                    .fill_glyphs(glyphs.iter().copied());
+                    .atlas_cache(self.glyph_atlas || bitmaps);
+                let run = if bitmaps && device_size(size, self.transform) > MAX_ATLAS_GLYPH_SIZE {
+                    let scale = f64::from(size / MAX_ATLAS_GLYPH_SIZE);
+                    run.font_size(MAX_ATLAS_GLYPH_SIZE)
+                        .glyph_transform(Affine::scale_non_uniform(scale, scale * 1.001))
+                } else {
+                    run.font_size(size)
+                };
+                // A glyph the backend can't draw otherwise is skipped; the
+                // rest of the run still draws.
+                let _ = run.fill_glyphs(glyphs.iter().copied());
             }
             fn draw_texture(&mut self, key: TextureKey, width: u16, height: u16, dest: &Rect) {
                 if width == 0 || height == 0 || dest.is_zero_area() {
                     return;
                 }
-                let image = match self.pixmaps {
-                    Some(pixmaps) => match pixmaps.get(&key) {
+                // A texture that was never rendered or is freed shows
+                // nothing; the owner has a bug, but one frame of a missing
+                // tile beats ending the program.
+                let image = match self.textures {
+                    Textures::Pixmaps(pixmaps) => match pixmaps.get(&key) {
                         Some(pixmap) => ImageSource::Pixmap(pixmap.clone()),
-                        None => return, // never rendered: nothing to show
+                        None => {
+                            self.missing += 1;
+                            return;
+                        }
                     },
-                    None => ImageSource::external_texture(
-                        vello_common::TextureId(key.0),
-                        vello_common::geometry::RectU16 {
-                            x0: 0,
-                            y0: 0,
-                            x1: width,
-                            y1: height,
-                        },
-                        true,
-                    ),
+                    Textures::Bound(bound) if bound.contains_key(&key) => {
+                        ImageSource::external_texture(
+                            vello_common::TextureId(key.id()),
+                            vello_common::geometry::RectU16 {
+                                x0: 0,
+                                y0: 0,
+                                x1: width,
+                                y1: height,
+                            },
+                            true,
+                        )
+                    }
+                    Textures::Bound(_) | Textures::None => {
+                        self.missing += 1;
+                        return;
+                    }
                 };
                 self.context.set_paint(Image {
                     image,

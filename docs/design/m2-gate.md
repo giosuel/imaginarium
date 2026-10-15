@@ -11,7 +11,7 @@ after M2.7, the results.
 
 **Gate machine:** the owner's laptop. EndeavourOS (Arch), kernel 7.2,
 Hyprland (Wayland), Intel Core i9-11900H with Intel UHD (integrated) and a
-GeForce RTX 3050 Laptop GPU, 32 GB RAM.
+GeForce RTX 3050 Ti Laptop GPU (NVIDIA 615.71), 32 GB RAM.
 
 ## What the binary covers so far
 
@@ -34,6 +34,9 @@ sudo pacman -S --needed noto-fonts noto-fonts-cjk noto-fonts-emoji
 sudo pacman -S --needed fcitx5 fcitx5-mozc fcitx5-configtool
 # The screen reader:
 sudo pacman -S --needed orca
+# The integrated GPU's Vulkan driver (without it, --gpu low gets the NVIDIA):
+sudo pacman -S --needed vulkan-intel
+vulkaninfo --summary   # should list both GPUs (package vulkan-tools)
 ```
 
 For fcitx5 on Hyprland, add `exec-once = fcitx5 -d` to the Hyprland config
@@ -150,14 +153,43 @@ works, odd (what), or broken.
 22. Does it open quickly? (The report has the number.)
 
 **Known gaps (not bugs yet):** no pinch zoom, no context menus, no
-scrolling lists (the palette shows the best 10), no undo for moved shapes,
-and tiles render on the UI thread (workers come later).
+scrolling lists (the palette shows the best 10), and tiles render on the
+UI thread (workers come later).
 
 ## What to send back
 
-The four `gate-report-*.json` files, the checklist notes, and a screenshot
-of anything that looks wrong.
+The five `gate-report-*.json` files, the checklist notes, and a screenshot
+of anything that looks wrong. A manual session writes `gate-report.json`
+too (its frames are in `manual`), worth sending after anything odd.
 
 ## Results
 
 To be filled in at M2.7.
+
+### First run (2026-10-13, manual session, M2.5 binary)
+
+- **Crash:** "rendering failed: Missing texture binding for
+  TextureId(…)". Causes and fixes in `rendering.md` §10 (texture rules):
+  both boards' canvases used the same texture keys, a stand-in could be
+  evicted in the frame it was drawn, and a skipped frame dropped tile
+  renders. The same key clash made the boards show each other's tiles
+  after switching (reproduced: the cards board showing shapes), a likely
+  cause of the "glitches while dragging". Also fixed: frames in which the
+  board wasn't repainted rendered its last tiles again.
+- **Not always 60 fps with 10,000 shapes** (RTX 3050 Ti): no frame data in
+  a manual report of the M2.5 binary; the fixed binary records manual
+  sessions too. The `--measure` runs decide criterion 1.
+- **Cold start 746 ms** (fails < 400 ms): fonts 114 ms (2,139 families),
+  first paint 218 ms; the remaining ~400 ms is window and GPU setup, now
+  reported apart (`window_ms`, `gpu_ms`).
+- `--gpu low` got the NVIDIA GPU: the Intel Vulkan driver is probably
+  missing (setup above).
+
+### Second run (2026-10-13, `--measure`, fix-1 binary)
+
+- **All five runs panicked** in vello_gpu: "pixmap image sources are not
+  supported by Vello GPU". Color emoji are bitmap glyphs, which vello_gpu
+  draws only from its glyph atlas; the first frame is drawn without it,
+  and a maximized window shows the emoji card in that frame. Fixed (fix 2,
+  `rendering.md` §10, "Color emoji on the GPU"); reproduced and checked on
+  the VM with Noto Color Emoji installed.
