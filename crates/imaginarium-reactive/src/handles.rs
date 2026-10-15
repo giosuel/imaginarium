@@ -233,6 +233,12 @@ impl<T: PartialEq + 'static, F: FnMut(Option<&T>) -> T> Compute for MemoCompute<
         *value = Some(new);
         changed
     }
+
+    fn has_value(&self) -> bool {
+        self.value
+            .try_borrow()
+            .map_or(true, |value| value.is_some())
+    }
 }
 
 /// A derived value, recomputed only when a value it read changed, and only
@@ -311,7 +317,9 @@ impl<T: 'static> Memo<T> {
     /// computation.
     ///
     /// # Panics
-    /// If the memo was disposed, or depends on itself.
+    /// If the memo was disposed, or depends on itself, or if `f` writes a
+    /// signal that makes this memo run again (the value is borrowed while
+    /// `f` runs).
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.try_with(f).unwrap_or_else(|| disposed("memo"))
     }

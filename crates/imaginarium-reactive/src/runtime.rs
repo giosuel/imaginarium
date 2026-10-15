@@ -21,15 +21,27 @@
 //!   their generation and compacted later.
 //! - No user code runs while the arena is borrowed, and a panicking user
 //!   closure leaves the node as it was before the run.
+//! - Every effect that isn't `Clean` is pending (or running): writes stop
+//!   marking at nodes that are marked already, so an effect that missed
+//!   its turn would never be queued again. An effect whose run unwinds
+//!   goes back into the queue.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::rc::Rc;
 
 /// More effect runs than this in one flush means an effect keeps
 /// triggering itself (directly or through others).
 const MAX_EFFECT_RUNS_PER_FLUSH: usize = 1_000_000;
+
+/// More passes than this over one computation's sources means memos keep
+/// writing each other's sources.
+const MAX_CHECK_PASSES: usize = 10_000;
+
+/// A caught panic, re-raised once the work it interrupted is finished.
+type Panic = Box<dyn Any + Send>;
 
 /// Subscriber and child lists are compacted (disposed entries dropped)
 /// when they reach a power of two at least this long, so lists of
@@ -67,6 +79,12 @@ pub(crate) enum Kind {
 pub(crate) trait Compute {
     /// Runs it. For memos: whether the value changed.
     fn run(&mut self) -> bool;
+
+    /// Whether it has a value: false for a memo whose first run hasn't
+    /// finished.
+    fn has_value(&self) -> bool {
+        true
+    }
 }
 
 struct Node {
@@ -149,6 +167,9 @@ pub(crate) struct Runtime {
     flushing: Cell<bool>,
     /// The work list of `notify`, kept to reuse its allocation.
     marking: RefCell<Vec<(NodeId, State)>>,
+    /// Counts writes, so a check over a computation's sources notices
+    /// writes made while it ran.
+    writes: Cell<u64>,
 }
 
 thread_local! {
@@ -195,11 +216,37 @@ impl Drop for Running<'_> {
         if self.rt.is_alive(self.id) {
             self.rt.with_node_mut(self.id, |node| {
                 node.running = false;
+                if std::thread::panicking() && compute.as_ref().is_some_and(|c| !c.has_value()) {
+                    // A memo's first run panicked: the next read runs it
+                    // again (there is no previous value to keep).
+                    node.state = State::Dirty;
+                }
                 node.compute = compute;
             });
             self.rt.finish_tracking(self.id, self.run);
         } else {
             drop(compute); // it disposed itself; drop it unborrowed
+        }
+    }
+}
+
+/// Puts an effect back into the queue if its update unwinds, so it isn't
+/// left marked but not pending.
+struct Requeue<'a> {
+    rt: &'a Runtime,
+    effect: NodeId,
+    done: bool,
+}
+
+impl Drop for Requeue<'_> {
+    fn drop(&mut self) {
+        if !self.done
+            && self
+                .rt
+                .state(self.effect)
+                .is_some_and(|state| state != State::Clean)
+        {
+            self.rt.pending.borrow_mut().push_front(self.effect);
         }
     }
 }
@@ -216,6 +263,7 @@ impl Runtime {
             pending: RefCell::new(VecDeque::new()),
             flushing: Cell::new(false),
             marking: RefCell::new(Vec::new()),
+            writes: Cell::new(0),
         }
     }
 
@@ -391,24 +439,39 @@ impl Runtime {
             panic!("reactive cycle: a memo depends on itself");
         }
         if state == State::Check {
-            // By index, not over a copy: this runs for every affected node.
-            // Nothing but this node's own runs changes its source list.
-            let mut i = 0;
-            while let Some(source) = self
-                .with_node(id, |node| node.sources.get(i).copied())
-                .flatten()
-            {
-                i += 1;
-                if self.kind(source) == Some(Kind::Memo) {
-                    self.update(source);
+            let mut passes = 0;
+            loop {
+                let writes = self.writes.get();
+                // By index, not over a copy: this runs for every affected
+                // node. Nothing but this node's own runs changes its source
+                // list.
+                let mut i = 0;
+                while let Some(source) = self
+                    .with_node(id, |node| node.sources.get(i).copied())
+                    .flatten()
+                {
+                    i += 1;
+                    if self.kind(source) == Some(Kind::Memo) {
+                        self.update(source);
+                    }
+                    if self.state(id) != Some(State::Check) {
+                        break;
+                    }
                 }
                 if self.state(id) != Some(State::Check) {
                     break;
                 }
-            }
-            if self.state(id) == Some(State::Check) {
-                self.set_state(id, State::Clean); // nothing it read changed
-                return;
+                if self.writes.get() == writes {
+                    self.set_state(id, State::Clean); // nothing it read changed
+                    return;
+                }
+                // A source's run wrote something, maybe what a source
+                // checked before reads. That one is marked now, but this
+                // node isn't again (it is marked already): check again.
+                passes += 1;
+                if passes > MAX_CHECK_PASSES {
+                    panic!("reactive cycle: memos keep writing each other's sources");
+                }
             }
         }
         if self.state(id) == Some(State::Dirty) {
@@ -417,34 +480,35 @@ impl Runtime {
     }
 
     fn recompute(&self, id: NodeId) {
-        self.reset(id);
-        let run = self.next_run.get();
-        self.next_run.set(run + 1);
-        let Some(compute) = self
-            .with_node_mut(id, |node| {
-                // Clean before the run: a write during it marks it again.
-                node.state = State::Clean;
-                node.running = true;
-                node.cursor = 0;
-                node.new_sources.clear();
-                node.compute.take()
-            })
-            .flatten()
-        else {
-            return;
-        };
         let changed = {
-            let mut running = Running {
-                rt: self,
-                id,
-                run,
-                compute: Some(compute),
-            };
-            // Effects that this run's writes trigger wait for it to end.
+            // Effects that this run's writes trigger wait for it to end, and
+            // so do those of its cleanups: an effect that read this node
+            // would run it again from inside this update.
             let _depth = replace(&self.batch_depth, self.batch_depth.get() + 1);
-            let _observer = replace(&self.observer, Some((id, run)));
-            let _owner = replace(&self.owner, Some(id));
-            running.compute.as_mut().is_some_and(|c| c.run())
+            self.reset(id);
+            let run = self.next_run.get();
+            self.next_run.set(run + 1);
+            let compute = self
+                .with_node_mut(id, |node| {
+                    // Clean before the run: a write during it marks it again.
+                    node.state = State::Clean;
+                    node.running = true;
+                    node.cursor = 0;
+                    node.new_sources.clear();
+                    node.compute.take()
+                })
+                .flatten();
+            compute.is_some_and(|compute| {
+                let mut running = Running {
+                    rt: self,
+                    id,
+                    run,
+                    compute: Some(compute),
+                };
+                let _observer = replace(&self.observer, Some((id, run)));
+                let _owner = replace(&self.owner, Some(id));
+                running.compute.as_mut().is_some_and(|c| c.run())
+            })
         };
         if changed && self.kind(id) == Some(Kind::Memo) {
             // Subscribers that are checking whether to run (marked `Check`
@@ -466,25 +530,44 @@ impl Runtime {
     }
 
     /// Before a computation runs again: dispose what it created last time
-    /// and run its cleanups. (Its sources are updated as it runs.)
+    /// and run its cleanups. (Its sources are updated as it runs.) If a
+    /// cleanup panics, the rest still run, and then the panic goes on.
     fn reset(&self, id: NodeId) {
-        let children = self
-            .with_node_mut(id, |node| std::mem::take(&mut node.children))
+        let (children, cleanups) = self
+            .with_node_mut(id, |node| {
+                (
+                    std::mem::take(&mut node.children),
+                    !node.cleanups.is_empty(),
+                )
+            })
             .unwrap_or_default();
+        let mut panic = None;
         for child in children {
-            self.dispose(child);
+            let caught = self.dispose_catching(child);
+            panic = panic.or(caught);
         }
-        self.run_cleanups(id);
+        if cleanups {
+            let caught = self.run_cleanups(id);
+            panic = panic.or(caught);
+        }
+        if let Some(panic) = panic {
+            resume_unwind(panic);
+        }
     }
 
-    fn run_cleanups(&self, id: NodeId) {
+    /// Runs all of a node's cleanups and returns the first panic.
+    fn run_cleanups(&self, id: NodeId) -> Option<Panic> {
         let cleanups = self
             .with_node_mut(id, |node| std::mem::take(&mut node.cleanups))
             .unwrap_or_default();
         let _observer = replace(&self.observer, None);
+        let mut panic = None;
         for cleanup in cleanups {
-            cleanup();
+            if let Err(caught) = catch_unwind(AssertUnwindSafe(cleanup)) {
+                panic = panic.or(Some(caught));
+            }
         }
+        panic
     }
 
     // ---- writing ----------------------------------------------------------
@@ -492,6 +575,7 @@ impl Runtime {
     /// After a signal's value changed: mark everything downstream and run
     /// the effects (now, or once no batch is open and nothing computes).
     pub(crate) fn notify(&self, id: NodeId) {
+        self.writes.set(self.writes.get().wrapping_add(1));
         {
             let mut nodes = self.nodes.borrow_mut();
             let mut pending = self.pending.borrow_mut();
@@ -534,8 +618,8 @@ impl Runtime {
         }
     }
 
-    /// Runs pending effects until none are left. If one panics, the rest
-    /// wait for the next write.
+    /// Runs pending effects until none are left. If one panics, it and the
+    /// rest wait for the next write.
     fn flush(&self) {
         if self.flushing.get() {
             return; // the running flush picks them up
@@ -549,11 +633,19 @@ impl Runtime {
             };
             runs += 1;
             if runs > MAX_EFFECT_RUNS_PER_FLUSH {
-                self.pending.borrow_mut().clear();
+                // The rest stay pending: dropping them would leave them
+                // marked but never queued again.
+                self.pending.borrow_mut().push_front(effect);
                 debug_assert!(false, "an effect keeps triggering itself");
                 break;
             }
+            let mut requeue = Requeue {
+                rt: self,
+                effect,
+                done: false,
+            };
             self.run_top(effect);
+            requeue.done = true;
         }
     }
 
@@ -608,37 +700,51 @@ impl Runtime {
     /// Registers `cleanup` with the current owner. Without a live owner
     /// nothing is ever disposed, so it never runs and is dropped.
     pub(crate) fn on_cleanup(&self, cleanup: Box<dyn FnOnce()>) {
+        let mut cleanup = Some(cleanup);
         if let Some(owner) = self.owner.get() {
-            self.with_node_mut(owner, |node| node.cleanups.push(cleanup));
+            self.with_node_mut(owner, |node| node.cleanups.extend(cleanup.take()));
         }
+        drop(cleanup); // a dead owner's: its `Drop` may be user code
     }
 
     // ---- disposal ---------------------------------------------------------
 
     /// Disposes a node and everything it owns: cleanups run, the slot is
-    /// freed.
+    /// freed. If a cleanup panics, the whole subtree is still disposed, and
+    /// then the panic goes on.
     pub(crate) fn dispose(&self, id: NodeId) {
+        if let Some(panic) = self.dispose_catching(id) {
+            resume_unwind(panic);
+        }
+    }
+
+    /// Disposes a node and returns the first panic of its cleanups.
+    fn dispose_catching(&self, id: NodeId) -> Option<Panic> {
         if !self.is_alive(id) {
-            return;
+            return None;
         }
         // Effects that cleanups trigger run once the whole subtree is gone.
         self.batch(|| {
             let mut garbage = Garbage::default();
-            self.dispose_into(id, &mut garbage);
+            let mut panic = None;
+            self.dispose_into(id, &mut garbage, &mut panic);
             drop(garbage);
-        });
+            panic
+        })
     }
 
-    fn dispose_into(&self, id: NodeId, garbage: &mut Garbage) {
+    fn dispose_into(&self, id: NodeId, garbage: &mut Garbage, panic: &mut Option<Panic>) {
         let children = self
             .with_node_mut(id, |node| std::mem::take(&mut node.children))
             .unwrap_or_default();
         for child in children {
             if self.is_alive(child) {
-                self.dispose_into(child, garbage);
+                self.dispose_into(child, garbage, panic);
             }
         }
-        self.run_cleanups(id);
+        if let Some(caught) = self.run_cleanups(id) {
+            panic.get_or_insert(caught);
+        }
         let mut nodes = self.nodes.borrow_mut();
         let Some(node) = live_mut(&mut nodes, id) else {
             return;
