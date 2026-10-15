@@ -85,6 +85,18 @@ Since M2.8, each canvas phase also reports:
   600 frames and the phase started with tiles owed.
 - `slowest_textures`: the parts of the phase's slowest tile frame.
 
+Since M2.9 run 2, the report has the window's surface too:
+- `surface`, by phase: textures the driver called suboptimal
+  (`suboptimal`), set-ups of the surface before a frame because the last
+  texture was suboptimal (`reconfigured`, part of that frame's
+  `acquire`), and skipped frames (`skipped`: the window hidden, the
+  surface lost or set up again).
+- `longest_intervals` says for each frame whether the surface was set up
+  again first, and how many frames were skipped before it.
+- `--keep-suboptimal` keeps drawing into a suboptimal surface without
+  setting it up again, as before M2.9 (the report's
+  `gpu.keep_suboptimal`).
+
 How criteria 1 and 2 are judged (`shapes.criterion_1_pass`,
 `shapes.criterion_2_pass`; since the M2.9 review):
 - **Criterion 1**, for the pan and the zoom: the p99 frame time is under
@@ -839,6 +851,65 @@ you can. Criteria 4 (text, input method, screen reader: items 7–16 and
 20) and 5 (HiDPI: items 5 and 6) have no report yet; they decide the
 gate's last two criteria. Note for each item: works, odd (what), or
 broken.
+
+### Results (2026-10-15, "M2.9 final (b5a4867)")
+
+All three ran fullscreen at 3456×2160 (scale 1.5), with 8 tile threads.
+Times are in ms.
+
+| | iGPU | dGPU | iGPU, no vsync |
+|---|---|---|---|
+| C1 shapes pan, p99 (< 16) | **7.1** | 6.1 | 7.1 |
+| C1 shapes zoom, p99 (< 16) | **12.7** | 11.2 | 14.5 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 (at most 2) | **1 / 1 / 0** | 0 / 0 / 0 | 0 / 1 / 0 |
+| C2 most tiles in a drag frame (≤ 4) | **2** | 2 | 2 |
+| C3 palette search, p95 (< 1) | **0.27** | 0.37 | 0.30 |
+| C6 cold start without the GPU's setup (< 400) | **284** | 240 | 315 |
+| C6 idle frames / CPU | **0 / 0 %** | 0 / 0.2 % | 0 / 0 % |
+| Typing: tiles rendered (0) | **0** | 0 | 0 |
+| Cards board opening: covered / complete | **346 / 379** | 226 / 259 | 323 / 336 |
+| Cards: slowest frame | **41** | 18 | 51 |
+| Cards pan: intervals over 20 ms, of 300 (run 5) | **36** (10) | 1 (2) | 3 (4) |
+| Peak memory (RSS), MB | 199 | 414 | 199 |
+
+- **Criteria 1, 2, 3 and 6 pass in all three runs,** with criterion 1's
+  M2.9 rule.
+- **The search no longer freezes the board:** typing renders no tile.
+- **The cards board opens twice as fast on the iGPU** (covered after
+  346 ms; run 5: 688), and its slowest frame is 41 ms (run 5: 244). The
+  pan has no frame like run 5's 136 ms at frame 198: its slowest after
+  the opening takes 17.7 ms.
+- **But the cards pan on the iGPU with vsync stutters more:** 36 of 300
+  intervals over 20 ms, against 8 and 10 in runs 4 and 5. Those frames
+  waited 34–46 ms for the swapchain (`acquire`). Their own work is as
+  small as before (0.8 ms painting, 1.7 ms encoding, the GPU's 9 ms),
+  the driver (Mesa 26.2.4) and the kernel are the same, and the shapes
+  phases don't show it. A suspect: since the M2.9 review the window
+  sets its surface up again after a texture the driver calls
+  suboptimal, inside `acquire`. The report couldn't tell; run 2 below
+  can. The iGPU run also recorded 6 inputs (the others 1).
+- No criterion measures the cards pan (criterion 1 is the shapes
+  board), but the tag shouldn't ship a regression.
+- The manual checklist: notes still to come.
+
+## M2.9 run 2: the cards pan's waits on the iGPU
+
+Build "M2.9 run 2 (1586887)": the same as "M2.9 final", plus the
+report's `surface` counts and `--keep-suboptimal`. Four runs on the
+iGPU, alternating, without touching the window or the mouse:
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu-a1.json
+./imaginarium-gate --measure --fullscreen --keep-suboptimal --report gate-report-igpu-b1.json
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu-a2.json
+./imaginarium-gate --measure --fullscreen --keep-suboptimal --report gate-report-igpu-b2.json
+```
+
+What decides it: `surface["cards pan"].reconfigured` and
+`pan.canvas.intervals_over_20ms` in each. If the set-ups come with the
+waits and `--keep-suboptimal` removes both, the window stops setting the
+surface up again for every suboptimal texture. If there are no set-ups,
+the waits come from somewhere else.
 
 ## Decision (owner, 2026-10-13)
 

@@ -10,11 +10,20 @@ Last updated: 2026-10-15
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.9 Wrap-up: the owner's last gate run**, with the
-  package "M2.9 final" and the manual checklist (criteria 4 and 5 were
-  never reported), then the tag `v0.0.3-m2`, which the owner pushes.
-  After the run: record it in `docs/design/m2-gate.md` ("M2.9 run"), tick
-  M2.9, and give the owner the tag command.
+- **Next step:** **M2.9 Wrap-up: the gate's run 2 on the iGPU and the
+  manual checklist**, then the tag `v0.0.3-m2`, which the owner pushes.
+  - The M2.9 run (2026-10-15, `m2-gate.md`): criteria 1, 2, 3 and 6 pass
+    on all three GPUs; the search freeze is gone and the cards board
+    opens twice as fast. But the cards pan on the iGPU waits for the
+    swapchain more than in run 5 (36 of 300 intervals over 20 ms,
+    against 10). Suspect: the surface set up again after each suboptimal
+    texture (new in the M2.9 review). Run 2 ("M2.9 run 2 (1586887)":
+    the report counts set-ups, `--keep-suboptimal` turns them off)
+    decides; then fix it.
+  - The manual checklist (criteria 4 and 5 were never reported) is still
+    to come.
+  - After both: record them in `docs/design/m2-gate.md`, tick M2.9, and
+    give the owner the tag command.
   - M2.8 is done (2026-10-14). The runs are in `m2-gate.md`, the summary
     in the M2.8 item below. The gate is decided: we keep our toolkit
     (owner, 2026-10-13; ADR-0007).
