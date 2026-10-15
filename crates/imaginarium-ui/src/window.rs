@@ -4,18 +4,21 @@
 //! frame out, and no frame at all when nothing changed.
 
 use std::cell::Cell;
+
+use crate::access::AccessTree;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use imaginarium_render::kurbo::{Affine, Point, Size, Vec2};
+use imaginarium_render::kurbo::{Affine, Point, Rect, Size, Vec2};
 use imaginarium_render::peniko::Color;
 use imaginarium_render::{
     FrameOutcome, FrameTiming, GpuInfo, GpuOptions, RenderError, Scene, WindowRenderer,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::NamedKey;
 use winit::window::{Window, WindowId};
 
 /// What can go wrong running a window.
@@ -56,6 +59,95 @@ impl Default for WindowOptions {
     }
 }
 
+/// Modifier keys held during an input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    /// Shift.
+    pub shift: bool,
+    /// Control.
+    pub ctrl: bool,
+    /// Alt (Option on macOS).
+    pub alt: bool,
+    /// The logo key: Super, Windows, ⌘.
+    pub meta: bool,
+}
+
+impl Modifiers {
+    /// The platform's shortcut modifier: ⌘ on macOS, Ctrl elsewhere.
+    pub fn command(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.meta
+        } else {
+            self.ctrl
+        }
+    }
+
+    /// The modifier that moves by words: Option on macOS, Ctrl elsewhere.
+    pub fn word(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.alt
+        } else {
+            self.ctrl
+        }
+    }
+}
+
+/// A key, by what it means in the current layout (not where it is).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Key {
+    /// A key that types: "a", "A", "ä", "1", "+", " ".
+    Character(String),
+    /// Enter or Return.
+    Enter,
+    /// Tab.
+    Tab,
+    /// Escape.
+    Escape,
+    /// Backspace (deletes backwards).
+    Backspace,
+    /// Delete (deletes forwards).
+    Delete,
+    /// ←.
+    ArrowLeft,
+    /// →.
+    ArrowRight,
+    /// ↑.
+    ArrowUp,
+    /// ↓.
+    ArrowDown,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+    /// Any other key, by its winit name.
+    Other(String),
+}
+
+/// What an input method (IME) is doing: composing CJK text, dead keys,
+/// the emoji picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ime {
+    /// The input method became active for the focused field.
+    Enabled,
+    /// Text being composed, not part of the document yet. `cursor` is a
+    /// byte range in `text` (the IME's own caret or highlight); `None`
+    /// hides the caret.
+    Preedit {
+        /// The composition.
+        text: String,
+        /// The highlighted range, in bytes of `text`.
+        cursor: Option<(usize, usize)>,
+    },
+    /// Finished text to insert (replaces any composition).
+    Commit(String),
+    /// The input method was turned off.
+    Disabled,
+}
+
 /// Input for the view, in logical pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
@@ -71,6 +163,11 @@ pub enum Input {
         pressed: bool,
         /// Where the pointer is.
         position: Point,
+        /// 1 for a single click, 2 for a double click, 3 for a triple
+        /// click (on presses; releases repeat the press's count).
+        clicks: u8,
+        /// Modifier keys held.
+        modifiers: Modifiers,
     },
     /// The wheel or touchpad scrolled by `delta` logical pixels.
     Scroll {
@@ -78,17 +175,28 @@ pub enum Input {
         delta: Vec2,
         /// Where the pointer is.
         position: Point,
-        /// Whether the platform's zoom modifier (Ctrl, ⌘ on macOS) is held.
-        zoom: bool,
+        /// Modifier keys held (zoom with [`Modifiers::command`]).
+        modifiers: Modifiers,
     },
-    /// A key went down or up. `key` is its logical name ("a", "Enter",
-    /// "ArrowLeft", …).
+    /// A key went down or up.
     Key {
         /// The key.
-        key: String,
+        key: Key,
+        /// The text it types, if any (`None` for shortcuts and named
+        /// keys). Text arrives here only while no input method composes.
+        text: Option<String>,
         /// Down or up.
         pressed: bool,
+        /// Whether this is a key repeat.
+        repeat: bool,
+        /// Modifier keys held.
+        modifiers: Modifiers,
     },
+    /// Input method events, while [`View::ime_area`] says a text field
+    /// has the focus.
+    Ime(Ime),
+    /// The window gained (`true`) or lost the keyboard focus.
+    WindowFocus(bool),
 }
 
 /// One presented frame, for statistics.
@@ -115,6 +223,11 @@ pub trait View {
     /// Draws the content into `scene`, in logical pixels, for a window of
     /// `size` logical pixels.
     fn paint(&mut self, scene: &mut Scene, size: Size);
+
+    /// The window is open and drawing on `gpu`.
+    fn opened(&mut self, gpu: &GpuInfo) {
+        let _ = gpu;
+    }
 
     /// Handles input. Return `true` if the content changed and needs a
     /// frame.
@@ -147,11 +260,36 @@ pub trait View {
     fn should_close(&mut self) -> bool {
         false
     }
+
+    /// Where the focused text field's caret or composition is, in logical
+    /// pixels, so the input method places its candidate window next to it.
+    /// `None` when no text field has the focus: the input method is off
+    /// and keys arrive as plain [`Input::Key`]s.
+    fn ime_area(&mut self) -> Option<Rect> {
+        None
+    }
+
+    /// Describes the content for screen readers: adds nodes to `tree`
+    /// (ids from 1; bounds in logical pixels). Called after frames while a
+    /// screen reader listens.
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        let _ = tree;
+    }
+
+    /// A screen reader asks for something (focus, click, select text, …).
+    /// Return `true` if the content changed and needs a frame.
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        let _ = request;
+        false
+    }
 }
 
 impl<V: View + ?Sized> View for &mut V {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         (**self).paint(scene, size);
+    }
+    fn opened(&mut self, gpu: &GpuInfo) {
+        (**self).opened(gpu);
     }
     fn input(&mut self, input: &Input) -> bool {
         (**self).input(input)
@@ -167,6 +305,27 @@ impl<V: View + ?Sized> View for &mut V {
     }
     fn should_close(&mut self) -> bool {
         (**self).should_close()
+    }
+    fn ime_area(&mut self) -> Option<Rect> {
+        (**self).ime_area()
+    }
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        (**self).accessibility(tree);
+    }
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        (**self).accessibility_action(request)
+    }
+}
+
+/// Events from other threads into the event loop.
+#[derive(Debug)]
+enum UserEvent {
+    Access(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Access(event)
     }
 }
 
@@ -196,8 +355,11 @@ pub fn request_frame() {
 /// or [`View::should_close`]). Blocks the calling thread, which must be the
 /// main thread on some platforms. Pass `&mut view` to keep the view.
 pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError> {
-    let event_loop = EventLoop::new().map_err(|err| UiError::EventLoop(err.to_string()))?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|err| UiError::EventLoop(err.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
     let mut shell = Shell {
         options,
         view,
@@ -207,7 +369,12 @@ pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError>
         scale: 1.0,
         physical: PhysicalSize::new(0, 0),
         pointer: Point::ZERO,
-        zoom_modifier: false,
+        modifiers: Modifiers::default(),
+        clicks: ClickCounter::default(),
+        ime: None,
+        proxy,
+        access: None,
+        access_initial: false,
         started: Instant::now(),
         stats: RunStats::default(),
         error: None,
@@ -232,7 +399,16 @@ struct Shell<V> {
     /// window costs a round trip to the X server).
     physical: PhysicalSize<u32>,
     pointer: Point,
-    zoom_modifier: bool,
+    modifiers: Modifiers,
+    clicks: ClickCounter,
+    /// The input method's state as last told to the window: `None` off,
+    /// otherwise on with this caret area.
+    ime: Option<Rect>,
+    proxy: EventLoopProxy<UserEvent>,
+    /// The screen reader bridge; idle until a screen reader asks.
+    access: Option<accesskit_winit::Adapter>,
+    /// The next tree update must be a full one.
+    access_initial: bool,
     started: Instant,
     stats: RunStats,
     error: Option<UiError>,
@@ -252,6 +428,47 @@ impl<V: View> Shell<V> {
 
     fn logical(&self, position: PhysicalPosition<f64>) -> Point {
         Point::new(position.x / self.scale, position.y / self.scale)
+    }
+
+    /// Tells the window whether a text field has the focus and where its
+    /// caret is, when that changed.
+    fn update_ime(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let area = self.view.ime_area();
+        if area == self.ime {
+            return;
+        }
+        if area.is_some() != self.ime.is_some() {
+            window.set_ime_allowed(area.is_some());
+        }
+        if let Some(area) = area {
+            window.set_ime_cursor_area(
+                LogicalPosition::new(area.x0, area.y0),
+                LogicalSize::new(area.width(), area.height()),
+            );
+        }
+        self.ime = area;
+    }
+
+    /// Sends the view's accessibility tree, if a screen reader listens.
+    fn update_access(&mut self) {
+        let Some(adapter) = &mut self.access else {
+            return;
+        };
+        let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
+        let initial = self.access_initial;
+        let mut sent = false;
+        adapter.update_if_active(|| {
+            sent = true;
+            let mut tree = AccessTree::default();
+            view.accessibility(&mut tree);
+            tree.into_update(title, scale, initial)
+        });
+        if sent {
+            self.access_initial = false;
+        }
     }
 
     fn deliver(&mut self, input: Input) {
@@ -305,15 +522,20 @@ impl<V: View> Shell<V> {
         if self.view.presented(&frame) {
             self.request_redraw();
         }
+        // What is on screen changed: tell the screen reader.
+        self.update_access();
     }
 }
 
-impl<V: View> ApplicationHandler for Shell<V> {
+impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
+        // Invisible until the accessibility adapter is attached, as
+        // AccessKit requires (on Windows and macOS).
         let attributes = Window::default_attributes()
+            .with_visible(false)
             .with_title(self.options.title.clone())
             .with_inner_size(LogicalSize::new(
                 self.options.size.width,
@@ -328,16 +550,43 @@ impl<V: View> ApplicationHandler for Shell<V> {
         self.physical = size;
         match WindowRenderer::new(window.clone(), size.width, size.height, &self.options.gpu) {
             Ok(renderer) => {
+                self.view.opened(renderer.info());
                 self.stats.gpu = Some(renderer.info().clone());
                 self.renderer = Some(renderer);
             }
             Err(err) => return self.fail(event_loop, err.into()),
         }
+        self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        ));
+        window.set_visible(true);
         window.request_redraw();
         self.window = Some(window);
     }
 
+    fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Access(event) = event;
+        match event.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                self.access_initial = true;
+                self.update_access();
+            }
+            accesskit_winit::WindowEvent::ActionRequested(request) => {
+                if self.view.accessibility_action(&request) {
+                    self.request_redraw();
+                }
+                self.update_access();
+            }
+            accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if let (Some(access), Some(window)) = (&mut self.access, &self.window) {
+            access.process_event(window, &event);
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -360,10 +609,14 @@ impl<V: View> ApplicationHandler for Shell<V> {
             }
             WindowEvent::CursorLeft { .. } => self.deliver(Input::PointerLeft),
             WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
+                let clicks = self.clicks.count(button, pressed, self.pointer);
                 let input = Input::PointerButton {
                     primary: button == MouseButton::Left,
-                    pressed: state == ElementState::Pressed,
+                    pressed,
                     position: self.pointer,
+                    clicks,
+                    modifiers: self.modifiers,
                 };
                 self.deliver(input);
             }
@@ -378,28 +631,38 @@ impl<V: View> ApplicationHandler for Shell<V> {
                 let input = Input::Scroll {
                     delta,
                     position: self.pointer,
-                    zoom: self.zoom_modifier,
+                    modifiers: self.modifiers,
                 };
                 self.deliver(input);
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
-                self.zoom_modifier = if cfg!(target_os = "macos") {
-                    state.super_key()
-                } else {
-                    state.control_key()
+                self.modifiers = Modifiers {
+                    shift: state.shift_key(),
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                    meta: state.super_key(),
                 };
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let key = match &event.logical_key {
-                    winit::keyboard::Key::Character(text) => text.to_string(),
-                    winit::keyboard::Key::Named(named) => format!("{named:?}"),
-                    other => format!("{other:?}"),
+                let input = key_input(&event, self.modifiers);
+                self.deliver(input);
+            }
+            WindowEvent::Ime(ime) => {
+                let ime = match ime {
+                    winit::event::Ime::Enabled => Ime::Enabled,
+                    winit::event::Ime::Preedit(text, cursor) => Ime::Preedit { text, cursor },
+                    winit::event::Ime::Commit(text) => Ime::Commit(text),
+                    winit::event::Ime::Disabled => Ime::Disabled,
                 };
-                self.deliver(Input::Key {
-                    key,
-                    pressed: event.state == ElementState::Pressed,
-                });
+                self.deliver(Input::Ime(ime));
+            }
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    // Keys released elsewhere never reach us.
+                    self.modifiers = Modifiers::default();
+                }
+                self.deliver(Input::WindowFocus(focused));
             }
             _ => {}
         }
@@ -422,11 +685,109 @@ impl<V: View> ApplicationHandler for Shell<V> {
             event_loop.exit();
             return;
         }
+        self.update_ime();
         // Sleep until input arrives or the view's timer runs out: nothing
         // is drawn unless something changed (gate criterion 6).
         event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
+    }
+}
+
+/// Translates a winit key event.
+fn key_input(event: &KeyEvent, modifiers: Modifiers) -> Input {
+    let key = match &event.logical_key {
+        winit::keyboard::Key::Character(text) => Key::Character(text.to_string()),
+        winit::keyboard::Key::Named(named) => match named {
+            NamedKey::Enter => Key::Enter,
+            NamedKey::Tab => Key::Tab,
+            NamedKey::Escape => Key::Escape,
+            NamedKey::Backspace => Key::Backspace,
+            NamedKey::Delete => Key::Delete,
+            NamedKey::ArrowLeft => Key::ArrowLeft,
+            NamedKey::ArrowRight => Key::ArrowRight,
+            NamedKey::ArrowUp => Key::ArrowUp,
+            NamedKey::ArrowDown => Key::ArrowDown,
+            NamedKey::Home => Key::Home,
+            NamedKey::End => Key::End,
+            NamedKey::PageUp => Key::PageUp,
+            NamedKey::PageDown => Key::PageDown,
+            NamedKey::Space => Key::Character(" ".into()),
+            other => Key::Other(format!("{other:?}")),
+        },
+        other => Key::Other(format!("{other:?}")),
+    };
+    // Shortcuts don't type. Ctrl + Alt is AltGr on Windows, which does.
+    let shortcut = (modifiers.ctrl && !modifiers.alt) || modifiers.meta;
+    let text = event
+        .text
+        .as_ref()
+        .map(|text| text.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|text| !text.is_empty() && !shortcut);
+    Input::Key {
+        key,
+        text,
+        pressed: event.state == ElementState::Pressed,
+        repeat: event.repeat,
+        modifiers,
+    }
+}
+
+/// Counts presses of the same button at the same spot in quick succession
+/// (double and triple clicks).
+#[derive(Debug, Default)]
+struct ClickCounter {
+    last: Option<(MouseButton, Instant, Point)>,
+    count: u8,
+}
+
+impl ClickCounter {
+    /// The usual default of desktop platforms.
+    const INTERVAL: Duration = Duration::from_millis(500);
+    /// How far the pointer may move between clicks, in logical pixels.
+    const SLOP: f64 = 4.0;
+
+    fn count(&mut self, button: MouseButton, pressed: bool, position: Point) -> u8 {
+        if !pressed {
+            return self.count.max(1);
+        }
+        let now = Instant::now();
+        let again = self.last.is_some_and(|(last, at, spot)| {
+            last == button && now - at <= Self::INTERVAL && (position - spot).hypot() <= Self::SLOP
+        });
+        // A fourth click starts over.
+        self.count = if again && self.count < 3 {
+            self.count + 1
+        } else {
+            1
+        };
+        self.last = Some((button, now, position));
+        self.count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicks_in_quick_succession_count_up_to_three() {
+        let mut clicks = ClickCounter::default();
+        let at = Point::new(10.0, 10.0);
+        assert_eq!(clicks.count(MouseButton::Left, true, at), 1);
+        assert_eq!(clicks.count(MouseButton::Left, false, at), 1);
+        assert_eq!(clicks.count(MouseButton::Left, true, at), 2);
+        assert_eq!(clicks.count(MouseButton::Left, true, at), 3);
+        assert_eq!(clicks.count(MouseButton::Left, true, at), 1);
+        // Elsewhere, or another button: a new single click.
+        assert_eq!(
+            clicks.count(MouseButton::Left, true, Point::new(40.0, 10.0)),
+            1
+        );
+        assert_eq!(
+            clicks.count(MouseButton::Right, true, Point::new(40.0, 10.0)),
+            1
+        );
     }
 }

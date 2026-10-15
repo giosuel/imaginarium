@@ -10,8 +10,8 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.3 Text and the text field** (see the M2 checklist below; the order changed on 2026-10-12).
-- **Code status:** Cargo workspace with 15 crates. Working: `xtask` (repo
+- **Next step:** **M2.4 Widgets and layout** (see the M2 checklist below; the order changed on 2026-10-12).
+- **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -22,9 +22,11 @@ Last updated: 2026-10-13
   (`.imag` files as documents), `imaginarium-cli` (`imag inspect`,
   `verify`, `export-json`), `imaginarium-reactive` (signals, memos,
   effects, scopes), `imaginarium-render` (scenes on `vello_gpu` and
-  `vello_cpu`), `imaginarium-ui` (window, input, frame pipeline) and
-  `imaginarium-gate` (the M2 gate app: a board, measurements,
-  `gate-report.json`). The app only prints its version.
+  `vello_cpu`, glyphs), `imaginarium-text` (Parley: fonts, layout,
+  editing), `imaginarium-ui` (window, input, IME, text field, AccessKit,
+  frame pipeline) and `imaginarium-gate` (the M2 gate app: a board with
+  text, search, in-place editing, measurements, `gate-report.json`). The
+  app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
   goes through PRs, which the owner merges (see MAINTAINERS.md, "Pull
   request workflow").
@@ -668,13 +670,45 @@ app runs. Two owner exceptions for M2:
       bounds and process-global state.
     - The cost of keeping ours: ~1,250 lines to maintain, guarded by the
       tests and property tests.
-- [ ] **M2.3 Text and the text field** ← **next**: `imaginarium-text` on Parley 0.12
-  (fonts, layout cache, glyphs through Vello), a text field on
-  `PlainEditor` with IME, the AccessKit tree. Criterion 4.
-- [ ] **M2.4 Widgets and layout**: the minimal widget tree driven by
+- [x] **M2.3 Text and the text field** (done 2026-10-13):
+  - `imaginarium-render`: glyph runs in scenes (one glyph buffer per
+    scene), drawn by both backends with their glyph caches; an optional
+    glyph atlas (`GpuOptions::glyph_atlas`; Vello calls it experimental).
+  - `imaginarium-text` on Parley 0.12: `Fonts` (the bundled Inter 4.001,
+    OFL, then system fonts with per-script fallback; fontconfig loaded at
+    run time), `TextBlock`, and `Editor` on `PlainEditor` (`Edit`
+    operations, word/line selection by clicks, drag, IME composition,
+    per-line data for screen readers). Tests use only the bundled font:
+    a CPU golden image, GPU = CPU, editing and the IME sequence winit
+    delivers.
+  - `imaginarium-ui`: our own `Key`/`Modifiers`, IME events and
+    `View::ime_area` (candidate window at the caret), click counting,
+    `TextField` (platform editing keys, a caret that blinks 10 s and then
+    rests), AccessKit through `accesskit_winit` (`View::accessibility`,
+    actions; the tree is sent after frames while a screen reader
+    listens).
+  - Gate app: text on the cards in nine scripts, search (Ctrl+F) over
+    2,000 cards, double-click editing in place at any zoom, status line,
+    an accessibility tree, scripted typing in `--measure`, and
+    `docs/design/m2-gate.md` (how to run it, the manual checklist).
+  - Measured on this VM (llvmpipe, release, ~50 cards of text on
+    screen): paint 1.0 ms, encode **12.0 ms without the glyph atlas,
+    4.3 ms with it**; a keystroke including the search 0.2 ms (search
+    0.08 ms); fonts load in 15 ms; main to first frame 343 ms (the first
+    frame lays out the visible cards: paint 23 ms); idle 0 frames, 0 %
+    CPU. Text encode is the renderer's biggest cost so far: tiles
+    (M2.5) cache it on the canvas, the atlas helps the UI chrome.
+  - Found on the way: PNG stores straight alpha, so golden checks allow
+    one step per channel; `PlainEditor::set_compose` must not get the
+    empty preedit winit sends before a commit; this VM has no Korean,
+    Hindi or emoji fonts (boxes or gaps there).
+  - **Early test binary** sent to the owner with the checklist (criteria
+    4–6 and the numbers so far), ahead of the plan (M2.4).
+- [ ] **M2.4 Widgets and layout** ← **next**: the minimal widget tree driven by
   signals, Taffy layout, input routing and focus, the command palette over
-  2,000 commands (timed per keystroke through layout). Criterion 3. Then
-  an **early test binary** for the owner's laptop (criteria 3–6).
+  2,000 commands (timed per keystroke through layout). Criterion 3. Also
+  the clipboard and Tab focus traversal (gaps in the M2.3 binary). Then
+  an updated test binary for the owner's laptop.
 - [ ] **M2.5 Canvas**: display lists, the 256-px tile cache, invalidation
   and the compositor (`docs/design/rendering.md`) on the 10k-shape board,
   with pan, zoom, drag and a dirty-tile overlay. Criteria 1 and 2.

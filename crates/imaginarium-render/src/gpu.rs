@@ -9,7 +9,7 @@ use vello_common::peniko::Color;
 use vello_cpu::{PixelMetadata, Pixmap};
 
 use crate::RenderError;
-use crate::scene::{Scene, replay};
+use crate::scene::{Scene, Target, replay};
 
 /// Which GPU to prefer on machines with more than one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,6 +32,11 @@ pub struct GpuOptions {
     pub adapter: Option<String>,
     /// Present without waiting for vertical sync (for measuring).
     pub no_vsync: bool,
+    /// Rasterize glyphs once into an atlas and draw them from there,
+    /// instead of building every glyph's strips each frame. About 3× less
+    /// encode time for text-heavy frames (measured in the M2 gate app);
+    /// Vello calls it experimental, so it can be turned off.
+    pub glyph_atlas: bool,
 }
 
 /// What the GPU is, for reports.
@@ -164,6 +169,7 @@ pub struct WindowRenderer {
     depth: wgpu::TextureView,
     scene: vello_gpu::Scene,
     info: GpuInfo,
+    glyph_atlas: bool,
 }
 
 impl WindowRenderer {
@@ -247,6 +253,7 @@ impl WindowRenderer {
             depth,
             scene: vello_gpu::Scene::new(w, h),
             info,
+            glyph_atlas: options.glyph_atlas,
         })
     }
 
@@ -309,7 +316,15 @@ impl WindowRenderer {
         });
         let (w, h) = clamp_size(self.config.width, self.config.height);
         self.scene.reset_and_resize(w, h);
-        replay(scene, &mut self.scene, transform);
+        replay(
+            scene,
+            &mut Target {
+                context: &mut self.scene,
+                resources: &mut self.resources,
+                glyph_atlas: self.glyph_atlas,
+            },
+            transform,
+        );
         let mut encoder = self
             .gpu
             .device
@@ -406,7 +421,15 @@ impl OffscreenRenderer {
         };
         let depth = vello_gpu::Renderer::create_depth_texture_view(device, &size);
         let mut vello_scene = vello_gpu::Scene::new(w, h);
-        replay(scene, &mut vello_scene, Affine::IDENTITY);
+        replay(
+            scene,
+            &mut Target {
+                context: &mut vello_scene,
+                resources: &mut resources,
+                glyph_atlas: false,
+            },
+            Affine::IDENTITY,
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offscreen"),
         });

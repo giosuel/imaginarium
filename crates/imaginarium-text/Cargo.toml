@@ -1,0 +1,21 @@
+[package]
+name = "imaginarium-text"
+description = "Text layout, editing and painting on Parley: fonts, shaping, line breaking, selection, IME composition (ADR-0003)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+fontique.workspace = true
+imaginarium-render.workspace = true
+parley.workspace = true
+
+[lints]
+workspace = true

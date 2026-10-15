@@ -15,9 +15,11 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
+accesskit.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 imaginarium-render.workspace = true
+imaginarium-text.workspace = true
 imaginarium-ui.workspace = true
 serde_json.workspace = true
 

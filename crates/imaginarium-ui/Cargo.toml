@@ -13,7 +13,10 @@ publish.workspace = true
 bench = false
 
 [dependencies]
+accesskit.workspace = true
+accesskit_winit.workspace = true
 imaginarium-render.workspace = true
+imaginarium-text.workspace = true
 thiserror.workspace = true
 winit.workspace = true
 
