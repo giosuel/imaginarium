@@ -34,6 +34,9 @@ pub(crate) fn take_pasted() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Where read texts go: the window's queue, or a test's.
+type Sink = Box<dyn Fn(String) + Send>;
+
 fn deliver(text: String) {
     if let Ok(mut pasted) = PASTED.lock() {
         pasted.push_back(text);
@@ -47,6 +50,10 @@ fn deliver(text: String) {
 
 /// Where text is kept: the system clipboard, or a stand-in in tests.
 pub(crate) trait Backend {
+    /// Whether there is a system clipboard (a headless session has none).
+    fn available(&self) -> bool {
+        true
+    }
     /// The clipboard's text, if it has any. May block.
     fn get(&mut self) -> Option<String>;
     /// Puts `text` on the clipboard.
@@ -56,6 +63,10 @@ pub(crate) trait Backend {
 struct System(Option<arboard::Clipboard>);
 
 impl Backend for System {
+    fn available(&self) -> bool {
+        self.0.is_some()
+    }
+
     fn get(&mut self) -> Option<String> {
         self.0.as_mut()?.get_text().ok()
     }
@@ -72,17 +83,18 @@ enum Request {
     Get,
 }
 
-/// The system clipboard, opened on its thread on first use. Failures (no
-/// clipboard service, a headless session) keep copy and paste working
+/// The system clipboard, opened on its thread on first use. Without one
+/// (no clipboard service, a headless session) copy and paste still work
 /// inside the app.
 pub struct Clipboard {
     requests: Option<Sender<Request>>,
     open: Box<dyn Fn() -> Box<dyn Backend> + Send + Sync>,
+    sink: Option<Sink>,
 }
 
 impl Default for Clipboard {
     fn default() -> Self {
-        Self::with_backend(|| Box::new(System(arboard::Clipboard::new().ok())))
+        Self::with_backend(|| Box::new(System(arboard::Clipboard::new().ok())), deliver)
     }
 }
 
@@ -95,23 +107,28 @@ impl std::fmt::Debug for Clipboard {
 }
 
 impl Clipboard {
-    /// A clipboard on `open`'s backend (made on the clipboard's thread).
+    /// A clipboard on `open`'s backend (made on the clipboard's thread)
+    /// that hands read texts to `sink`.
     pub(crate) fn with_backend(
         open: impl Fn() -> Box<dyn Backend> + Send + Sync + 'static,
+        sink: impl Fn(String) + Send + 'static,
     ) -> Self {
         Self {
             requests: None,
             open: Box::new(open),
+            sink: Some(Box::new(sink)),
         }
     }
 
     fn send(&mut self, request: Request) {
-        if self.requests.is_none() {
+        if self.requests.is_none()
+            && let Some(sink) = self.sink.take()
+        {
             let (sender, receiver) = mpsc::channel();
             let open = std::mem::replace(&mut self.open, Box::new(|| Box::new(System(None))));
             let started = std::thread::Builder::new()
                 .name("clipboard".into())
-                .spawn(move || serve(open(), receiver));
+                .spawn(move || serve(open(), receiver, sink));
             if started.is_ok() {
                 self.requests = Some(sender);
             }
@@ -135,9 +152,10 @@ impl Clipboard {
 
 /// The clipboard thread: requests in order, so a paste right after a copy
 /// gets the copied text.
-fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>) {
-    // Text copied while no system clipboard was available, so copy and
-    // paste still work inside the app.
+fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>, sink: Sink) {
+    // Without a system clipboard, the text copied in the app, so copy and
+    // paste still work inside it. (With one, a read that fails pastes
+    // nothing, not an older copy.)
     let mut fallback = String::new();
     for request in requests {
         match request {
@@ -146,12 +164,13 @@ fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>) {
                 fallback = text;
             }
             Request::Get => {
-                let text = backend
-                    .get()
-                    .filter(|text| !text.is_empty())
-                    .or_else(|| (!fallback.is_empty()).then(|| fallback.clone()));
-                if let Some(text) = text {
-                    deliver(text);
+                let text = if backend.available() {
+                    backend.get()
+                } else {
+                    Some(fallback.clone())
+                };
+                if let Some(text) = text.filter(|text| !text.is_empty()) {
+                    sink(text);
                 }
             }
         }
@@ -175,18 +194,47 @@ mod tests {
         fn set(&mut self, _text: &str) {}
     }
 
+    /// A clipboard whose owner never answers in time, or no clipboard.
+    struct Failing(bool);
+
+    impl Backend for Failing {
+        fn available(&self) -> bool {
+            self.0
+        }
+        fn get(&mut self) -> Option<String> {
+            None
+        }
+        fn set(&mut self, _text: &str) {}
+    }
+
+    fn collector() -> (impl Fn(String) + Send + 'static, mpsc::Receiver<String>) {
+        let (sender, receiver) = mpsc::channel();
+        (move |text| drop(sender.send(text)), receiver)
+    }
+
     #[test]
     fn a_slow_clipboard_does_not_block_the_caller() {
-        let mut clipboard = Clipboard::with_backend(|| Box::new(Slow));
+        let (sink, pasted) = collector();
+        let mut clipboard = Clipboard::with_backend(|| Box::new(Slow), sink);
         let start = Instant::now();
         clipboard.request_text();
         assert!(start.elapsed() < Duration::from_millis(100));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut pasted = Vec::new();
-        while pasted.is_empty() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-            pasted = take_pasted();
-        }
-        assert_eq!(pasted, ["slow"]);
+        let text = pasted.recv_timeout(Duration::from_secs(5));
+        assert_eq!(text.as_deref(), Ok("slow"));
+    }
+
+    #[test]
+    fn a_failed_read_pastes_nothing_and_without_a_clipboard_the_app_still_can() {
+        let (sink, pasted) = collector();
+        let mut clipboard = Clipboard::with_backend(|| Box::new(Failing(true)), sink);
+        clipboard.set_text("copied earlier");
+        clipboard.request_text();
+        assert!(pasted.recv_timeout(Duration::from_millis(300)).is_err());
+        let (sink, pasted) = collector();
+        let mut headless = Clipboard::with_backend(|| Box::new(Failing(false)), sink);
+        headless.set_text("in the app");
+        headless.request_text();
+        let text = pasted.recv_timeout(Duration::from_secs(5));
+        assert_eq!(text.as_deref(), Ok("in the app"));
     }
 }
