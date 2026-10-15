@@ -220,8 +220,10 @@ releases are the usual window for compromised packages.
   workspaces under `benchmarks/` and `crates/*/fuzz/`.
 - `cargo xtask dep-age` does this for every committed `Cargo.lock` (CI runs
   it in the deps job) and prints the `cargo update --precise` command for
-  each too-new version. Security-fix exceptions go in
-  `xtask/dep-age-exceptions.txt`, one `name version  # reason` per line.
+  each too-new version. Exceptions (security fixes, or the owner's, with
+  the decision's date) go in `xtask/dep-age-exceptions.txt`, one `name
+  version  # reason` per line; it notes the ones that are no longer
+  needed, to be removed.
 - When a requirement in `Cargo.toml` names a too-new minimum (e.g.
   `serde_json = "1.0.154"`), lower it to the version you pin.
 

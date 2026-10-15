@@ -10,8 +10,10 @@
 //! field and are therefore old enough. The index is fetched with `curl`, so
 //! the xtask needs no HTTP library.
 //!
-//! Exceptions (security fixes) are listed in `xtask/dep-age-exceptions.txt`,
-//! one `name version  # reason` per line.
+//! Exceptions (security fixes, and explicit owner exceptions) are listed in
+//! `xtask/dep-age-exceptions.txt`, one `name version  # reason` per line.
+//! Exceptions that are no longer needed (the version is old enough now, or
+//! in no lockfile) are reported, to be removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -187,6 +189,33 @@ pub(crate) fn evaluate(
     Ok(findings)
 }
 
+/// Exceptions that no longer do anything: the version is in no lockfile,
+/// or old enough by now. With why.
+pub(crate) fn unneeded_exceptions(
+    packages: &BTreeSet<Package>,
+    index: &BTreeMap<String, Vec<Published>>,
+    exceptions: &BTreeSet<Package>,
+    now: i64,
+    min_days: i64,
+) -> Vec<(Package, &'static str)> {
+    let cutoff = now - min_days * 86_400;
+    exceptions
+        .iter()
+        .filter_map(|exception| {
+            if !packages.contains(exception) {
+                return Some((exception.clone(), "in no lockfile"));
+            }
+            let time = index
+                .get(&exception.name)?
+                .iter()
+                .find(|v| v.version == exception.version)?
+                .time;
+            time.is_none_or(|time| time <= cutoff)
+                .then(|| (exception.clone(), "old enough now"))
+        })
+        .collect()
+}
+
 fn format_date(unix: i64) -> String {
     // civil_from_days (inverse of days_from_civil).
     let z = unix.div_euclid(86_400) + 719_468;
@@ -296,8 +325,18 @@ fn lockfiles(root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
-/// Runs the check: `Ok(findings)`, or `Err` if it couldn't run.
-pub(crate) fn check(root: &Path, min_days: i64) -> Result<(usize, usize, Vec<Finding>), String> {
+/// What a check found.
+pub(crate) struct Report {
+    pub(crate) files: usize,
+    pub(crate) packages: usize,
+    /// Versions that are too new.
+    pub(crate) findings: Vec<Finding>,
+    /// Exceptions to remove, with why.
+    pub(crate) unneeded: Vec<(Package, &'static str)>,
+}
+
+/// Runs the check, or `Err` if it couldn't run.
+pub(crate) fn check(root: &Path, min_days: i64) -> Result<Report, String> {
     let files = lockfiles(root)?;
     let mut packages = BTreeSet::new();
     for file in &files {
@@ -317,7 +356,13 @@ pub(crate) fn check(root: &Path, min_days: i64) -> Result<(usize, usize, Vec<Fin
         .as_secs();
     let now = i64::try_from(now).map_err(|err| err.to_string())?;
     let findings = evaluate(&packages, &index, &exceptions, now, min_days)?;
-    Ok((files.len(), packages.len(), findings))
+    let unneeded = unneeded_exceptions(&packages, &index, &exceptions, now, min_days);
+    Ok(Report {
+        files: files.len(),
+        packages: packages.len(),
+        findings,
+        unneeded,
+    })
 }
 
 #[cfg(test)]
@@ -439,6 +484,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert!(
             evaluate(&packages, &BTreeMap::new(), &BTreeSet::new(), now, 14).is_err(),
             "missing crates are errors"
+        );
+        assert!(unneeded_exceptions(&packages, &index, &exceptions, now, 14).is_empty());
+        // Ten days later it is old enough, and the exception can go; so
+        // can one for a version no lockfile has.
+        let more: BTreeSet<Package> =
+            parse_exceptions("zerocopy 0.8.59  # RUSTSEC fix\nserde 1.0.300  # gone\n")
+                .into_iter()
+                .collect();
+        let unneeded = unneeded_exceptions(&packages, &index, &more, now + 10 * day, 14);
+        assert_eq!(
+            unneeded,
+            [
+                (package("serde", "1.0.300"), "in no lockfile"),
+                (package("zerocopy", "0.8.59"), "old enough now"),
+            ]
         );
     }
 }
