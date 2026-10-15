@@ -652,3 +652,46 @@ fn a_cleanup_for_a_disposed_owner_is_dropped_outside_the_graph() {
     });
     assert_eq!(s.get(), 1);
 }
+
+#[test]
+fn readers_that_stop_and_start_reading_a_signal_keep_one_edge() {
+    let (flag, hot) = (signal(true), signal(0));
+    let runs = Count::default();
+    let r = runs.clone();
+    effect(move || {
+        r.bump();
+        if flag.get() {
+            let _ = hot.get();
+        }
+    });
+    for _ in 0..3 {
+        flag.set(false); // drops `hot`
+        flag.set(true); // reads it again
+    }
+    assert_eq!(runs.get(), 7);
+    hot.set(1);
+    assert_eq!(runs.get(), 8, "one run per write: one edge");
+    flag.set(false);
+    hot.set(2);
+    assert_eq!(runs.get(), 9, "no edge once it stopped reading");
+    assert!(hot.subscriber_entries_for_tests() <= 1);
+}
+
+#[test]
+fn many_readers_dropping_one_signal_stay_linear() {
+    // Removing each edge on its own would be quadratic: about 10^9 steps.
+    let start = std::time::Instant::now();
+    let (flag, hot) = (signal(true), signal(0u64));
+    for _ in 0..40_000 {
+        effect(move || {
+            if flag.get() {
+                let _ = hot.get();
+            }
+        });
+    }
+    flag.set(false);
+    flag.set(true);
+    flag.set(false);
+    assert!(hot.subscriber_entries_for_tests() < 100);
+    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+}

@@ -106,8 +106,16 @@ struct Node {
     /// While it runs: sources read after the first difference, and whether
     /// reading them subscribed it (it didn't if it already was).
     new_sources: Vec<(NodeId, bool)>,
-    /// Computations that read this node. May contain disposed ones.
+    /// Computations that read this node. May contain disposed ones, and
+    /// the readers in `dropped`.
     subscribers: Vec<NodeId>,
+    /// Readers that stopped reading this node, one entry per edge to drop
+    /// from `subscribers`. Dropped in bulk before `subscribers` is used,
+    /// or once there are many: when 10k readers stop reading one signal,
+    /// removing each edge on its own would be quadratic.
+    dropped: Vec<NodeId>,
+    /// Scratch count for [`apply_drops`].
+    drop_count: u32,
     owner: Option<NodeId>,
     /// May contain disposed ones.
     children: Vec<NodeId>,
@@ -132,6 +140,8 @@ impl Node {
             cursor: 0,
             new_sources: Vec::new(),
             subscribers: Vec::new(),
+            dropped: Vec::new(),
+            drop_count: 0,
             owner: None,
             children: Vec::new(),
             cleanups: Vec::new(),
@@ -417,7 +427,12 @@ impl Runtime {
             if let Some(source_node) = live_mut(&mut nodes, source)
                 && source_node.mark != run
             {
-                source_node.subscribers.retain(|&s| s != id);
+                source_node.dropped.push(id);
+                // Linear in the list, once the list has shrunk by half
+                // since: amortized constant per edge.
+                if source_node.dropped.len() * 2 >= source_node.subscribers.len() {
+                    apply_drops(&mut nodes, source);
+                }
             }
         }
         if let Some(node) = live_mut(&mut nodes, id) {
@@ -601,7 +616,12 @@ impl Runtime {
                 if node.kind == Kind::Effect {
                     pending.push_back(next);
                 }
-                stack.extend(node.subscribers.iter().map(|&s| (s, State::Check)));
+                if !node.dropped.is_empty() {
+                    apply_drops(&mut nodes, next);
+                }
+                if let Some(node) = live_mut(&mut nodes, next) {
+                    stack.extend(node.subscribers.iter().map(|&s| (s, State::Check)));
+                }
             }
         }
         self.flush_unless_batching();
@@ -825,12 +845,50 @@ fn push_compacting(
 /// ones (filtered in place, no allocation). Put it back with
 /// [`put_subscribers`].
 fn take_live_subscribers(nodes: &mut [Node], id: NodeId) -> Vec<NodeId> {
+    apply_drops(nodes, id);
     let Some(node) = live_mut(nodes, id) else {
         return Vec::new();
     };
     let mut subscribers = std::mem::take(&mut node.subscribers);
     subscribers.retain(|&s| nodes.get(s.index as usize).is_some_and(|n| n.is(s)));
     subscribers
+}
+
+/// Removes the edges in `id`'s `dropped` list from its subscribers (and the
+/// disposed subscribers with them), in one pass. A reader that dropped and
+/// then read `id` again has two entries and one drop: one entry stays.
+fn apply_drops(nodes: &mut [Node], id: NodeId) {
+    let Some(node) = live_mut(nodes, id) else {
+        return;
+    };
+    if node.dropped.is_empty() {
+        return;
+    }
+    let mut dropped = std::mem::take(&mut node.dropped);
+    let mut subscribers = std::mem::take(&mut node.subscribers);
+    for &reader in &dropped {
+        if let Some(reader) = live_mut(nodes, reader) {
+            reader.drop_count += 1;
+        }
+    }
+    subscribers.retain(|&s| match live_mut(nodes, s) {
+        None => false,
+        Some(reader) if reader.drop_count > 0 => {
+            reader.drop_count -= 1;
+            false
+        }
+        Some(_) => true,
+    });
+    for &reader in &dropped {
+        if let Some(reader) = live_mut(nodes, reader) {
+            reader.drop_count = 0;
+        }
+    }
+    dropped.clear();
+    if let Some(node) = live_mut(nodes, id) {
+        node.subscribers = subscribers;
+        node.dropped = dropped;
+    }
 }
 
 fn put_subscribers(nodes: &mut [Node], id: NodeId, subscribers: Vec<NodeId>) {
