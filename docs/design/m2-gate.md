@@ -803,6 +803,43 @@ Left for M3 (the canvas):
 The search fix and the new report fields come with the next build; the
 gate's last run is part of M2.9.
 
+## M2.9 run: the last one
+
+Build "M2.9 final", from the wrap-up branch: every fix of M2, including
+the review of all M2 code
+(https://github.com/giosuel/imaginarium/pull/33). New since run 5:
+- **The search** dims the cards it misses with a veil over the tiles, so
+  typing renders no tile (`typing.tiles_rendered`, 0 on the VM). The
+  report has the run's longest frame intervals (`longest_intervals`).
+- **Criterion 1** checks the frame rate as well: with vsync at most 1 %
+  of the intervals may be over 20 ms. The frame time leaves out a
+  present that blocks. Run 5's verdicts don't change.
+- **The script settles before typing too,** and each settle says whether
+  it ran out (`settled_before.timed_out`).
+- **Fixes a real desktop shows** (checklist items):
+  - the window could crash when Orca started while it drew, fixed (14);
+  - a composition doesn't follow the focus into another field (13b);
+  - a hidden or minimized window doesn't redraw in a loop (21b);
+  - pasting doesn't freeze the window when the app that copied hangs
+    (19);
+  - shortcuts work on non-Latin layouts (19);
+  - Delete during a drag waits for the drop (5b2);
+  - the drop renders only the tiles at the new place (5b).
+
+Run:
+
+```sh
+./imaginarium-gate --measure --fullscreen --report gate-report-igpu.json
+./imaginarium-gate --measure --fullscreen --gpu high --report gate-report-dgpu.json
+./imaginarium-gate --measure --fullscreen --no-vsync --report gate-report-novsync.json
+```
+
+Then go through the manual checklist (`./imaginarium-gate`), all of it if
+you can. Criteria 4 (text, input method, screen reader: items 7–16 and
+20) and 5 (HiDPI: items 5 and 6) have no report yet; they decide the
+gate's last two criteria. Note for each item: works, odd (what), or
+broken.
+
 ## Decision (owner, 2026-10-13)
 
 **We keep our toolkit** (ADR-0007, "Gate result").
