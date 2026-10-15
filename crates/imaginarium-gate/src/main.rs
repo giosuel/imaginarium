@@ -112,11 +112,6 @@ struct Args {
     /// timing it changes nothing).
     #[arg(long)]
     no_gpu_times: bool,
-    /// Keep drawing into a surface the driver calls suboptimal instead of
-    /// setting it up again before the next frame (to measure what the
-    /// set-ups cost).
-    #[arg(long)]
-    keep_suboptimal: bool,
     /// Threads that render tiles (on the CPU). 0: the frame renders them
     /// on the GPU, as before M2.8. Default: half the cores, at most 8.
     #[arg(long)]
@@ -1045,7 +1040,6 @@ fn gpu_options(args: &Args) -> GpuOptions {
         no_vsync: args.no_vsync,
         glyph_atlas: !args.no_glyph_atlas,
         gpu_times: !args.no_gpu_times,
-        keep_suboptimal: args.keep_suboptimal,
     }
 }
 
@@ -1268,7 +1262,6 @@ fn main() -> anyhow::Result<()> {
             "vsync": !args.no_vsync,
             "glyph_atlas": !args.no_glyph_atlas,
             "gpu_times": !args.no_gpu_times,
-            "keep_suboptimal": args.keep_suboptimal,
             "gpu_frames_timed": gate.gpu_times.len(),
         })),
         // The last frame's size and scale: the first frame can come before
@@ -1674,14 +1667,6 @@ mod tests {
                 && gap["skipped_before"] == 2),
             "{gaps}"
         );
-    }
-
-    #[test]
-    fn keep_suboptimal_reaches_the_renderer() {
-        let args = Args::parse_from(["imaginarium-gate", "--keep-suboptimal"]);
-        assert!(gpu_options(&args).keep_suboptimal);
-        let args = Args::parse_from(["imaginarium-gate"]);
-        assert!(!gpu_options(&args).keep_suboptimal);
     }
 
     #[test]

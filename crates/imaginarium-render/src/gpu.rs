@@ -49,10 +49,6 @@ pub struct GpuOptions {
     /// GPU can ([`FrameTiming::gpu`]). For measuring; it costs a few
     /// timestamps and a small read-back per frame.
     pub gpu_times: bool,
-    /// Keep drawing into a surface the driver calls suboptimal, instead of
-    /// setting it up again before the next frame. For measuring what the
-    /// set-ups cost ([`FrameTiming::reconfigured`]).
-    pub keep_suboptimal: bool,
 }
 
 /// What the GPU is, for reports.
@@ -382,8 +378,6 @@ pub struct WindowRenderer {
     /// The last texture was suboptimal: set the surface up again before
     /// the next one.
     reconfigure: bool,
-    /// [`GpuOptions::keep_suboptimal`].
-    keep_suboptimal: bool,
     /// Frames skipped since the last presented one.
     skipped: u32,
     /// The format Vello renders in: never sRGB, because Vello's colors are
@@ -845,7 +839,6 @@ impl WindowRenderer {
             surface,
             config,
             reconfigure: false,
-            keep_suboptimal: options.keep_suboptimal,
             skipped: 0,
             view_format,
             renderer,
@@ -954,7 +947,7 @@ impl WindowRenderer {
                 // Still drawable: draw it, and set up the surface again
                 // before the next frame.
                 suboptimal = true;
-                self.reconfigure = !self.keep_suboptimal;
+                self.reconfigure = true;
                 Ok(texture)
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
