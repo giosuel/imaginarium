@@ -539,6 +539,9 @@ impl Textures {
         work: &[TextureWork],
     ) -> Result<TextureStats, RenderError> {
         let mut stats = TextureStats::default();
+        // All of the work is done even when a render fails: the owners
+        // count on their uploads and frees.
+        let mut failed = None;
         self.pages.receive(&mut self.bindings);
         stats.pages.coming = u32::try_from(self.pages.coming()).unwrap_or(u32::MAX);
         for item in work {
@@ -615,7 +618,7 @@ impl Textures {
                     let timed = timer
                         .as_deref_mut()
                         .and_then(|timer| timer.texture_start(&mut encoder));
-                    renderer
+                    let rendered = renderer
                         .render(
                             &self.scene,
                             resources,
@@ -630,18 +633,30 @@ impl Textures {
                                 color: Color::TRANSPARENT,
                             }),
                         )
-                        .map_err(|err| RenderError::Render(err.to_string()))?;
+                        .map_err(|err| RenderError::Render(err.to_string()));
+                    // Submitted either way: its timestamps are counted on.
                     if let Some(timer) = timer.as_deref_mut() {
                         timer.end(&mut encoder, timed);
                     }
                     let submitting = Instant::now();
                     gpu.queue.submit([encoder.finish()]);
                     stats.submit += submitting.elapsed();
-                    stats.renders += 1;
+                    match rendered {
+                        Ok(()) => stats.renders += 1,
+                        Err(err) => {
+                            // Missing rather than showing whatever the
+                            // texture held before.
+                            self.free(*key);
+                            failed.get_or_insert(err);
+                        }
+                    }
                 }
             }
         }
-        Ok(stats)
+        match failed {
+            Some(err) => Err(err),
+            None => Ok(stats),
+        }
     }
 }
 

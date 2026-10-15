@@ -2247,6 +2247,7 @@ dependencies = [
 name = "imaginarium-render"
 version = "0.0.1"
 dependencies = [
+ "criterion",
  "pollster",
  "proptest",
  "skrifa",

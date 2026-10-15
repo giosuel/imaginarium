@@ -4,7 +4,7 @@
 //! space, rasterized into cached 256-pixel tiles per zoom level, so a frame
 //! re-renders only tiles whose items changed and panning re-renders none.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,19 @@ const MAX_UPLOADS: usize = 16;
 
 /// With workers: the time to upload a tile before any upload was measured.
 const INITIAL_UPLOAD_COST: Duration = Duration::from_micros(100);
+
+/// A time sample counts as this many times the current estimate at most:
+/// one frame that waited for the driver (or for a tile page) must not
+/// stall the tile work of the frames after it.
+const MAX_SAMPLE_RATIO: u32 = 4;
+
+/// An item covering more grid cells than this is kept in a list of its
+/// own instead of the grid (a huge frame, or bounds from a bug).
+const MAX_ITEM_CELLS: i64 = 4_096;
+
+/// Levels further from 0 aren't drawn: 2^±32 device pixels per document
+/// unit, far beyond any zoom (and where tile coordinates would overflow).
+const MAX_LEVEL: i32 = 64;
 
 /// An item on the canvas, chosen by the caller (a node id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -132,9 +145,9 @@ pub fn level_scale(level: i32) -> f64 {
 }
 
 /// The smallest level whose scale is at least `scale`: tiles are never
-/// magnified and at most √2 too fine.
+/// magnified and at most √2 too fine (within ±[`MAX_LEVEL`]).
 pub fn level_for(scale: f64) -> i32 {
-    (2.0 * scale.max(1e-6).log2() - 1e-9).ceil() as i32
+    ((2.0 * scale.max(1e-6).log2() - 1e-9).ceil() as i32).clamp(-MAX_LEVEL, MAX_LEVEL)
 }
 
 impl TileKey {
@@ -294,7 +307,12 @@ impl Workers {
 pub struct Canvas {
     items: HashMap<ItemId, Item>,
     grid: HashMap<(i32, i32), Vec<ItemId>>,
+    /// Items too big for the grid, checked everywhere.
+    large: Vec<ItemId>,
     tiles: HashMap<TileKey, Tile>,
+    /// Cached tiles per level, so an invalidation looks up the tiles over
+    /// its area level by level instead of going through all of them.
+    levels: BTreeMap<i32, usize>,
     frame: u64,
     /// Tile renders per frame at most; the rest are owed. A cap: the time
     /// budget usually decides first.
@@ -349,7 +367,9 @@ impl Canvas {
         Self {
             items: HashMap::new(),
             grid: HashMap::new(),
+            large: Vec::new(),
             tiles: HashMap::new(),
+            levels: BTreeMap::new(),
             frame: 0,
             budget: 64,
             render_budget: RENDER_BUDGET,
@@ -382,8 +402,9 @@ impl Canvas {
     /// Renders tiles on `workers` instead of in the frame: a frame paints a
     /// tile's items and hands it over, and shows stand-ins until it comes
     /// back (usually by the next frame) to be uploaded. Rendering tiles
-    /// then takes nothing from the frame; uploading them takes up to half
-    /// its tile time (16 tiles at most), and the others wait for the next.
+    /// then takes nothing from the frame; uploading them takes the frame's
+    /// tile time (half of it before building tiles, the rest after) and 16
+    /// tiles at most, and the others wait for the next.
     /// Without workers (none could start), tiles render in the frame.
     pub fn with_workers(mut self, workers: TileWorkers) -> Self {
         if workers.threads() > 0 {
@@ -433,7 +454,9 @@ impl Canvas {
     pub fn note_render_time(&mut self, renderer: Duration) {
         let uploads = std::mem::take(&mut self.last_uploads);
         if self.workers.is_some() && uploads > 0 {
-            let sample = renderer / uploads as u32;
+            // The renderer's time includes making tile pages and driver
+            // stalls: one slow frame must not stop the uploads of the next.
+            let sample = (renderer / uploads as u32).min(self.upload_cost * MAX_SAMPLE_RATIO);
             self.upload_cost = (self.upload_cost + sample) / 2;
         }
         let Some((build, units)) = self.pending.take() else {
@@ -448,7 +471,7 @@ impl Canvas {
         } else {
             build + renderer
         };
-        let sample = work / units as u32;
+        let sample = (work / units as u32).min(self.unit_cost * MAX_SAMPLE_RATIO);
         // Halfway to the new sample: quick to follow a change of content,
         // steady across frames of similar tiles.
         self.unit_cost = (self.unit_cost + sample) / 2;
@@ -483,29 +506,90 @@ impl Canvas {
         self.items.is_empty()
     }
 
+    /// The grid cells `bounds` touches, as a range: (x0, y0, x1, y1),
+    /// inclusive.
+    fn cell_range(bounds: Rect) -> (i32, i32, i32, i32) {
+        (
+            (bounds.x0 / CELL).floor() as i32,
+            (bounds.y0 / CELL).floor() as i32,
+            (bounds.x1 / CELL).floor() as i32,
+            (bounds.y1 / CELL).floor() as i32,
+        )
+    }
+
+    fn cell_count((x0, y0, x1, y1): (i32, i32, i32, i32)) -> i64 {
+        (i64::from(x1) - i64::from(x0) + 1)
+            .max(0)
+            .saturating_mul((i64::from(y1) - i64::from(y0) + 1).max(0))
+    }
+
     fn cells(bounds: Rect) -> impl Iterator<Item = (i32, i32)> {
-        let x0 = (bounds.x0 / CELL).floor() as i32;
-        let y0 = (bounds.y0 / CELL).floor() as i32;
-        let x1 = (bounds.x1 / CELL).floor() as i32;
-        let y1 = (bounds.y1 / CELL).floor() as i32;
+        let (x0, y0, x1, y1) = Self::cell_range(bounds);
         (y0..=y1).flat_map(move |y| (x0..=x1).map(move |x| (x, y)))
+    }
+
+    /// Whether an item with these bounds goes in the large list.
+    fn is_large(bounds: Rect) -> bool {
+        Self::cell_count(Self::cell_range(bounds)) > MAX_ITEM_CELLS
+    }
+
+    /// The ids in the grid cells `area` touches (with repeats for items in
+    /// several), and the large items: by cell when there are fewer cells
+    /// than the grid has, else by going through the grid.
+    fn candidates(&self, area: Rect) -> Vec<ItemId> {
+        let range = Self::cell_range(area);
+        let mut ids = self.large.clone();
+        if Self::cell_count(range) <= self.grid.len() as i64 {
+            for cell in Self::cells(area) {
+                ids.extend(self.grid.get(&cell).into_iter().flatten());
+            }
+        } else {
+            let (x0, y0, x1, y1) = range;
+            for (&(x, y), cell) in &self.grid {
+                if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                    ids.extend(cell);
+                }
+            }
+        }
+        ids
+    }
+
+    fn unlink(&mut self, id: ItemId, bounds: Rect) {
+        if Self::is_large(bounds) {
+            self.large.retain(|&other| other != id);
+            return;
+        }
+        for cell in Self::cells(bounds) {
+            if let Some(ids) = self.grid.get_mut(&cell) {
+                ids.retain(|&other| other != id);
+                if ids.is_empty() {
+                    self.grid.remove(&cell);
+                }
+            }
+        }
     }
 
     /// Adds or changes an item: its stacking order `z` (higher on top) and
     /// the document rectangle it paints in. Its old and new areas are
-    /// redrawn.
+    /// redrawn. An item whose bounds aren't finite isn't kept.
     pub fn upsert(&mut self, id: ItemId, z: u64, bounds: Rect) {
-        if let Some(old) = self.items.get(&id) {
-            let old_bounds = old.bounds;
-            for cell in Self::cells(old_bounds) {
-                if let Some(ids) = self.grid.get_mut(&cell) {
-                    ids.retain(|&other| other != id);
-                }
-            }
-            self.invalidate(old_bounds);
+        if let Some(old) = self.items.remove(&id) {
+            self.unlink(id, old.bounds);
+            self.invalidate(old.bounds);
         }
-        for cell in Self::cells(bounds) {
-            self.grid.entry(cell).or_default().push(id);
+        if !(bounds.x0.is_finite()
+            && bounds.y0.is_finite()
+            && bounds.x1.is_finite()
+            && bounds.y1.is_finite())
+        {
+            return;
+        }
+        if Self::is_large(bounds) {
+            self.large.push(id);
+        } else {
+            for cell in Self::cells(bounds) {
+                self.grid.entry(cell).or_default().push(id);
+            }
         }
         self.items.insert(id, Item { z, bounds });
         self.invalidate(bounds);
@@ -514,13 +598,44 @@ impl Canvas {
     /// Removes an item; its area is redrawn.
     pub fn remove(&mut self, id: ItemId) {
         if let Some(item) = self.items.remove(&id) {
-            for cell in Self::cells(item.bounds) {
-                if let Some(ids) = self.grid.get_mut(&cell) {
-                    ids.retain(|&other| other != id);
-                }
-            }
+            self.unlink(id, item.bounds);
             self.invalidate(item.bounds);
         }
+    }
+
+    /// Frees every texture the canvas holds, through `scene`'s texture
+    /// work, and forgets its tiles: call it before dropping a canvas
+    /// whose renderer lives on (the renderer can't know the textures are
+    /// unused). The items stay.
+    pub fn release(&mut self, scene: &mut Scene) {
+        for (_, tile) in self.tiles.drain() {
+            if let Some(texture) = tile.texture {
+                scene.free_texture(texture);
+            }
+        }
+        self.levels.clear();
+        if let Some(workers) = &mut self.workers {
+            workers.flights.clear();
+            workers.parked.clear();
+        }
+        self.level = None;
+    }
+
+    fn put_tile(&mut self, key: TileKey, tile: Tile) {
+        if self.tiles.insert(key, tile).is_none() {
+            *self.levels.entry(key.level).or_default() += 1;
+        }
+    }
+
+    fn take_tile(&mut self, key: TileKey) -> Option<Tile> {
+        let tile = self.tiles.remove(&key)?;
+        if let Some(count) = self.levels.get_mut(&key.level) {
+            *count -= 1;
+            if *count == 0 {
+                self.levels.remove(&key.level);
+            }
+        }
+        Some(tile)
     }
 
     /// An item's bounds.
@@ -535,8 +650,10 @@ impl Canvas {
             (point.y / CELL).floor() as i32,
         );
         self.grid
-            .get(&cell)?
-            .iter()
+            .get(&cell)
+            .into_iter()
+            .flatten()
+            .chain(&self.large)
             .filter_map(|id| Some((*id, self.items.get(id)?)))
             .filter(|(_, item)| item.bounds.contains(point))
             .max_by_key(|(id, item)| (item.z, *id))
@@ -552,11 +669,42 @@ impl Canvas {
             key.bounds().intersect(area.inflate(grow, grow)).area() > 0.0
                 || area.inflate(grow, grow).contains(key.bounds().origin())
         };
-        for (key, tile) in &mut self.tiles {
-            if touches(key) {
-                tile.stale = true;
+        // The tiles over `area`, level by level (half a pixel more, for
+        // rounding), unless that is more than the cache holds: an edit
+        // touches a few tiles, the cache has up to a thousand.
+        let mut ranges = Vec::with_capacity(self.levels.len());
+        let mut keys = 0i64;
+        for &level in self.levels.keys() {
+            let grow = 1.5 / level_scale(level);
+            let (x0, y0, x1, y1) = tiles_in(level, area.inflate(grow, grow));
+            keys = keys.saturating_add(
+                (i64::from(x1) - i64::from(x0))
+                    .max(0)
+                    .saturating_mul((i64::from(y1) - i64::from(y0)).max(0)),
+            );
+            ranges.push((level, x0, y0, x1, y1));
+        }
+        if keys <= self.tiles.len() as i64 {
+            for (level, x0, y0, x1, y1) in ranges {
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let key = TileKey { level, x, y };
+                        if let Some(tile) = self.tiles.get_mut(&key)
+                            && touches(&key)
+                        {
+                            tile.stale = true;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (key, tile) in &mut self.tiles {
+                if touches(key) {
+                    tile.stale = true;
+                }
             }
         }
+        // At most a few dozen.
         for (key, flight) in self.flights_mut() {
             if touches(key) {
                 flight.stale = true;
@@ -641,6 +789,11 @@ impl Canvas {
         stats: &mut CanvasStats,
     ) {
         while !awaited.is_empty() {
+            // The frame's uploads are capped, blank tiles' too: the rest
+            // show blank for one more frame.
+            if stats.arrived >= MAX_UPLOADS {
+                return;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             let Some(done) = self
                 .workers
@@ -701,11 +854,13 @@ impl Canvas {
                 None
             }
         };
-        self.tiles.insert(
+        // A stale one renders again, also when this render failed: its
+        // items changed, and that is the retry the failure waits for.
+        self.put_tile(
             done.key,
             Tile {
                 texture,
-                stale: flight.stale && texture.is_some(),
+                stale: flight.stale,
                 used: self.frame,
             },
         );
@@ -715,28 +870,22 @@ impl Canvas {
     /// The items touching `area`, bottom first.
     /// Whether any item touches `area`.
     fn any_item_in(&self, area: Rect) -> bool {
-        Self::cells(area).any(|cell| {
-            self.grid.get(&cell).is_some_and(|ids| {
-                ids.iter().any(|id| {
-                    self.items
-                        .get(id)
-                        .is_some_and(|item| item.bounds.intersect(area).area() > 0.0)
-                })
-            })
+        self.candidates(area).iter().any(|id| {
+            self.items
+                .get(id)
+                .is_some_and(|item| item.bounds.intersect(area).area() > 0.0)
         })
     }
 
     fn items_in(&self, area: Rect) -> Vec<ItemId> {
         let mut seen = HashSet::new();
         let mut found: Vec<(u64, ItemId)> = Vec::new();
-        for cell in Self::cells(area) {
-            for id in self.grid.get(&cell).into_iter().flatten() {
-                if seen.insert(*id)
-                    && let Some(item) = self.items.get(id)
-                    && item.bounds.intersect(area).area() > 0.0
-                {
-                    found.push((item.z, *id));
-                }
+        for id in self.candidates(area) {
+            if seen.insert(id)
+                && let Some(item) = self.items.get(&id)
+                && item.bounds.intersect(area).area() > 0.0
+            {
+                found.push((item.z, id));
             }
         }
         found.sort_unstable();
@@ -791,6 +940,21 @@ impl Canvas {
         content: &mut dyn CanvasContent,
     ) -> CanvasStats {
         self.frame += 1;
+        let finite = |v: f64| v.is_finite();
+        let screen = viewport.screen;
+        if !(viewport.zoom > 0.0
+            && finite(viewport.zoom)
+            && viewport.scale_factor > 0.0
+            && finite(viewport.scale_factor)
+            && finite(viewport.origin.x)
+            && finite(viewport.origin.y)
+            && finite(screen.x0)
+            && finite(screen.y0)
+            && finite(screen.x1)
+            && finite(screen.y1))
+        {
+            return CanvasStats::default(); // nothing sensible to show
+        }
         let scale = viewport.device_scale();
         let level = self.choose_level(scale, now);
         let level_scale = level_scale(level);
@@ -844,7 +1008,7 @@ impl Canvas {
             if let Some(workers) = &mut self.workers {
                 workers.flights.remove(key);
             }
-            self.tiles.insert(
+            self.put_tile(
                 *key,
                 Tile {
                     texture: None,
@@ -935,7 +1099,7 @@ impl Canvas {
                 .and_then(|tile| tile.texture)
                 .unwrap_or_else(TextureKey::unique);
             scene.render_texture(texture, TILE, TILE, tile_scene);
-            self.tiles.insert(
+            self.put_tile(
                 key,
                 Tile {
                     texture: Some(texture),
@@ -1128,7 +1292,9 @@ impl Canvas {
                     }
                 }
             }
-            if all {
+            // An empty range (from coordinates that overflowed) covers
+            // nothing.
+            if all && !cached.is_empty() {
                 return Some(if is_coarser {
                     StandIn::Coarser(cached)
                 } else {
@@ -1158,7 +1324,7 @@ impl Canvas {
         let excess = self.tiles.len() - self.capacity;
         let mut evicted = 0;
         for (_, key) in old.into_iter().take(excess) {
-            if let Some(tile) = self.tiles.remove(&key) {
+            if let Some(tile) = self.take_tile(key) {
                 if let Some(texture) = tile.texture {
                     scene.free_texture(texture);
                 }
@@ -1752,7 +1918,11 @@ mod tests {
             .with_workers(TileWorkers::new(4, CpuMode::Deterministic))
             .with_blank_wait(Duration::from_secs(60))
             .with_render_budget(UNLIMITED);
-        let view = viewport(Point::ZERO, 1.0);
+        // 12 tiles: within a frame's uploads.
+        let view = Viewport {
+            screen: Rect::new(0.0, 0.0, 1024.0, 768.0),
+            ..viewport(Point::ZERO, 1.0)
+        };
         let mut scene = Scene::new();
         let first = canvas.frame(&mut scene, &view, Instant::now(), &mut boxes);
         // Everything came back within the frame and is drawn from it.
@@ -1839,11 +2009,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let cheap = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
         assert!(cheap.arrived > 4, "{cheap:?}");
-        // The renderer took 5 ms for each: about one per frame from now.
-        canvas.note_render_time(Duration::from_millis(5) * cheap.arrived as u32);
-        std::thread::sleep(Duration::from_millis(200));
-        let dear = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
-        assert!(dear.arrived >= 1 && dear.arrived <= 2, "{dear:?}");
+        // From now on the renderer takes 5 ms for each: within a few
+        // frames (one slow sample alone counts four times the estimate at
+        // most), about one per frame.
+        let mut arrived = cheap.arrived;
+        let mut frames = Vec::new();
+        for _ in 0..8 {
+            canvas.note_render_time(Duration::from_millis(5) * arrived as u32);
+            std::thread::sleep(Duration::from_millis(50));
+            let stats = canvas.frame(&mut Scene::new(), &view, now, &mut boxes);
+            arrived = stats.arrived;
+            frames.push(stats);
+        }
+        let last = &frames[frames.len() - 1];
+        assert!(last.arrived >= 1 && last.arrived <= 2, "{frames:?}");
     }
 
     #[test]
@@ -2025,6 +2204,296 @@ mod tests {
             canvas.frame(&mut Scene::new(), &viewport(Point::ZERO, 1.0), now, &mut boxes);
             canvas.frame(&mut Scene::new(), &viewport(Point::new(dx, dy), 1.0), now, &mut boxes);
             proptest::prop_assert!(canvas.tiles.values().all(|tile| !tile.stale));
+        }
+    }
+
+    /// A canvas with `count` cached tiles over levels -2 to 3 around the
+    /// origin, without rendering them.
+    fn cached(count: usize) -> Canvas {
+        let mut canvas = Canvas::new().with_limits(64, 100_000);
+        let mut placed = 0;
+        'levels: for level in -2..=3 {
+            for y in -30..30 {
+                for x in -30..30 {
+                    if placed == count {
+                        break 'levels;
+                    }
+                    canvas.put_tile(
+                        TileKey { level, x, y },
+                        Tile {
+                            texture: Some(TextureKey::unique()),
+                            stale: false,
+                            used: 0,
+                        },
+                    );
+                    placed += 1;
+                }
+            }
+        }
+        canvas
+    }
+
+    #[test]
+    fn edits_cost_the_tiles_they_touch_not_the_cache() {
+        // 5,000 cached tiles: scanning them for each of the 40,000
+        // invalidations of 20,000 moves takes seconds even in release.
+        let mut canvas = cached(5_000);
+        let start = Instant::now();
+        for i in 0..20_000u64 {
+            let x = (i % 100) as f64 * 30.0 - 1_500.0;
+            let y = (i / 100) as f64 * 15.0 - 1_500.0;
+            canvas.upsert(ItemId(i % 5_000), i, Rect::new(x, y, x + 20.0, y + 10.0));
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_frame_uploads_sixteen_tiles_at_most_also_while_waiting_for_blank_ones() {
+        let (canvas, mut boxes) = board(5_000);
+        let mut canvas = canvas
+            .with_workers(TileWorkers::new(4, CpuMode::Deterministic))
+            .with_blank_wait(Duration::from_secs(60))
+            .with_render_budget(UNLIMITED);
+        let first = canvas.frame(
+            &mut Scene::new(),
+            &big_viewport(),
+            Instant::now(),
+            &mut boxes,
+        );
+        assert!(first.rendered > MAX_UPLOADS, "{first:?}");
+        assert!(first.arrived <= MAX_UPLOADS, "{first:?}");
+    }
+
+    #[test]
+    fn one_slow_upload_does_not_stall_the_next_frames() {
+        let mut canvas = Canvas::new().with_workers(TileWorkers::new(1, CpuMode::Deterministic));
+        // A frame uploaded one tile and waited 100 ms for a tile page.
+        canvas.last_uploads = 1;
+        canvas.note_render_time(Duration::from_millis(100));
+        assert!(
+            canvas.upload_cost <= INITIAL_UPLOAD_COST * 3,
+            "{:?}",
+            canvas.upload_cost
+        );
+        assert!(canvas.uploads_within(RENDER_BUDGET / 2) > 1);
+    }
+
+    #[test]
+    fn a_failed_render_of_a_changed_tile_is_tried_again() {
+        let mut canvas = Canvas::new().with_workers(TileWorkers::new(1, CpuMode::Deterministic));
+        let key = TileKey {
+            level: 0,
+            x: 0,
+            y: 0,
+        };
+        if let Some(workers) = &mut canvas.workers {
+            workers.flights.insert(
+                key,
+                Flight {
+                    tag: 7,
+                    stale: true,
+                },
+            );
+        }
+        let done = Done {
+            key,
+            tag: 7,
+            pixmap: None,
+            took: Duration::ZERO,
+        };
+        assert!(canvas.accept(done, &mut Scene::new(), &mut CanvasStats::default()));
+        assert!(
+            canvas.tiles[&key].stale,
+            "its items changed while it was out"
+        );
+    }
+
+    #[test]
+    fn nonsense_viewports_and_bounds_draw_nothing_and_do_not_hang() {
+        let (mut canvas, mut boxes) = board(100);
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let stats = canvas.frame(
+                &mut Scene::new(),
+                &viewport(Point::ZERO, zoom),
+                Instant::now(),
+                &mut boxes,
+            );
+            assert_eq!(stats.visible, 0, "{zoom}");
+        }
+        let start = Instant::now();
+        // A huge item is kept apart from the grid, and found everywhere.
+        let huge = Rect::new(-1e12, -1e12, 1e12, 1e12);
+        canvas.upsert(ItemId(1_000), 1_000, huge);
+        boxes.bounds.insert(ItemId(1_000), huge);
+        assert_eq!(canvas.item_at(Point::new(5e11, -5e11)), Some(ItemId(1_000)));
+        canvas.frame(
+            &mut Scene::new(),
+            &viewport(Point::ZERO, 1.0),
+            Instant::now(),
+            &mut boxes,
+        );
+        canvas.remove(ItemId(1_000));
+        // Bounds that aren't numbers aren't kept.
+        canvas.upsert(ItemId(1_001), 1, Rect::new(0.0, 0.0, f64::INFINITY, 1.0));
+        canvas.upsert(ItemId(1_002), 1, Rect::new(f64::NAN, 0.0, 1.0, 1.0));
+        assert!(canvas.bounds(ItemId(1_001)).is_none() && canvas.bounds(ItemId(1_002)).is_none());
+        // Zoomed far out, a tile spans many grid cells.
+        canvas.frame(
+            &mut Scene::new(),
+            &viewport(Point::ZERO, 1e-4),
+            Instant::now(),
+            &mut boxes,
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn release_frees_every_texture() {
+        let (mut canvas, mut boxes) = board(2_000);
+        let mut made = HashSet::new();
+        let mut scene = Scene::new();
+        canvas.frame(
+            &mut scene,
+            &viewport(Point::ZERO, 1.0),
+            Instant::now(),
+            &mut boxes,
+        );
+        for work in scene.texture_work() {
+            if let TextureWork::Render { key, .. } = work {
+                made.insert(*key);
+            }
+        }
+        assert!(!made.is_empty());
+        let mut scene = Scene::new();
+        canvas.release(&mut scene);
+        let freed: HashSet<TextureKey> = scene
+            .texture_work()
+            .iter()
+            .filter_map(|work| match work {
+                TextureWork::Free(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(freed, made);
+        assert_eq!(canvas.tiles.len(), 0);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// Looking up the tiles over an area level by level marks the same
+        /// tiles as going through all of them.
+        #[test]
+        fn invalidation_by_lookup_matches_a_full_scan(
+            count in 1usize..2_400,
+            x in -3_000.0f64..3_000.0,
+            y in -3_000.0f64..3_000.0,
+            w in 0.0f64..5_000.0,
+            h in 0.0f64..5_000.0,
+        ) {
+            let mut canvas = cached(count);
+            let area = Rect::new(x, y, x + w, y + h);
+            canvas.invalidate(area);
+            for (key, tile) in &canvas.tiles {
+                let grow = 1.0 / level_scale(key.level);
+                let touches = key.bounds().intersect(area.inflate(grow, grow)).area() > 0.0
+                    || area.inflate(grow, grow).contains(key.bounds().origin());
+                proptest::prop_assert_eq!(tile.stale, touches, "{:?}", key);
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// As [`valid_tiles_never_show_stale_content`], with tiles on
+        /// worker threads: items change while tiles are out, tiles come
+        /// back in later frames, and some become empty on their way.
+        #[test]
+        fn valid_tiles_never_show_stale_content_with_workers(
+            threads in 1usize..3,
+            ops in proptest::collection::vec(
+                (0u8..5, 0u64..40, -300.0f64..900.0, -300.0f64..900.0, 4.0f64..200.0, 0.25f64..3.0),
+                1..60,
+            )
+        ) {
+            let mut canvas = Canvas::new()
+                .with_limits(64, 10_000)
+                .with_render_budget(UNLIMITED)
+                .with_workers(TileWorkers::new(threads, CpuMode::Deterministic));
+            let mut boxes = Boxes { bounds: HashMap::new(), painted: Vec::new() };
+            let mut rendered: HashMap<TileKey, Vec<(ItemId, [i64; 4])>> = HashMap::new();
+            let now = Instant::now();
+            let mut last_view = viewport(Point::ZERO, 1.0);
+            let check = |canvas: &Canvas, rendered: &HashMap<TileKey, Vec<(ItemId, [i64; 4])>>| {
+                for (key, tile) in &canvas.tiles {
+                    if !tile.stale {
+                        let shown = match tile.texture {
+                            Some(_) => rendered.get(key).cloned().unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        if shown != content_of(canvas, *key) {
+                            return Err(format!("tile {key:?} is valid but stale"));
+                        }
+                    }
+                }
+                Ok(())
+            };
+            for (step, (op, id, x, y, size, zoom)) in ops.into_iter().enumerate() {
+                let id = ItemId(id);
+                match op {
+                    0 | 1 => {
+                        let bounds = Rect::new(x, y, x + size, y + size * 0.7);
+                        canvas.upsert(id, id.0, bounds);
+                        boxes.bounds.insert(id, bounds);
+                    }
+                    2 => {
+                        canvas.remove(id);
+                        boxes.bounds.remove(&id);
+                    }
+                    op => {
+                        if op == 4 {
+                            // Let the workers finish some.
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        last_view = Viewport {
+                            origin: Point::new(x, y),
+                            zoom,
+                            screen: Rect::new(0.0, 0.0, 800.0, 600.0),
+                            scale_factor: 1.0,
+                        };
+                        let at = now + Duration::from_secs(step as u64);
+                        canvas.frame(&mut Scene::new(), &last_view, at, &mut boxes);
+                        for key in &canvas.last_rendered {
+                            rendered.insert(*key, content_of(&canvas, *key));
+                        }
+                    }
+                }
+                proptest::prop_assert_eq!(check(&canvas, &rendered), Ok(()));
+            }
+            // Everything comes back in the end.
+            let started = Instant::now();
+            let at = now + Duration::from_secs(1_000);
+            loop {
+                let stats = canvas.frame(&mut Scene::new(), &last_view, at, &mut boxes);
+                for key in &canvas.last_rendered {
+                    rendered.insert(*key, content_of(&canvas, *key));
+                }
+                proptest::prop_assert_eq!(check(&canvas, &rendered), Ok(()));
+                if stats.owed == 0 {
+                    break;
+                }
+                proptest::prop_assert!(started.elapsed() < Duration::from_secs(60));
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
