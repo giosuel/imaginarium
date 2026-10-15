@@ -1,8 +1,11 @@
 # UI toolkit: windows, widgets, signals, text, accessibility
 
-Status: **Draft** (implemented as the M2 prototype; accepted or replaced
-with the M2 gate, ADR-0007). Crates: `imaginarium-ui`, `imaginarium-text`,
-`imaginarium-reactive`, `imaginarium-render`.
+Status: **Accepted** (M2: the gate passed and the owner kept the toolkit,
+2026-10-13, ADR-0007; reviewed in M2.9). Crates: `imaginarium-ui`,
+`imaginarium-text`, `imaginarium-reactive`, `imaginarium-render`. How to
+use it: the developer guide's "UI toolkit" page
+(`website/src/content/docs/developers/ui-toolkit.md`) and the example
+`crates/imaginarium-ui/examples/counter.rs`.
 
 ## Layers
 
@@ -20,6 +23,10 @@ with the M2 gate, ADR-0007). Crates: `imaginarium-ui`, `imaginarium-text`,
   view paints one scene in logical pixels, drawn at the scale factor. It
   forwards IME events, places the candidate window (`View::ime_area`), and
   sends the accessibility tree after frames while a screen reader listens.
+  A frame the renderer skips says why (`Skip`): the surface was set up
+  again (draw again now), was lost (made again), the window is hidden
+  (wait until it shows: no redraw loop while minimized), or no texture
+  came in time (try again in 100 ms).
 - **Startup:** the GPU opens on a thread of its own (`GpuStart`: drivers,
   device, Vello's pipelines), started first thing (`run_with_gpu`), while
   the program loads fonts, builds its view and lays out the first frame;
@@ -35,7 +42,15 @@ with the M2 gate, ADR-0007). Crates: `imaginarium-ui`, `imaginarium-text`,
   every installed family, and a character Inter lacks was looked up in
   each of them (a one-second freeze with 2,000 families; M2.7).
   `TextField` (ui) adds focus, keys, IME, clipboard, caret blinking and
-  the accessibility node; `TextInput` is the widget around it.
+  the accessibility node; `TextInput` is the widget around it. While a
+  composition is under way, the editor's offsets (selection, lines) are
+  in the text as shown, composition included (`Editor::shown_text`), and
+  so is the accessible value.
+- **Clipboard** (`clipboard.rs`): on a thread of its own, since a read
+  can wait for another app (X11 asks the app that copied; arboard waits
+  up to 4 s). A paste is a request, and the text comes back as
+  `Input::Paste` for the focused widget, through the event loop. Without
+  a system clipboard, the app's own copy pastes.
 
 ## Layout
 
@@ -59,14 +74,21 @@ within it.
 ## Input and focus
 
 - Pointer input goes to the deepest widget under the pointer (later
-  siblings first: they are drawn on top). A press captures the pointer
-  until release, so drags keep going outside the widget. Hover changes are
-  reported to both widgets.
+  siblings first: they are drawn on top). Children outside a parent that
+  doesn't clip still get it, as they are drawn. A press captures the
+  pointer until every button is up (and the window keeps its focus), so
+  drags keep going outside the widget. Hover changes are reported to both
+  widgets.
 - A press focuses the nearest focusable ancestor of the target (or
   nothing). Keys and IME go to the focused widget. Unhandled input bubbles
   to the parents; unhandled Tab / Shift+Tab moves the focus in tree order.
+  A hidden or detached widget loses the focus (and the capture) at the
+  next layout. When the focus moves, the window turns the input method
+  off and on, so a composition starts over.
 - App-wide shortcuts (Ctrl+K, Ctrl+F) are handled by the view before the
-  tree, for now; the command system's keymaps take over in M3.
+  tree, for now; the command system's keymaps take over in M3. With Ctrl
+  or ⌘ held, a non-Latin letter stands for the Latin letter on the same
+  key (shortcuts are matched by Latin names).
 
 ## Signals
 
@@ -88,12 +110,23 @@ transparent. Node ids are the widget's `access_base()` (index + 1 in the
 upper 32 bits), and a widget may add nodes of its own below it (text runs,
 canvas items, list options). Bounds are logical pixels; the window node
 carries the scale factor. Requests from the screen reader go back to the
-widget owning the node; Focus is handled by the tree. A text field exposes
-its value, one text run per line, and the selection.
+widget owning the node; Focus is handled by the tree (only for a live,
+focusable widget). A text field exposes its value, one text run per line
+(characters are grapheme clusters), and the selection; moving the caret
+by screen reader asks the tree for the focus.
+
+Every update is a whole tree with its `TreeInfo`: AccessKit builds its
+tree from the first update after a screen reader starts, which needn't
+be the one it asked for. A focus on a node missing from the update falls
+back to the window. Both panicked in AccessKit before the M2.9 review;
+the tests now feed the updates to `accesskit_consumer`.
 
 ## Not yet
 
 Scroll containers, menus and popovers with their own layers, drag and
 drop, animation, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
-worker pool (PLAN §4.3).
+worker pool (PLAN §4.3). Access ids carry a widget's slot, not its
+generation: a late screen reader request about a removed widget can reach
+the widget that took its slot (Focus is checked; the other actions
+aren't yet).
