@@ -10,12 +10,12 @@ Last updated: 2026-10-13
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.7 Gate run**: the fourth run (fix-3 binary) is in,
-  `docs/design/m2-gate.md` ("Fourth run"). Criteria 3 and 6 pass.
-  Criterion 2 needs the script to settle before the drag. Criterion 1
-  fails on the iGPU at 1132×1348 (the GPU can't keep up; p99 17.8 ms).
-  Next: the checklist notes for criteria 4 and 5, then the owner's
-  decision (keep our toolkit or GPUI).
+- **Next step:** **M2.8 Canvas on the integrated GPU**. The M2 gate is
+  decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
+  result"). Criterion 1 fails on the iGPU with a fullscreen window,
+  because the GPU can't keep up. Criterion 2 needs the script to settle
+  before the drag. Start with GPU times in the gate report.
+  `docs/design/m2-gate.md` has the runs and the decision.
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -621,7 +621,7 @@ app runs. Two owner exceptions for M2:
   Parley 0.12 and Taffy 0.15 may be used although younger than 14 days,
   plus the transitive versions they require (pinned older wherever one
   still fits). Listed in `xtask/dep-age-exceptions.txt`.
-- **Module reviews deferred to M2.8:** no per-module review agent during
+- **Module reviews deferred to M2.9:** no per-module review agent during
   M2; one review of all M2 code before the tag. Tests first, property
   tests and all checks before every PR still apply.
 
@@ -779,7 +779,7 @@ app runs. Two owner exceptions for M2:
   `vello_cpu` needs a software presenter such as `softbuffer`; proposed to
   drop, since the gate machine has two GPUs; owner to decide), and
   mixed-DPI checks (manual for now).
-- [ ] **M2.7 Gate run** on the owner's laptop: results in
+- [x] **M2.7 Gate run** (done 2026-10-13) on the owner's laptop: results in
   `docs/design/m2-gate.md`, one focused fix round for failed criteria,
   then the decision.
   - First run (2026-10-13, manual): a crash from tile textures freed while
@@ -808,11 +808,28 @@ app runs. Two owner exceptions for M2:
   - Fourth run (fix 3): cold start without the GPU's setup 275–347 ms, idle
     0 frames, palette 0.34 ms, no freeze, no crash. The drag phase starts
     with about 190 tiles still owed from the zoom (a fault in the script).
-    The iGPU misses vertical sync in one frame in four or five at
-    1132×1348, and does 50–60 fps without vertical sync.
+    The iGPU misses vertical sync in one frame in four or five
+    fullscreen, and does 50–60 fps without vertical sync. (The reported
+    1132×1348 is the first frame's size, before Hyprland made the window
+    fullscreen.)
   - The gate evaluates the renderer of ADR-0003 too. A renderer failure
     has other fallbacks than GPUI.
-- [ ] **M2.8 Wrap-up**: the code review of all M2 code (separate reviewer
+  - **Decision (owner, 2026-10-13): we keep our toolkit.** Criterion 1's
+    failure is in the canvas renderer, which a GPUI shell would keep. The
+    checklist notes for criteria 4 and 5 hadn't come in yet.
+- [ ] **M2.8 Canvas on the integrated GPU** (the gate's follow-up). The
+  steps:
+  - The script settles before each shapes phase, so criterion 2 is
+    measured on its own.
+  - The report times the GPU and records the monitor's size and scale.
+  - Find where the iGPU's time goes, then cut it: the tile renders go
+    to the GPU in one submission rather than one per tile, the tiles
+    reach the screen without Vello's per-pixel image paint (the
+    compositor of ADR-0003), and the tile budget is sized to what's left
+    of the frame.
+  - Find the slow first tile frame per board on the iGPU (100–144 ms).
+  - The owner measures again: criteria 1 and 2 on the iGPU, fullscreen.
+- [ ] **M2.9 Wrap-up**: the code review of all M2 code (separate reviewer
   agents, medium effort), developer docs on the website, STATUS, tag
   `v0.0.3-m2`.
 

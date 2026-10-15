@@ -1,7 +1,7 @@
 # M2 gate: running it, the checklist, results
 
-Status: **Draft**. The procedure and checklist are in use; the results
-come with M2.7.
+Status: **Decided** (2026-10-13): we keep our toolkit (see "Decision"
+at the end). The procedure and the binary stay in use as a benchmark.
 
 The gate (ADR-0007) decides whether our UI toolkit stays or GPUI replaces
 it. It is measured by `imaginarium-gate`, a prebuilt binary the owner runs
@@ -180,8 +180,8 @@ too (its frames are in `manual`), worth sending after anything odd.
 
 ## Results
 
-The decision is the owner's, after the fourth run (below). Criteria are
-judged on the integrated GPU (ADR-0007).
+The decision is at the end. Criteria are judged on the integrated GPU
+(ADR-0007).
 
 ### First run (2026-10-13, manual session, M2.5 binary)
 
@@ -272,9 +272,12 @@ Window 566×674 for the integrated GPU, RTX 3050 Ti and no-tiles runs,
 
 ### Fourth run (2026-10-13, `--measure --fullscreen`, fix-3 binary)
 
-The window was 1132×1348 in all five runs (scale 1.0). That is twice the
-pixels of the third run's no-atlas and no-vsync runs and four times its
-iGPU run. Times are in ms.
+The window was fullscreen in all five runs (scale 1.0). The reports say
+1132×1348, but that is the first frame's size: Hyprland draws a new
+window tiled before it makes it fullscreen. The phases ran at the
+screen's full size, which this report doesn't have. From M2.8 on, the
+report has the last frame's size, each phase's size, and the monitor.
+Times are in ms.
 
 | | iGPU | dGPU | no atlas | no vsync | no tiles |
 |---|---|---|---|---|---|
@@ -320,3 +323,25 @@ iGPU run. Times are in ms.
   The cause isn't known yet.
 - The glyph atlas still pays for itself: encoding a shapes pan frame
   takes 3.7 ms with it and 5.4 ms without it.
+
+## Decision (owner, 2026-10-13)
+
+**We keep our toolkit** (ADR-0007, "Gate result").
+- What the toolkit itself does passes with room to spare:
+  - palette search 0.34 ms against the 1 ms bar;
+  - 0.3 ms per keystroke;
+  - 1–2 ms of painting per frame;
+  - no idle frames;
+  - cold start 275–347 ms without the GPU's setup.
+- What fails, criterion 1 on the integrated GPU, is in the canvas
+  renderer. A GPUI shell would keep that code.
+
+Next is a focused step on the canvas (M2.8):
+- The script waits until no tiles are owed before each shapes phase, so
+  criterion 2 is measured on its own.
+- The report times the GPU and records the monitor.
+- The tiles go to the screen in fewer, cheaper steps.
+
+Criteria 1 and 2 are then measured again on the integrated GPU. The
+notes from the manual checklist (criteria 4 and 5) go here when they
+come.
