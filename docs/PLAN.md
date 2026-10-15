@@ -407,6 +407,15 @@ Decided (2026-10-14):
   integrated GPU, and rendering tiles on worker threads instead of the
   UI thread (ADR-0019).
 
+Decided (2026-10-15):
+- **No `--backend cpu` window for the gate.** A window drawn by
+  `vello_cpu` would need a software presenter (`softbuffer`). The CPU
+  path stays in use without it: tiles render with `vello_cpu` on worker
+  threads (ADR-0019), and so do golden tests and export (ADR-0003). A
+  machine without a GPU driver still gets a window through wgpu's
+  software adapters (llvmpipe/lavapipe on Linux, WARP on Windows), as on
+  the development VM.
+
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
 

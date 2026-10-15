@@ -4,87 +4,47 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 ## Current position
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.9 Wrap-up** (see "Next" at the end of this item).
-  **M2.8, the canvas on the integrated GPU, is done (2026-10-14).** The M2
-  gate is decided: we keep our toolkit (owner, 2026-10-13; ADR-0007 "Gate
-  result"). Criterion 1 fails on the iGPU with a fullscreen window,
-  because the GPU can't keep up. Criterion 2 needs the script to settle
-  before the drag. Start with GPU times in the gate report.
-  `docs/design/m2-gate.md` has the runs and the decision.
-  Done on `perf/m2.8-canvas-igpu`, which is stacked on the decision PR:
-  - clips without Vello layers (the GPU's time per frame halved on the VM);
-  - 2048² glyph atlas pages;
-  - an opaque window surface;
-  - tile work fitted to the rest of the frame;
-  - the script settles before each shapes phase;
-  - GPU times, the monitor and per-phase sizes in the report.
-
-  The owner's runs (2026-10-14, "M2.8 run" in `m2-gate.md`): criterion 1
-  passes on the dGPU; on the iGPU only the zoom misses (p99 17.7 ms), and
-  tiles filled the screen ring by ring over half a second. The owner
-  chose both fixes for M2.8 (ADR-0019). Done on `perf/m2.8-tile-workers`,
-  stacked on `perf/m2.8-canvas-igpu`:
-  - tiles render on worker threads with `vello_cpu`, and frames upload
-    them;
-  - uploaded tiles share pages on the GPU, made ahead on their own
-    thread;
-  - smaller GPU memory blocks, for the iGPU's submission stalls;
-  - nearest sampling for tiles drawn 1:1;
-  - items paint straight into their tile's scene;
-  - the glyph atlas takes up to 32 pages.
-
-  The owner's second runs (2026-10-14, "M2.8 run 2"): **criterion 1
-  passes on the iGPU** (zoom p99 11.0 ms), the fill is 3–4 times faster
-  and the big stalls are gone. Left: the first tile page made in the
-  cards board's first frame (32–52 ms), and tiles newly in view showing
-  blank for a frame (the owner's "minor glitching" zooming out, likely).
-  Done since, on the same branch:
-  - tile pages made as tiles go to the workers (`Scene::expect_uploads`);
-  - a frame waits up to 4 ms for tiles nothing stands in for;
-  - 8 tiles per thread; the frame budget no longer counts the canvas's
-    painting twice;
-  - blank tiles and fill times in the report.
-
-  The owner's third runs (2026-10-14, "M2.8 run 3"): zooming out is fine
-  now, but **criterion 1 misses on the iGPU in the zoom** (p99 19.3 ms;
-  the owner: zooming in is a bit laggy). Up to 57 tiles came back in one
-  frame and were all uploaded (13 ms), and building overshot its budget
-  (9.2 ms against 6). Done since, on the same branch:
-  - uploads take half a frame's tile time at most, by their measured
-    cost, and 16 tiles at most; the others wait for the next frame;
-  - the clock stops building where the estimate of a tile's cost is
-    wrong;
-  - the slowest frames' parts, parked tiles and the upload cost per tile
-    in the report.
-
-  The owner's fourth runs (2026-10-14, "M2.8 run 4"): **criterion 1
-  passes in all three** (iGPU zoom p99 13.5 ms). Zooming out is fine; while
-  zooming in, tiles or shapes "glitch in and out of existence" (what the
-  owner had called lag). The cause: a coarser stand-in drew only the tile
-  at the corner, though half-octave levels straddle up to four. Done
-  since: stand-ins cover the whole tile, or the tile counts as blank.
-
-  The owner's fifth runs (2026-10-14, "M2.8 run 5"): the zoom bug is
-  fixed in all three, and criterion 1 passes in all three again (iGPU
-  zoom p99 12.8 ms). **M2.8 is done** ("M2.8: done" in `m2-gate.md`).
-  The owner saw a freeze before the palette opened: the search re-rendered
-  every visible card tile per keystroke. Done since: the search dims over
-  the tiles; the report has the longest frame intervals of the run.
-
-  Next: **M2.9 Wrap-up**: the review of all M2 code, developer docs on the
-  website, a last gate run (with the search fix, and the manual checklist
-  for criteria 4 and 5, not reported yet), the tag `v0.0.3-m2`. For M3
-  (canvas), from M2.8: covering the fill as a board opens (the owner: maybe
-  an animation) and the cards' text layout on the UI thread that limits
-  it; the cards board's slow frames on the iGPU (its first frame, and the
-  pan's frame 198); rendering the next level ahead while zooming in, if
-  needed; a window-wide memory budget for tile pages (22 pages, 352 MB).
+- **Next step:** **M2.9 Wrap-up: the owner's last gate run**, with the
+  package "M2.9 final" and the manual checklist (criteria 4 and 5 were
+  never reported), then the tag `v0.0.3-m2`, which the owner pushes.
+  After the run: record it in `docs/design/m2-gate.md` ("M2.9 run"), tick
+  M2.9, and give the owner the tag command.
+  - M2.8 is done (2026-10-14). The runs are in `m2-gate.md`, the summary
+    in the M2.8 item below. The gate is decided: we keep our toolkit
+    (owner, 2026-10-13; ADR-0007).
+  - **Done in M2.9 (2026-10-15):**
+    - **The review of all M2 code:** four reviewer agents at medium
+      effort (render; ui; the gate; reactive, text, commands and xtask).
+      No critical findings; 4 high, 9 medium, 8 medium-low, about 20 low.
+      All are fixed test-first, or not changed with a reason.
+      https://github.com/giosuel/imaginarium/pull/33 (`fix/m2.9-review`,
+      stacked on #32). See the M2.9 item.
+    - **Developer docs:** the website's "UI toolkit" guide, the
+      `counter` example, the M2 crates in the architecture table, and
+      `ui-toolkit.md` accepted (`docs/m2.9-wrap-up`, stacked on #33).
+    - The owner decided: no `--backend cpu` window (PLAN §14).
+  - Open PRs, which the owner merges in order at the end: #21 to #33,
+    then the wrap-up PR.
+  - For M3 (canvas), from M2.8:
+    - covering the fill as a board opens (the owner: maybe an
+      animation), and moving the cards' text layout, which limits it, off
+      the UI thread;
+    - the cards board's slow frames on the iGPU (its first frame, and the
+      pan's frame 198);
+    - rendering the next level ahead while zooming in, if needed;
+    - a window-wide memory budget for tile pages (22 pages, 352 MB;
+      pages are never given back yet).
+  - For M3, from M2.9:
+    - access ids name a widget's slot, not its generation (a late screen
+      reader request can reach the widget that took the slot);
+    - a dragged shape may show twice for a frame as the drag starts, if
+      the last run's checklist (5b) sees it.
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -840,14 +800,13 @@ app runs. Two owner exceptions for M2:
     output (another project's `~/.cache/somedesk-target*`, 77 GB; ours
     `target/`, 42 GB). Freed our `target/debug/incremental` (9.3 GB).
     Clean `target/debug` between milestones.
-- [ ] **M2.6 Gate binary** (mostly done along the way): scripted
-  scenarios for criteria 1, 2, 3 and 6, `gate-report.json` with toolkit
-  and renderer numbers apart, `--gpu low|high`, `--adapter`, `--no-vsync`,
-  `--no-glyph-atlas`, `--no-tiles`, the manual checklist
-  (`docs/design/m2-gate.md`). Left: `--backend cpu` (a window drawn by
-  `vello_cpu` needs a software presenter such as `softbuffer`; proposed to
-  drop, since the gate machine has two GPUs; owner to decide), and
-  mixed-DPI checks (manual for now).
+- [x] **M2.6 Gate binary** (done along the way; closed 2026-10-15):
+  scripted scenarios for criteria 1, 2, 3 and 6, `gate-report.json` with
+  toolkit and renderer numbers apart, `--gpu low|high`, `--adapter`,
+  `--no-vsync`, `--no-glyph-atlas`, `--no-tiles`, and the manual checklist
+  (`docs/design/m2-gate.md`). `--backend cpu` is dropped (owner,
+  2026-10-15, PLAN §14: wgpu's software adapters cover machines without a
+  GPU driver). Mixed DPI stays manual (checklist items 5 and 6).
 - [x] **M2.7 Gate run** (done 2026-10-13) on the owner's laptop: results in
   `docs/design/m2-gate.md`, one focused fix round for failed criteria,
   then the decision.
@@ -912,9 +871,48 @@ app runs. Two owner exceptions for M2:
     tiles still need a compositor pass of their own is for the next
     run's GPU times to say.
   - Next: the owner's fourth set of runs, criteria 1 and 2 on the iGPU.
-- [ ] **M2.9 Wrap-up**: the code review of all M2 code (separate reviewer
-  agents, medium effort), developer docs on the website, STATUS, tag
-  `v0.0.3-m2`.
+- [ ] **M2.9 Wrap-up** (started 2026-10-15):
+  - [x] **The review of all M2 code**
+    (https://github.com/giosuel/imaginarium/pull/33, `fix/m2.9-review`):
+    - Four reviewer agents at medium effort, read-only.
+    - Every finding was checked against the code; none was a false
+      alarm. Each fix has a test that failed on the old code first,
+      except where only a real desktop shows it (those have checklist
+      items).
+    - **High:**
+      - AccessKit panicked on an update before its first-tree request,
+        and on a focus without a node: every update is a whole tree now,
+        tested with `accesskit_consumer`;
+      - two lost-update bugs in the reactive graph: a memo writing during
+        a check, and an effect whose update unwound.
+    - **Medium:**
+      - the clipboard read blocked the UI thread for up to 4 s: it has a
+        thread of its own now, and pastes arrive as `Input::Paste`;
+      - canvas invalidation scanned every cached tile (moving 10,000
+        items: 299 ms, now 8.5 ms; new `benches/canvas.rs`);
+      - the blank wait could upload past 16 tiles;
+      - a hidden window redrew in a loop;
+      - a screen reader could focus removed widgets;
+      - the pointer capture ended on any button's release;
+      - criterion 1's pass checked the p99 alone, with the present in it:
+        it checks the frame rate too now (1 % of intervals over 20 ms at
+        most, with vsync);
+      - the typing counted the pan's owed tiles.
+    - Reactive benchmarks are within noise (median of alternating runs).
+      10,000 conditional readers toggling: 18.0 ms, now 1.47 ms.
+    - Not changed, with reasons in the PR: tile pages aren't given back
+      (M3's memory budget); access ids by slot; a composition's text isn't
+      cleaned; the dragged shape's double frame (checklist 5b).
+  - [x] **Developer docs** (`docs/m2.9-wrap-up`): the website's "UI
+    toolkit" guide (`website/src/content/docs/developers/ui-toolkit.md`),
+    the `counter` example (`crates/imaginarium-ui/examples/counter.rs`),
+    the M2 crates in the architecture table, `ui-toolkit.md` accepted.
+  - [x] `--backend cpu` dropped (owner, PLAN §14).
+  - [ ] **The owner's last gate run:** "M2.9 final" package, three runs
+    (iGPU, dGPU, no vsync) and the manual checklist
+    (`docs/design/m2-gate.md`, "M2.9 run").
+  - [ ] STATUS after the run; the tag `v0.0.3-m2` on the merge commit
+    (the owner pushes it).
 
 **Wasm (browser) build: not a goal now** (owner, 2026-10-12: focus on the
 native build, keep the browser build in mind). Core and toolkit crates stay
