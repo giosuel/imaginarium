@@ -55,9 +55,11 @@
 //! write.
 //!
 //! Limits: memos are brought up to date recursively, so a chain of memos
-//! (each reading the previous one) deeper than a few thousand can overflow
-//! a small thread stack. Generations are 32-bit; a slot whose generation
-//! would wrap is retired.
+//! (each reading the previous one) takes stack for each memo: about 350
+//! bytes in a release build and 1.8 KB in a debug build on Linux, more on
+//! Windows. Windows gives the main thread 1 MiB: a chain of about 3,000
+//! fits in a release build, fewer than 500 in a debug build. Generations are
+//! 32-bit; a slot whose generation would wrap is retired.
 //!
 //! # Boundaries
 //! - **One graph per thread.** Handles are `Copy` but not `Send`: the graph
