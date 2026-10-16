@@ -712,6 +712,12 @@ impl Runtime {
         f()
     }
 
+    pub(crate) fn detached<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _owner = replace(&self.owner, None);
+        let _observer = replace(&self.observer, None);
+        f()
+    }
+
     pub(crate) fn with_owner<R>(&self, owner: NodeId, f: impl FnOnce() -> R) -> R {
         let _owner = replace(&self.owner, Some(owner));
         f()

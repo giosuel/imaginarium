@@ -6,7 +6,7 @@
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, Size};
 use imaginarium_render::peniko::Color;
-use parley::{BoundingBox, PlainEditor, PlainEditorDriver};
+use parley::{BoundingBox, PlainEditor, PlainEditorDriver, StyleProperty};
 
 use crate::fonts::{Brush, Fonts};
 use crate::layout::{TextStyle, paint_layout};
@@ -149,6 +149,17 @@ impl Editor {
     /// The style.
     pub fn style(&self) -> &TextStyle {
         &self.style
+    }
+
+    /// Changes the text color (a theme switch), keeping the text, the
+    /// selection and a composition in progress.
+    pub fn set_color(&mut self, color: Color) {
+        if self.style.color != color {
+            self.style.color = color;
+            self.editor
+                .edit_styles()
+                .insert(StyleProperty::Brush(Brush(color)));
+        }
     }
 
     /// Whether the editor takes line breaks.

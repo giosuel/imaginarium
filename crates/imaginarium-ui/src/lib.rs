@@ -32,6 +32,11 @@
 //!   clipboard.
 //! - Accessibility: views describe themselves in an [`AccessTree`]; the
 //!   widget tree does it for its widgets ([`Widget::accessibility`]).
+//! - **Themes:** the interface's colors are [`Token`]s of a [`Theme`]
+//!   (dark first, `docs/design/shell.md` §7). Widgets take a [`Paint`], a
+//!   token or a fixed color, and resolve it when they paint;
+//!   [`set_theme`] repaints the whole tree, and [`theme`] is a dependency
+//!   inside effects and memos.
 //!
 //! # Not here yet
 //! Scrolling containers, menus, drag and drop, and animation.
@@ -41,6 +46,7 @@ mod clipboard;
 #[cfg(test)]
 mod tests;
 mod text_field;
+mod theme;
 mod tree;
 mod widgets;
 mod window;
@@ -51,6 +57,7 @@ pub use widgets::{Button, ButtonColors, Flex, InputColors, Label, TextInput, lab
 
 pub use access::{AccessTree, ROOT, rect as access_rect};
 pub use text_field::{FieldResponse, TextField};
+pub use theme::{DEFAULT_ACCENT, Paint, Theme, ThemeKind, Token, contrast, mix, set_theme, theme};
 
 pub use window::{
     FrameCauses, FrameInfo, Ime, Input, Key, Modifiers, MonitorInfo, RunStats, UiError, View,

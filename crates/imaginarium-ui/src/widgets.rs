@@ -15,6 +15,7 @@ use taffy::{AlignItems, AvailableSpace, JustifyContent, Style};
 
 use crate::access::rect as access_rect;
 use crate::text_field::TextField;
+use crate::theme::{Paint, theme};
 use crate::tree::{Cx, Ui, Widget, WidgetId};
 use crate::window::{Input, Key};
 
@@ -22,8 +23,8 @@ use crate::window::{Input, Key};
 /// an optional background, border and rounded corners.
 pub struct Flex {
     style: Style,
-    background: Option<Color>,
-    border: Option<(f64, Color)>,
+    background: Option<Paint>,
+    border: Option<(f64, Paint)>,
     radius: f64,
     shadow: bool,
     clips: bool,
@@ -122,15 +123,15 @@ impl Flex {
         self
     }
 
-    /// A background color.
-    pub fn background(mut self, color: Color) -> Self {
-        self.background = Some(color);
+    /// A background: a theme token or a fixed color.
+    pub fn background(mut self, paint: impl Into<Paint>) -> Self {
+        self.background = Some(paint.into());
         self
     }
 
     /// A border inside the edges.
-    pub fn border(mut self, width: f64, color: Color) -> Self {
-        self.border = Some((width, color));
+    pub fn border(mut self, width: f64, paint: impl Into<Paint>) -> Self {
+        self.border = Some((width, paint.into()));
         self
     }
 
@@ -140,7 +141,8 @@ impl Flex {
         self
     }
 
-    /// A soft drop shadow (for popups).
+    /// A soft drop shadow (for panels and popups), as strong as the theme
+    /// says.
     pub fn shadow(mut self) -> Self {
         self.shadow = true;
         self
@@ -167,20 +169,23 @@ impl Widget for Flex {
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
+        let theme = theme();
         if self.shadow {
-            for (spread, alpha) in [(12.0, 0.03), (6.0, 0.05), (2.0, 0.08)] {
+            for layer in theme.shadow {
+                let spread = layer.spread;
                 let shadow = RoundedRect::from_rect(
                     bounds.inflate(spread, spread) + Vec2::new(0.0, spread / 2.0),
                     self.radius + spread,
                 );
-                scene.fill(&shadow, Color::BLACK.with_alpha(alpha));
+                scene.fill(&shadow, Color::BLACK.with_alpha(layer.alpha));
             }
         }
         let shape = RoundedRect::from_rect(bounds, self.radius);
         if let Some(background) = self.background {
-            scene.fill(&shape, background);
+            scene.fill(&shape, background.resolve(&theme));
         }
-        if let Some((width, color)) = self.border {
+        if let Some((width, paint)) = self.border {
+            let color = paint.resolve(&theme);
             let inset = RoundedRect::from_rect(
                 bounds.inset(-width / 2.0),
                 (self.radius - width / 2.0).max(0.0),
@@ -210,10 +215,15 @@ enum Source {
 }
 
 /// A piece of text. It wraps when its box is narrower than the text.
+///
+/// It is drawn in [`Token::Text`](crate::Token::Text) unless
+/// [`Label::color`] says otherwise; the style's own color is not used.
 pub struct Label {
     source: Source,
     style: TextStyle,
-    block: Option<(String, Option<f32>, TextBlock)>,
+    color: Paint,
+    /// The text, the width and the color it was laid out for.
+    block: Option<(String, Option<f32>, Color, TextBlock)>,
     layout: Style,
 }
 
@@ -223,9 +233,21 @@ impl Label {
         Self {
             source: Source::Fixed(text.into()),
             style,
+            color: Paint::Token(crate::theme::Token::Text),
             block: None,
             layout: Style::default(),
         }
+    }
+
+    /// Draws the text in `paint` (a token follows the theme).
+    pub fn color(mut self, paint: impl Into<Paint>) -> Self {
+        self.color = paint.into();
+        self
+    }
+
+    /// Changes the color.
+    pub fn set_color(&mut self, paint: impl Into<Paint>) {
+        self.color = paint.into();
     }
 
     /// Changes the text.
@@ -240,6 +262,12 @@ impl Label {
         self
     }
 
+    /// The color the text was last shaped in.
+    #[cfg(test)]
+    pub(crate) fn shaped_color(&self) -> Option<Color> {
+        self.block.as_ref().map(|(_, _, color, _)| *color)
+    }
+
     fn text(&self) -> String {
         match &self.source {
             Source::Fixed(text) => text.clone(),
@@ -251,20 +279,24 @@ impl Label {
     /// (cheap) when only the width changes, as Taffy asks for several.
     fn block(&mut self, cx: &mut Cx<'_>, width: Option<f32>) -> &TextBlock {
         let text = self.text();
+        let color = self.color.current();
         match &mut self.block {
-            Some((shaped, laid_for, block)) if *shaped == text => {
+            Some((shaped, laid_for, shaped_color, block))
+                if *shaped == text && *shaped_color == color =>
+            {
                 if *laid_for != width {
                     block.set_width(width);
                     *laid_for = width;
                 }
             }
             _ => {
-                let block = TextBlock::new(cx.fonts(), &text, &self.style, width);
-                self.block = Some((text, width, block));
+                let style = self.style.color(color);
+                let block = TextBlock::new(cx.fonts(), &text, &style, width);
+                self.block = Some((text, width, color, block));
             }
         }
         match &self.block {
-            Some((_, _, block)) => block,
+            Some((_, _, _, block)) => block,
             None => unreachable_block(),
         }
     }
@@ -276,13 +308,19 @@ fn unreachable_block() -> ! {
     panic!("Label::block always fills its cache")
 }
 
-/// Adds a label whose text `text` computes from signals; it re-lays out
-/// when they change.
-pub fn label(ui: &mut Ui, style: TextStyle, text: impl Fn() -> String + 'static) -> WidgetId {
+/// Adds a label in `color` whose text `text` computes from signals; it
+/// re-lays out when they change.
+pub fn label(
+    ui: &mut Ui,
+    style: TextStyle,
+    color: impl Into<Paint>,
+    text: impl Fn() -> String + 'static,
+) -> WidgetId {
     let text: Rc<dyn Fn() -> String> = Rc::new(text);
     let id = ui.add(Label {
         source: Source::Dynamic(text.clone()),
         style,
+        color: color.into(),
         block: None,
         layout: Style::default(),
     });
@@ -325,19 +363,46 @@ impl Widget for Label {
     }
 }
 
-/// Colors of a button.
+/// Colors of a button: theme tokens or fixed colors.
 #[derive(Clone, Copy, Debug)]
 pub struct ButtonColors {
     /// The resting background.
-    pub background: Color,
+    pub background: Paint,
     /// The background under the pointer.
-    pub hover: Color,
+    pub hover: Paint,
     /// The background while pressed.
-    pub pressed: Color,
+    pub pressed: Paint,
     /// The text.
-    pub text: Color,
+    pub text: Paint,
     /// The focus ring.
-    pub focus: Color,
+    pub focus: Paint,
+}
+
+impl ButtonColors {
+    /// A primary button: the accent fill (Save…, Present).
+    pub fn primary() -> Self {
+        use crate::theme::Token;
+        Self {
+            background: Token::Accent.into(),
+            hover: Token::AccentHover.into(),
+            pressed: Token::AccentPressed.into(),
+            text: Token::OnAccent.into(),
+            focus: Token::AccentInk.into(),
+        }
+    }
+
+    /// A quiet button: no fill until the pointer is over it (tool bars,
+    /// panels).
+    pub fn quiet() -> Self {
+        use crate::theme::Token;
+        Self {
+            background: Token::PanelBg.into(),
+            hover: Token::ControlHover.into(),
+            pressed: Token::ControlActive.into(),
+            text: Token::Text.into(),
+            focus: Token::AccentInk.into(),
+        }
+    }
 }
 
 /// A button: click, Enter or Space runs its action.
@@ -358,12 +423,20 @@ impl Button {
         action: impl FnMut() + 'static,
     ) -> Self {
         Self {
-            label: Label::new(text, style.color(colors.text)),
+            label: Label::new(text, style).color(colors.text),
             action: Box::new(action),
             colors,
             pressed: false,
             padding: (12.0, 6.0),
         }
+    }
+}
+
+#[cfg(test)]
+impl Button {
+    /// The color the label was last shaped in.
+    pub(crate) fn label_color(&self) -> Option<Color> {
+        self.label.shaped_color()
     }
 }
 
@@ -383,6 +456,7 @@ impl Widget for Button {
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
+        let theme = theme();
         let background = if self.pressed {
             self.colors.pressed
         } else if cx.is_hovered() {
@@ -390,13 +464,14 @@ impl Widget for Button {
         } else {
             self.colors.background
         };
-        let shape = RoundedRect::from_rect(bounds, 7.0);
-        scene.fill(&shape, background);
+        let radius = theme.control_radius;
+        let shape = RoundedRect::from_rect(bounds, radius);
+        scene.fill(&shape, background.resolve(&theme));
         if cx.is_focused() {
             scene.stroke(
-                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), 8.5),
+                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), radius + 1.5),
                 2.0,
-                self.colors.focus,
+                self.colors.focus.resolve(&theme),
             );
         }
         let (px, py) = self.padding;
@@ -486,17 +561,33 @@ pub struct TextInput {
     height: f32,
 }
 
-/// Colors of a text input.
+/// Colors of a text input: theme tokens or fixed colors.
 #[derive(Clone, Copy, Debug)]
 pub struct InputColors {
     /// The field's background.
-    pub background: Color,
+    pub background: Paint,
     /// The border at rest.
-    pub border: Color,
+    pub border: Paint,
     /// The border, caret and selection while focused.
-    pub accent: Color,
+    pub accent: Paint,
     /// The placeholder text.
-    pub placeholder: Color,
+    pub placeholder: Paint,
+    /// The text.
+    pub text: Paint,
+}
+
+impl InputColors {
+    /// An input on a panel, following the theme.
+    pub fn themed() -> Self {
+        use crate::theme::Token;
+        Self {
+            background: Token::PanelBg.into(),
+            border: Token::ControlBorder.into(),
+            accent: Token::AccentInk.into(),
+            placeholder: Token::TextSubtle.into(),
+            text: Token::Text.into(),
+        }
+    }
 }
 
 impl TextInput {
@@ -512,7 +603,7 @@ impl TextInput {
         Self {
             field: TextField::new("", style, false).with_padding(padding),
             label: label.into(),
-            placeholder: Label::new(placeholder, style.color(colors.placeholder)),
+            placeholder: Label::new(placeholder, style).color(colors.placeholder),
             on_change: Box::new(|_| {}),
             on_submit: Box::new(|_| {}),
             passes: Vec::new(),
@@ -570,18 +661,22 @@ impl Widget for TextInput {
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
-        let shape = RoundedRect::from_rect(bounds, 8.0);
-        scene.fill(&shape, self.colors.background);
+        let theme = theme();
+        let shape = RoundedRect::from_rect(bounds, theme.control_radius);
+        scene.fill(&shape, self.colors.background.resolve(&theme));
         if cx.is_focused() {
-            scene.stroke(&shape, 2.0, self.colors.accent);
+            scene.stroke(&shape, 2.0, self.colors.accent.resolve(&theme));
         } else {
-            scene.stroke(&shape, 1.0, self.colors.border);
+            scene.stroke(&shape, 1.0, self.colors.border.resolve(&theme));
         }
+        self.field
+            .editor()
+            .set_color(self.colors.text.resolve(&theme));
         if self.field.text().is_empty() && !self.field.editor().is_composing() {
             let origin = Point::new(bounds.x0 + 7.0, bounds.y0 + 7.0);
             self.placeholder.block(cx, None).paint(scene, origin, true);
         }
-        let accent = self.colors.accent;
+        let accent = self.colors.accent.resolve(&theme);
         self.field.paint(cx.fonts(), scene, bounds, accent);
     }
 

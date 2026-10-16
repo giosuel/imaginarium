@@ -231,8 +231,9 @@ theme repaints live. The dark values, from the mockups:
 | `control.border` / `divider` | `#34343B` / `#28282E` | `#E4E4E7` / `#EFEFF2` |
 | `control.hover` / `control.active` | `#2A2A30` / accent at 28 % | `#F1F1F4` / accent at 14 % |
 | `text` / `text.muted` / `text.subtle` | `#EDEDF0` / `#A1A1AA` / `#8E8E99` | `#18181B` / `#52525B` / `#6B6B76` |
-| `accent` | the accent, 20 % lighter | the accent |
-| `accent.text` (on accent) | `#FFFFFF` | `#FFFFFF` |
+| `accent` (fills: primary buttons, the selection) | the accent | the accent |
+| `accent.ink` (accent text and icons on panels) | the accent, 45 % toward white | the accent, 15 % toward black |
+| `on.accent` (text on an accent fill) | `#FFFFFF` | `#FFFFFF` |
 | `danger` / `warning` | `#F87171` / `#F5A524` | `#B91C1C` / `#B45309` |
 | `shadow.panel` | `0 1 2 / 40 %`, `0 8 28 / 45 %` black | `0 1 2 / 6 %`, `0 8 24 / 8 %` |
 | `tooltip.bg` | `#3F3F46` | `#18181B` |

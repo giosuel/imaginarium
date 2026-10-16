@@ -102,6 +102,19 @@ computed once per keystroke when the list reads it. Per-frame data that
 must not cause frames (the status line's timings) is read from plain
 cells and refreshed with `Ui::refresh` during a frame.
 
+## Themes
+
+The interface's colors are tokens of a `Theme` (`theme.rs`; values in
+`shell.md` §7), dark first. Widgets hold a `Paint` (a token or a fixed
+color) and resolve it when they paint. `set_theme` bumps a generation that
+the tree compares before each layout: when it changed, every widget is
+laid out and repainted again (labels keep the color they shaped with and
+shape again). A theme switch is rare, so it doesn't track which widgets
+use which token. `theme()` reads a detached signal, so effects and memos
+that call it run again after a switch. A unit test checks that every text
+token reaches 4.5:1 on its backgrounds in both themes and for every
+offered accent.
+
 ## Accessibility
 
 AccessKit through `accesskit_winit`. The tree builds one node per widget

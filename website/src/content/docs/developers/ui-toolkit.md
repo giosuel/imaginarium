@@ -39,20 +39,20 @@ let clicks = signal(0u32);
 
 let mut ui = Ui::new();
 let input = ui.add(
-    TextInput::new("Name", "Your name", style, input_colors())
+    TextInput::new("Name", "Your name", style, InputColors::themed())
         .on_change(move |text| name.set(text.to_owned())),
 );
-let button = ui.add(Button::new("Click me", style, button_colors(), move || {
+let button = ui.add(Button::new("Click me", style, ButtonColors::primary(), move || {
     clicks.update(|clicks| *clicks += 1);
 }));
 // Lays out again when `name` or `clicks` change, and nothing else does.
-let greeting = label(&mut ui, style, move || {
+let greeting = label(&mut ui, style, Token::Text, move || {
     let name = name.get();
     let who = if name.is_empty() { "there" } else { &name };
     format!("Hello, {who}! You clicked {} times.", clicks.get())
 });
 let column = ui.add_with_children(
-    Flex::column().gap(12.0).padding(24.0, 24.0).fill().background(Color::WHITE),
+    Flex::column().gap(12.0).padding(24.0, 24.0).fill().background(Token::PanelBg),
     &[input, button, greeting],
 );
 ui.set_root(column);
@@ -102,7 +102,7 @@ In the toolkit, effects are where signals meet widgets:
 - `Ui::watch(widget, layout, f)` repaints (or re-lays out) `widget`
   whenever something `f` reads changes. The effect is disposed with the
   widget.
-- `label(&mut ui, style, f)` is a label built this way.
+- `label(&mut ui, style, color, f)` is a label built this way.
 - Widgets read signals untracked when they paint (`get_untracked`). What
   they show changes through `watch`, so a signal change touches exactly
   the widgets that show it.
@@ -151,6 +151,35 @@ children it leaves out, and `remove` removes a subtree.
 
 Built in: `Flex` (rows and columns with background, border, radius and
 shadow), `Label` and `label`, `Button`, and `TextInput`.
+
+## Themes
+
+The interface's colors are **tokens** of a `Theme` (`Token::PanelBg`,
+`Token::Text`, `Token::AccentInk`, …), with the dark theme first and the
+light one on the same tokens. Widgets take a `Paint`, which is a token or
+a fixed color (`Color` and `Token` both convert into it):
+
+```rust
+use imaginarium_ui::{Button, ButtonColors, Flex, InputColors, Label, TextInput, Token};
+
+let panel = Flex::column().background(Token::PanelBg).border(1.0, Token::PanelBorder);
+let hint = Label::new("Saved", style).color(Token::TextMuted);
+let save = Button::new("Save…", style, ButtonColors::primary(), save);
+let name = TextInput::new("Name", "", style, InputColors::themed());
+```
+
+Labels draw in `Token::Text` unless `.color(…)` says otherwise (the text
+style's own color isn't used). Use tokens for everything that is part of
+the interface, and fixed colors only for content whose color is data (a
+swatch, a shape's fill).
+`set_theme(Theme::light(accent))` switches the theme: every widget
+repaints before the next frame, and labels shape their text again in the
+new color. Inside an effect or memo, `theme()` is a dependency, so derived
+values follow the theme too. A unit test keeps every text token at 4.5:1
+or more against its backgrounds, in both themes and for every accent the
+settings offer, and the focus ring at 3:1; a new token pair belongs in
+it. Don't call `set_theme` from an effect that reads `theme()`: the
+switch runs that effect again.
 
 ## Input and focus
 

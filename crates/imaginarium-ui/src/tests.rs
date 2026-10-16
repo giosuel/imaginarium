@@ -15,28 +15,30 @@ use imaginarium_text::{Fonts, TextStyle};
 use taffy::prelude::length;
 
 use crate::access::AccessTree;
+use crate::theme::{DEFAULT_ACCENT, Theme, Token, set_theme};
 use crate::tree::{Cx, Ui, Widget, WidgetId};
-use crate::widgets::{Button, ButtonColors, Flex, InputColors, TextInput};
+use crate::widgets::{Button, ButtonColors, Flex, InputColors, Label, TextInput};
 use crate::window::{Input, Key, Modifiers};
 
 const AREA: Rect = Rect::new(0.0, 0.0, 400.0, 300.0);
 
 fn button_colors() -> ButtonColors {
     ButtonColors {
-        background: Color::WHITE,
-        hover: Color::WHITE,
-        pressed: Color::WHITE,
-        text: Color::BLACK,
-        focus: Color::BLACK,
+        background: Color::WHITE.into(),
+        hover: Color::WHITE.into(),
+        pressed: Color::WHITE.into(),
+        text: Color::BLACK.into(),
+        focus: Color::BLACK.into(),
     }
 }
 
 fn input_colors() -> InputColors {
     InputColors {
-        background: Color::WHITE,
-        border: Color::BLACK,
-        accent: Color::BLACK,
-        placeholder: Color::BLACK,
+        background: Color::WHITE.into(),
+        border: Color::BLACK.into(),
+        accent: Color::BLACK.into(),
+        placeholder: Color::BLACK.into(),
+        text: Color::BLACK.into(),
     }
 }
 
@@ -354,4 +356,78 @@ fn a_held_key_activates_a_button_once() {
         );
     }
     assert_eq!(clicks.get(), 1);
+}
+
+#[test]
+fn a_theme_switch_repaints_every_widget_and_reshapes_labels() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let label = ui.add(Label::new("Saved", TextStyle::new(13.0)).color(Token::Text));
+    let panel = ui.add_with_children(Flex::column().fill().background(Token::PanelBg), &[label]);
+    ui.set_root(panel);
+    let mut scene = imaginarium_render::Scene::new();
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    let dark = Theme::dark(DEFAULT_ACCENT);
+    let light = Theme::light(DEFAULT_ACCENT);
+    assert_eq!(
+        ui.widget::<Label>(label).unwrap().shaped_color(),
+        Some(dark.color(Token::Text))
+    );
+
+    // Nothing changed: nothing repaints.
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(ui.stats().repainted, 0);
+
+    set_theme(light.clone());
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(ui.stats().repainted, 2);
+    assert_eq!(
+        ui.widget::<Label>(label).unwrap().shaped_color(),
+        Some(light.color(Token::Text))
+    );
+    set_theme(dark);
+}
+
+#[test]
+fn inputs_and_buttons_follow_the_theme() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let style = TextStyle::new(14.0);
+    let field = ui.add(TextInput::new("Name", "", style, InputColors::themed()));
+    let save = ui.add(Button::new("Save", style, ButtonColors::primary(), || {}));
+    let panel = ui.add_with_children(Flex::column().fill(), &[field, save]);
+    ui.set_root(panel);
+    let mut scene = imaginarium_render::Scene::new();
+    let dark = Theme::dark(DEFAULT_ACCENT);
+    let light = Theme::light(DEFAULT_ACCENT);
+    let colors = |ui: &mut Ui| {
+        let text = ui
+            .widget_mut::<TextInput>(field)
+            .unwrap()
+            .field()
+            .editor()
+            .style()
+            .color;
+        let label = ui.widget::<Button>(save).unwrap().label_color();
+        (text, label)
+    };
+
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(
+        colors(&mut ui),
+        (dark.color(Token::Text), Some(dark.color(Token::OnAccent)))
+    );
+
+    set_theme(light.clone());
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(
+        colors(&mut ui),
+        (light.color(Token::Text), Some(light.color(Token::OnAccent)))
+    );
+    set_theme(dark);
 }

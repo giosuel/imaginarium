@@ -53,10 +53,11 @@ pub(crate) struct App {
 
 fn input_colors() -> InputColors {
     InputColors {
-        background: PAPER,
-        border: CHROME_EDGE,
-        accent: ACCENT,
-        placeholder: INK.with_alpha(0.45),
+        background: PAPER.into(),
+        border: CHROME_EDGE.into(),
+        accent: ACCENT.into(),
+        placeholder: INK.with_alpha(0.45).into(),
+        text: INK.into(),
     }
 }
 
@@ -115,25 +116,24 @@ impl App {
 
         // The toolbar.
         let logo = ui.add(Logo);
-        let title = ui.add(Label::new(
-            "Imaginarium",
-            TextStyle::new(15.0).weight(700.0).color(INK),
-        ));
+        let title =
+            ui.add(Label::new("Imaginarium", TextStyle::new(15.0).weight(700.0)).color(INK));
         let spacer = ui.add(Flex::row().grow(1.0));
         let count = label(
             &mut ui,
-            TextStyle::new(13.0).color(INK.with_alpha(0.6)),
+            TextStyle::new(13.0),
+            INK.with_alpha(0.6),
             move || match matches.get() {
                 Some(count) => format!("{count} matching"),
                 None => String::new(),
             },
         );
         let button_colors = ButtonColors {
-            background: PAPER,
-            hover: INK.with_alpha(0.08),
-            pressed: INK.with_alpha(0.14),
-            text: INK,
-            focus: ACCENT,
+            background: PAPER.into(),
+            hover: INK.with_alpha(0.08).into(),
+            pressed: INK.with_alpha(0.14).into(),
+            text: INK.into(),
+            focus: ACCENT.into(),
         };
         let commands_button = ui.add(Button::new(
             "Commands  Ctrl+K",
@@ -215,7 +215,8 @@ impl App {
             let board = board.clone();
             label(
                 &mut ui,
-                TextStyle::new(12.0).color(INK.with_alpha(0.65)),
+                TextStyle::new(12.0),
+                INK.with_alpha(0.65),
                 move || {
                     let (paint, encode) = frame.get();
                     let (zoom, mode, canvas, selected) = board.try_borrow().map_or(
@@ -260,8 +261,8 @@ impl App {
         // The hints never change: a label of their own, laid out once.
         let hints = ui.add(Label::new(
             "wheel/drag: pan · Ctrl+wheel: zoom · double-click: edit · Ctrl+K: commands · Tab: focus",
-            TextStyle::new(12.0).color(INK.with_alpha(0.45)),
-        ));
+            TextStyle::new(12.0),
+        ).color(INK.with_alpha(0.45)));
         let spring = ui.add(Flex::row().grow(1.0));
         let status_bar = ui.add_with_children(
             Flex::row()
@@ -305,7 +306,8 @@ impl App {
         ));
         let footer = label(
             &mut ui,
-            TextStyle::new(12.0).color(INK.with_alpha(0.5)),
+            TextStyle::new(12.0),
+            INK.with_alpha(0.5),
             move || {
                 let results = results.get();
                 format!(
