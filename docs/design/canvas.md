@@ -43,7 +43,9 @@ transaction.
     until then).
 - **Effective styles.** A property's value is the node's override, its
   style, the style's ancestors, then the built-in default
-  (`DocumentView::style_prop`, schema §8). The canvas keeps an index from
+  (`DocumentView::style_prop`, schema §8). A palette color is then shown
+  in the theme's version (`shell.md` §7): the theme is an input of
+  painting, and switching it repaints every item. The canvas keeps an index from
   each style to the nodes that use it, for style changes.
 - **Bounds:** the transformed path bounds, grown by half the stroke width
   and the miter allowance; text by its box. The canvas trusts them
@@ -179,6 +181,5 @@ Added to `imaginarium-canvas`'s benches (criterion, the conventions in
 
 ## 11. Open questions
 
-1. Shape colors in the dark theme (see `shell.md` §11).
-2. Whether frames' names belong in tiles or on top of them (they keep
+1. Whether frames' names belong in tiles or on top of them (they keep
    their screen size at every zoom). Probably on top, like the selection.

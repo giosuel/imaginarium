@@ -238,9 +238,11 @@ theme repaints live. The dark values, from the mockups:
 | `tooltip.bg` | `#3F3F46` | `#18181B` |
 
 Shape colors on the board are document data (styles), not theme tokens.
-The default palette has a light and a dark variant of each color, and the
-dark theme shows a shape's dark variant when it uses a palette color
-(owner to confirm with the first dark board; see open questions).
+The default palette has a light and a dark version of each color, and the
+dark theme shows a shape's dark version when it uses a palette color
+(owner, 2026-10-16). A color outside the palette shows as stored, and text
+without a color of its own follows the theme's text color. The file
+always stores the palette color itself.
 
 Text meets 4.5:1 on its background (3:1 for 24 px and up) in every theme;
 a test checks the token pairs.
@@ -296,6 +298,4 @@ the first), a top bar, a bottom bar (the timeline later), and overlays.
 
 ## 11. Open questions
 
-1. Shape colors in dark mode: show a dark variant of palette colors (as
-   above), or keep them as drawn? Excalidraw inverts the board; Figma keeps
-   the colors. Decided with the first dark board in M3.2.
+None at the moment.

@@ -486,6 +486,11 @@ Decided (2026-10-16):
 - **Dark first:** "I like the dark mode. lets implement this first and
   then light mode later on." M3 builds the dark theme; light and high
   contrast follow, on the same tokens.
+- **Shape colors in the dark theme are the palette's dark versions:**
+  each palette color has a light and a dark version, and the dark theme
+  shows the dark one ("I prefer dark palette colors"). Colors outside the
+  palette show as stored; text without a color of its own follows the
+  theme.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
