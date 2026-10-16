@@ -18,8 +18,13 @@ use crate::shapes::{Outline, shape_path};
 use crate::style::{self, ShapeStyle, TextLook};
 
 /// The gap between neighbouring z keys after a full walk, so a node
-/// inserted between two others gets a key between theirs.
-pub(crate) const Z_GAP: u64 = 1 << 20;
+/// inserted between two others gets a key between theirs: 32 halvings
+/// before a re-key, and room for far more items than a board holds.
+pub(crate) const Z_GAP: u64 = 1 << 32;
+
+/// The keys of a full walk start here, so the space below the first
+/// item (where nodes sent to the back go) halves 60 times.
+pub(crate) const Z_START: u64 = 1 << 60;
 
 /// The space between a shape's edge and its label, in points.
 const LABEL_PADDING: f64 = 8.0;
@@ -154,6 +159,9 @@ struct TextKey {
 pub(crate) struct Update {
     /// Nodes whose items are new or changed (their z, bounds or look).
     pub upserted: Vec<NodeId>,
+    /// Nodes whose items only got new keys in the same order: nothing to
+    /// redraw.
+    pub rekeyed: Vec<NodeId>,
     /// Items that are gone.
     pub removed: Vec<ItemId>,
 }
@@ -170,6 +178,8 @@ pub(crate) struct Items {
     texts: HashMap<NodeId, CachedText>,
     /// The frames among the items (their names are drawn on top).
     pub frames: HashSet<NodeId>,
+    /// The items by the style they use, for style changes.
+    by_style: HashMap<StyleId, HashSet<NodeId>>,
     /// Item ids are handed out once and never reused.
     next_item: u64,
 }
@@ -211,11 +221,12 @@ impl Items {
         self.by_node.clear();
         self.places.clear();
         self.frames.clear();
+        self.by_style.clear();
         self.ids.retain(|node, _| view.node(*node).is_some());
         let ids = &self.ids;
         self.by_item.retain(|_, node| ids.contains_key(node));
         self.texts.retain(|node, _| view.node(*node).is_some());
-        let mut z = 0;
+        let mut z = Z_START;
         let mut walker = Walker {
             view,
             fonts,
@@ -257,6 +268,9 @@ impl Items {
             removed.push(item.id);
         }
         self.frames.remove(&node);
+        for nodes in self.by_style.values_mut() {
+            nodes.remove(&node);
+        }
         self.places.remove(&node);
         if deleted {
             if let Some(id) = self.ids.remove(&node) {
@@ -268,7 +282,8 @@ impl Items {
 
     /// Brings the items up to date with `changes`, which `view` already
     /// contains (`canvas.md` §3): only what the changes name is built
-    /// again.
+    /// again. Several change sets waiting together must be merged first
+    /// ([`merge`]): each is applied against the latest view.
     pub(crate) fn apply(
         &mut self,
         view: &DocumentView,
@@ -291,21 +306,16 @@ impl Items {
         let mut subtrees: HashSet<NodeId> = structural.clone();
         let mut singles: HashSet<NodeId> = HashSet::new();
         for (node, what) in &changes.changed {
-            if what.geometry || what.kind || what.props {
+            if what.geometry || what.kind || (what.props && self.visibility_flips(view, *node)) {
                 subtrees.insert(*node);
-            } else if what.style || what.text {
+            } else if what.style || what.text || what.props {
                 singles.insert(*node);
             }
         }
         if !changes.styles.is_empty() {
-            let affected = affected_styles(view, &changes.styles);
-            for node in self.places.keys() {
-                if view
-                    .node(*node)
-                    .and_then(|node| node.style())
-                    .is_some_and(|style| affected.contains(style))
-                {
-                    singles.insert(*node);
+            for style in affected_styles(view, &changes.styles) {
+                if let Some(nodes) = self.by_style.get(&style) {
+                    singles.extend(nodes.iter().copied());
                 }
             }
         }
@@ -318,49 +328,54 @@ impl Items {
             .collect();
         singles.retain(|node| !subtrees.contains(node) && !under(*node, &subtrees));
 
-        // The old keys, for nodes whose order didn't change.
-        let mut old_z: HashMap<NodeId, u64> = HashMap::new();
-        let mut fresh: HashSet<NodeId> = HashSet::new();
+        // Keys: kept where the order held; the others go between their
+        // neighbours below.
+        let mut keep: HashMap<NodeId, u64> = HashMap::new();
         let mut built = Vec::new();
+        let mut walks = Vec::new();
         for root in roots {
-            let mut nodes = Vec::new();
-            subtree(view, root, &mut nodes);
-            let reordered = structural.contains(&root)
-                || ancestors(view, root).any(|up| structural.contains(&up));
-            for node in &nodes {
+            // A node keeps its key unless it, or an ancestor in the
+            // subtree, was created or moved (a node moved into a frame
+            // whose box changed is under that frame's subtree too).
+            let mut marked = Vec::new();
+            subtree_marked(view, root, &structural, false, &mut marked);
+            let nodes: Vec<NodeId> = marked.iter().map(|(node, _)| *node).collect();
+            for (node, reordered) in &marked {
                 if let Some(item) = self.by_node.get(node)
                     && !reordered
                 {
-                    old_z.insert(*node, item.z);
+                    keep.insert(*node, item.z);
                 }
                 self.drop_node(*node, false, &mut removed);
-                if reordered {
-                    fresh.insert(*node);
-                }
             }
             if let Some(place) = self.parent_place(view, root) {
                 built.extend(self.build_from(view, fonts, colors, root, &place, true));
+                walks.push((root, nodes));
             }
         }
         for node in singles {
-            let old = self.by_node.get(&node).map(|item| item.z);
+            let Some(z) = self.by_node.get(&node).map(|item| item.z) else {
+                continue;
+            };
             let Some(place) = self.parent_place(view, node) else {
                 continue;
             };
-            if let Some(z) = old {
-                old_z.insert(node, z);
+            keep.insert(node, z);
+            // Its style may be another now.
+            for nodes in self.by_style.values_mut() {
+                nodes.remove(&node);
             }
             // Its children keep their items: only its own is replaced.
             built.extend(self.build_from(view, fonts, colors, node, &place, false));
         }
-        // Keys: the old ones where the order held, new ones between the
-        // neighbours elsewhere.
-        let mut need_keys = false;
+        let mut pending: HashSet<NodeId> = HashSet::new();
         for node in &built {
             if let Some(item) = self.by_node.get_mut(node) {
-                match old_z.get(node) {
-                    Some(z) if !fresh.contains(node) => item.z = *z,
-                    _ => need_keys = true,
+                match keep.get(node) {
+                    Some(z) => item.z = *z,
+                    None => {
+                        pending.insert(*node);
+                    }
                 }
             }
         }
@@ -369,15 +384,14 @@ impl Items {
             .copied()
             .filter(|node| self.by_node.contains_key(node))
             .collect();
-        if need_keys {
-            let pending: HashSet<NodeId> = built
-                .iter()
-                .copied()
-                .filter(|node| !old_z.contains_key(node) || fresh.contains(node))
+        let mut rekeyed = Vec::new();
+        if !pending.is_empty() && !self.key_between_neighbours(view, &walks, &mut pending) {
+            let built: HashSet<NodeId> = upserted.iter().copied().collect();
+            rekeyed = self
+                .rekey(view)
+                .into_iter()
+                .filter(|node| !built.contains(node))
                 .collect();
-            if !self.key_between_neighbours(view, &pending) {
-                upserted = self.rekey(view);
-            }
         }
         // An item built again keeps its id: it isn't removed from the canvas.
         let kept: HashSet<ItemId> = upserted
@@ -387,7 +401,26 @@ impl Items {
         removed.retain(|id| !kept.contains(id));
         removed.sort_unstable();
         removed.dedup();
-        Update { upserted, removed }
+        upserted.dedup();
+        Update {
+            upserted,
+            rekeyed,
+            removed,
+        }
+    }
+
+    /// Whether a props change shows or hides `node`'s subtree: it is
+    /// hidden but still placed, or shown under a placed parent but not.
+    fn visibility_flips(&self, view: &DocumentView, node: NodeId) -> bool {
+        let Some(view_node) = view.node(node) else {
+            return false;
+        };
+        let placed = self.places.contains_key(&node);
+        if view_node.hidden() {
+            placed
+        } else {
+            !placed && self.parent_place(view, node).is_some()
+        }
     }
 
     /// Builds `node` (with its subtree when `recurse`) under `place`.
@@ -413,40 +446,148 @@ impl Items {
         walker.built
     }
 
-    /// Gives the `pending` items keys between their neighbours' in z
-    /// order. `false` when a gap is too small.
-    fn key_between_neighbours(&mut self, view: &DocumentView, pending: &HashSet<NodeId>) -> bool {
-        let order: Vec<NodeId> = view
-            .walk()
-            .into_iter()
-            .filter(|node| self.by_node.contains_key(node))
-            .collect();
-        let mut index = 0;
-        while index < order.len() {
-            if !pending.contains(&order[index]) {
-                index += 1;
-                continue;
+    /// The key of the item that paints just before `node`'s subtree, by
+    /// the tree (not a walk of the whole board): the last item in an
+    /// earlier sibling's subtree, else the parent's own item, going up.
+    /// Items still waiting for keys (`pending`) don't count.
+    fn key_before(&self, view: &DocumentView, node: NodeId, pending: &HashSet<NodeId>) -> u64 {
+        let mut current = node;
+        loop {
+            let parent = view
+                .node(current)
+                .map_or(Parent::Root, |node| node.parent());
+            let siblings: Vec<NodeId> = view.children(parent).collect();
+            let at = siblings.iter().position(|id| *id == current).unwrap_or(0);
+            for sibling in siblings[..at].iter().rev() {
+                if let Some(z) = self.last_key(view, *sibling, pending) {
+                    return z;
+                }
             }
-            let start = index;
-            while index < order.len() && pending.contains(&order[index]) {
-                index += 1;
+            match parent {
+                Parent::Root => return 0,
+                Parent::Node(parent) => {
+                    if let Some(item) = self.by_node.get(&parent)
+                        && !pending.contains(&parent)
+                    {
+                        return item.z;
+                    }
+                    current = parent;
+                }
             }
-            let low = start
-                .checked_sub(1)
-                .map_or(0, |before| self.by_node[&order[before]].z);
-            let count = (index - start) as u64;
-            let high = order
-                .get(index)
-                .map_or(low.saturating_add((count + 1) * Z_GAP), |after| {
-                    self.by_node[after].z
+        }
+    }
+
+    /// The key of the item that paints just after `node`'s subtree: the
+    /// first item in a later sibling's subtree, going up. `None` at the top.
+    fn key_after(
+        &self,
+        view: &DocumentView,
+        node: NodeId,
+        pending: &HashSet<NodeId>,
+    ) -> Option<u64> {
+        let mut current = node;
+        loop {
+            let parent = view
+                .node(current)
+                .map_or(Parent::Root, |node| node.parent());
+            let siblings: Vec<NodeId> = view.children(parent).collect();
+            let at = siblings
+                .iter()
+                .position(|id| *id == current)
+                .unwrap_or(siblings.len());
+            for sibling in siblings.iter().skip(at + 1) {
+                if let Some(z) = self.first_key(view, *sibling, pending) {
+                    return Some(z);
+                }
+            }
+            match parent {
+                Parent::Root => return None,
+                Parent::Node(parent) => current = parent,
+            }
+        }
+    }
+
+    /// The key of the last item of `node`'s subtree in paint order.
+    fn last_key(
+        &self,
+        view: &DocumentView,
+        node: NodeId,
+        pending: &HashSet<NodeId>,
+    ) -> Option<u64> {
+        let children: Vec<NodeId> = view.children(Parent::Node(node)).collect();
+        for child in children.iter().rev() {
+            if let Some(z) = self.last_key(view, *child, pending) {
+                return Some(z);
+            }
+        }
+        self.by_node
+            .get(&node)
+            .filter(|_| !pending.contains(&node))
+            .map(|item| item.z)
+    }
+
+    /// The key of the first item of `node`'s subtree in paint order.
+    fn first_key(
+        &self,
+        view: &DocumentView,
+        node: NodeId,
+        pending: &HashSet<NodeId>,
+    ) -> Option<u64> {
+        if let Some(item) = self.by_node.get(&node)
+            && !pending.contains(&node)
+        {
+            return Some(item.z);
+        }
+        view.children(Parent::Node(node))
+            .find_map(|child| self.first_key(view, child, pending))
+    }
+
+    /// Gives the `pending` items of the subtrees built again (`walks`:
+    /// each root and its nodes in paint order) keys between their
+    /// neighbours'. `false` when a gap is too small.
+    fn key_between_neighbours(
+        &mut self,
+        view: &DocumentView,
+        walks: &[(NodeId, Vec<NodeId>)],
+        pending: &mut HashSet<NodeId>,
+    ) -> bool {
+        for (root, nodes) in walks {
+            let painting: Vec<NodeId> = nodes
+                .iter()
+                .copied()
+                .filter(|node| self.by_node.contains_key(node))
+                .collect();
+            let mut index = 0;
+            while index < painting.len() {
+                if !pending.contains(&painting[index]) {
+                    index += 1;
+                    continue;
+                }
+                let start = index;
+                while index < painting.len() && pending.contains(&painting[index]) {
+                    index += 1;
+                }
+                let low = match start.checked_sub(1) {
+                    Some(before) => self.by_node[&painting[before]].z,
+                    None => self.key_before(view, *root, pending),
+                };
+                let count = (index - start) as u64;
+                let high = match painting.get(index) {
+                    Some(after) => Some(self.by_node[after].z),
+                    None => self.key_after(view, *root, pending),
+                };
+                let high = high.unwrap_or_else(|| {
+                    low.saturating_add(count.saturating_add(1).saturating_mul(Z_GAP))
                 });
-            if high <= low || high - low <= count {
-                return false;
-            }
-            let step = (high - low) / (count + 1);
-            for (offset, node) in order[start..index].iter().enumerate() {
-                if let Some(item) = self.by_node.get_mut(node) {
-                    item.z = low + step * (offset as u64 + 1);
+                if high <= low || high - low <= count {
+                    return false;
+                }
+                let step = (high - low) / (count + 1);
+                for (offset, node) in painting[start..index].iter().enumerate() {
+                    if let Some(item) = self.by_node.get_mut(node) {
+                        item.z = low + step * (offset as u64 + 1);
+                    }
+                    pending.remove(node);
                 }
             }
         }
@@ -455,7 +596,7 @@ impl Items {
 
     /// New keys for every item, in z order. Returns every node.
     fn rekey(&mut self, view: &DocumentView) -> Vec<NodeId> {
-        let mut z = 0;
+        let mut z = Z_START;
         let mut nodes = Vec::new();
         for node in view.walk() {
             if let Some(item) = self.by_node.get_mut(&node) {
@@ -468,11 +609,62 @@ impl Items {
     }
 }
 
-/// The node and its descendants in the view.
-fn subtree(view: &DocumentView, node: NodeId, out: &mut Vec<NodeId>) {
-    out.push(node);
+/// One change set for several that wait together: what any of them
+/// names. Applied against the view after all of them, it updates what
+/// they would have one by one.
+pub(crate) fn merge(sets: Vec<ChangeSet>) -> ChangeSet {
+    let mut sets = sets.into_iter();
+    let Some(mut merged) = sets.next() else {
+        return ChangeSet::default();
+    };
+    for set in sets {
+        merged.created.extend(set.created);
+        merged.deleted.extend(set.deleted);
+        merged.moved.extend(set.moved);
+        merged.styles.extend(set.styles);
+        merged.assets.extend(set.assets);
+        merged.meta |= set.meta;
+        merged.pages |= set.pages;
+        merged.ext |= set.ext;
+        for (node, what) in set.changed {
+            match merged.changed.iter_mut().find(|(id, _)| *id == node) {
+                Some((_, into)) => {
+                    into.kind |= what.kind;
+                    into.geometry |= what.geometry;
+                    into.style |= what.style;
+                    into.text |= what.text;
+                    into.assets |= what.assets;
+                    into.ext |= what.ext;
+                    into.generation |= what.generation;
+                    into.props |= what.props;
+                }
+                None => merged.changed.push((node, what)),
+            }
+        }
+    }
+    for list in [&mut merged.created, &mut merged.deleted, &mut merged.moved] {
+        list.sort_unstable();
+        list.dedup();
+    }
+    merged.styles.sort_unstable();
+    merged.styles.dedup();
+    merged.changed.sort_unstable_by_key(|(node, _)| *node);
+    merged
+}
+
+/// The node and its descendants in paint order, each with whether it or
+/// an ancestor (from `node` down) is in `set`.
+fn subtree_marked(
+    view: &DocumentView,
+    node: NodeId,
+    set: &HashSet<NodeId>,
+    above: bool,
+    out: &mut Vec<(NodeId, bool)>,
+) {
+    let marked = above || set.contains(&node);
+    out.push((node, marked));
     for child in view.children(Parent::Node(node)) {
-        subtree(view, child, out);
+        subtree_marked(view, child, set, marked, out);
     }
 }
 
@@ -748,6 +940,13 @@ impl Walker<'_> {
         let id = self.items.item_id(node);
         if name.is_some() {
             self.items.frames.insert(node);
+        }
+        if let Some(style) = self.view.node(node).and_then(|node| node.style()) {
+            self.items
+                .by_style
+                .entry(style.clone())
+                .or_default()
+                .insert(node);
         }
         self.items.by_node.insert(
             node,

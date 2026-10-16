@@ -67,6 +67,19 @@ enum Op {
         node: usize,
         text: u8,
     },
+    /// Another kind (a frame becomes a group, a shape a frame, …).
+    Kind {
+        node: usize,
+        kind: u8,
+    },
+    Rename {
+        node: usize,
+        name: u8,
+    },
+    DeleteStyle(bool),
+    /// To the back of the board, again and again (the gap below the
+    /// first item).
+    ToBack(usize),
     Undo,
     Redo,
 }
@@ -84,6 +97,10 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (any::<usize>(), any::<bool>()).prop_map(|(node, style)| Op::UseStyle { node, style }),
         1 => (any::<bool>(), 0u8..4).prop_map(|(style, color)| Op::StyleFill { style, color }),
         1 => (any::<usize>(), 0u8..4).prop_map(|(node, text)| Op::Text { node, text }),
+        1 => (any::<usize>(), 0u8..5).prop_map(|(node, kind)| Op::Kind { node, kind }),
+        1 => (any::<usize>(), 0u8..3).prop_map(|(node, name)| Op::Rename { node, name }),
+        1 => any::<bool>().prop_map(Op::DeleteStyle),
+        2 => any::<usize>().prop_map(Op::ToBack),
         1 => Just(Op::Undo),
         1 => Just(Op::Redo),
     ]
@@ -91,6 +108,13 @@ fn op() -> impl Strategy<Value = Op> {
 
 const COLORS: [&str; 4] = ["#E0E7FF", "#FEF3C7", "#6366F1", "#00000000"];
 const TEXTS: [&str; 4] = ["", "Plan", "A longer label that wraps", "Ship it"];
+
+fn node_hash(node: NodeId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    node.hash(&mut hasher);
+    hasher.finish()
+}
 
 fn pick(document: &Document, index: usize) -> Option<NodeId> {
     let nodes = document.view().walk();
@@ -147,9 +171,40 @@ fn run(board: &mut BoardCanvas, styles: &[StyleId; 2], op: &Op) {
                 } else {
                     parent.map_or(Parent::Root, Parent::Node)
                 };
-                board.transact(&user, |txn| txn.move_node(node, parent, Some(0)))
+                // Anywhere among the new siblings.
+                let len = board
+                    .document()
+                    .view()
+                    .children(parent)
+                    .filter(|id| *id != node)
+                    .count();
+                let index = (node_hash(node) as usize) % (len + 1);
+                board.transact(&user, |txn| txn.move_node(node, parent, Some(index)))
             }
             _ => Ok(()),
+        },
+        Op::Kind { node, kind } => match target(node) {
+            Some(node) => {
+                board.transact(&user, |txn| txn.set_kind(node, &kinds[usize::from(kind)]))
+            }
+            None => Ok(()),
+        },
+        Op::Rename { node, name } => match target(node) {
+            Some(node) => board.transact(&user, |txn| {
+                txn.set_prop(
+                    node,
+                    "name",
+                    Value::String(["A", "Plan", "Research"][usize::from(name)].into()),
+                )
+            }),
+            None => Ok(()),
+        },
+        Op::DeleteStyle(style) => {
+            board.transact(&user, |txn| txn.delete_style(&styles[usize::from(style)]))
+        }
+        Op::ToBack(node) => match target(node) {
+            Some(node) => board.transact(&user, |txn| txn.move_node(node, Parent::Root, Some(0))),
+            None => Ok(()),
         },
         Op::Geometry {
             node,
@@ -278,7 +333,7 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
     #[test]
-    fn updates_leave_the_items_a_build_makes(ops in prop::collection::vec(op(), 1..40)) {
+    fn updates_leave_the_items_a_build_makes(ops in prop::collection::vec((op(), any::<bool>()), 1..40)) {
         let mut fonts = Fonts::bundled_only();
         let mut document = Document::new_with(DocumentKind::Board, NO_MERGE).unwrap();
         let (styles, _) = document
@@ -290,14 +345,29 @@ proptest! {
             .unwrap();
         let mut board = BoardCanvas::new(document);
         items_of(&mut board, &mut fonts);
-        for op in &ops {
+        for (op, sync) in &ops {
             run(&mut board, &styles, op);
             // Sometimes several changes wait for one sync.
-            if ops.len() % 3 != 0 {
+            if *sync {
                 items_of(&mut board, &mut fonts);
             }
         }
         let updated = items_of(&mut board, &mut fonts);
+        // Keys rise strictly in paint order.
+        let items = board.items_for_tests();
+        let keys: Vec<u64> = board
+            .document()
+            .view()
+            .walk()
+            .iter()
+            .filter_map(|node| items.by_node.get(node).map(|item| item.z))
+            .collect();
+        prop_assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "keys {:?}", keys);
+        // The canvas holds exactly the items, with their bounds and keys.
+        prop_assert_eq!(board.canvas_len_for_tests(), items.by_node.len());
+        for item in items.by_node.values() {
+            prop_assert_eq!(board.canvas_item_for_tests(item.id), Some((item.z, item.bounds)));
+        }
         let colors = BoardColors::of(&theme());
         let built = summary(&Items::build(board.document().view(), &mut fonts, &colors));
         prop_assert_eq!(updated, built);
@@ -376,4 +446,108 @@ fn a_style_change_rebuilds_the_nodes_that_use_it() {
     assert_eq!(upserted, expected);
     assert!(!update.upserted.contains(&other));
     assert!(update.removed.is_empty());
+}
+
+#[test]
+fn changes_waiting_together_leave_keys_in_paint_order() {
+    // The review's case: A, B and frame C; then, with no frame between,
+    // X is created in C, A moves into C at the back and is hidden.
+    let mut fonts = Fonts::bundled_only();
+    let mut document = Document::new_with(DocumentKind::Board, NO_MERGE).unwrap();
+    let ((a, c), _) = document
+        .transact(&Actor::User, |txn| {
+            let a = txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+            txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+            let c = txn.create_node(Parent::Root, None, &NodeKind::Frame)?;
+            txn.set_geometry(c, Geometry::new(0.0, 0.0, 500.0, 500.0))?;
+            Ok((a, c))
+        })
+        .unwrap();
+    let mut board = BoardCanvas::new(document);
+    board.sync_for_tests(&mut fonts);
+    let x = board
+        .transact(&Actor::User, |txn| {
+            let x = txn.create_node(Parent::Node(c), None, &NodeKind::Shape)?;
+            txn.set_geometry(x, Geometry::new(10.0, 10.0, 50.0, 50.0))?;
+            Ok(x)
+        })
+        .unwrap();
+    board
+        .transact(&Actor::User, |txn| {
+            txn.move_node(a, Parent::Node(c), Some(0))
+        })
+        .unwrap();
+    board
+        .transact(&Actor::User, |txn| {
+            txn.set_prop(a, "hidden", Value::Bool(true))
+        })
+        .unwrap();
+    board.sync_for_tests(&mut fonts);
+    let items = board.items_for_tests();
+    let keys: Vec<u64> = board
+        .document()
+        .view()
+        .walk()
+        .iter()
+        .filter_map(|node| items.by_node.get(node).map(|item| item.z))
+        .collect();
+    assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
+    assert!(
+        items.by_node[&x].z > items.by_node[&c].z,
+        "the child paints above its frame"
+    );
+}
+
+#[test]
+fn sending_to_the_back_again_and_again_doesnt_re_key_everything() {
+    let mut fonts = Fonts::bundled_only();
+    let mut board = BoardCanvas::new(crate::demo::grid(100).unwrap());
+    board.sync_for_tests(&mut fonts);
+    for _ in 0..40 {
+        let last = *board.document().view().walk().last().unwrap();
+        let (_, changes) = board
+            .document_mut_for_tests()
+            .transact(&Actor::User, |txn| {
+                txn.move_node(last, Parent::Root, Some(0))
+            })
+            .unwrap();
+        let colors = BoardColors::of(&theme());
+        let view = board.document().view().clone();
+        let update = board
+            .items_mut_for_tests()
+            .apply(&view, &changes, &mut fonts, &colors);
+        assert_eq!(update.upserted, vec![last]);
+        assert!(update.rekeyed.is_empty());
+    }
+}
+
+#[test]
+fn renaming_a_frame_rebuilds_only_the_frame() {
+    let mut fonts = Fonts::bundled_only();
+    let mut document = Document::new(DocumentKind::Board).unwrap();
+    let (frame, _) = document
+        .transact(&Actor::User, |txn| {
+            let frame = txn.create_node(Parent::Root, None, &NodeKind::Frame)?;
+            txn.set_geometry(frame, Geometry::new(0.0, 0.0, 1000.0, 1000.0))?;
+            for index in 0..50 {
+                let id = txn.create_node(Parent::Node(frame), None, &NodeKind::Shape)?;
+                txn.set_geometry(id, Geometry::new(f64::from(index) * 10.0, 0.0, 8.0, 8.0))?;
+            }
+            Ok(frame)
+        })
+        .unwrap();
+    let mut board = BoardCanvas::new(document);
+    board.sync_for_tests(&mut fonts);
+    let (_, changes) = board
+        .document_mut_for_tests()
+        .transact(&Actor::User, |txn| {
+            txn.set_prop(frame, "name", Value::String("Plan".into()))
+        })
+        .unwrap();
+    let colors = BoardColors::of(&theme());
+    let view = board.document().view().clone();
+    let update = board
+        .items_mut_for_tests()
+        .apply(&view, &changes, &mut fonts, &colors);
+    assert_eq!(update.upserted, vec![frame]);
 }

@@ -74,15 +74,20 @@ remote change or an undo repaints only its tiles.
 
 **As built (M3.2).** `BoardCanvas::transact`, `undo`, `redo` and
 `apply_remote` queue the `ChangeSet`; the next paint or input applies it
-(laying out text needs the fonts, which they bring), so several changes
-between frames cost one pass. Every visible node keeps its place (its
+(laying out text needs the fonts, which they bring); several waiting
+together are merged into one and applied once, since each is applied
+against the latest view. Every visible node keeps its place (its
 world transform and the clips of its children), groups included, so a
 subtree is built again on its own under its parent. Created and moved
-subtrees get keys between their neighbours in the walk, and when a gap
-is too small every item is re-keyed. Text layouts are cached by text,
+subtrees get keys between their neighbours, found in the tree (the last
+item of an earlier sibling's subtree, the parent, going up) rather than
+in a walk of the board; keys start at 2^60 with gaps of 2^32, and when a
+gap still runs out every item is re-keyed, which redraws nothing
+(`Canvas::rekey`). A props change rebuilds the subtree only when it
+shows or hides it (a rename rebuilds the frame alone). Text layouts are cached by text,
 look and width, so moving a shape doesn't lay its label out again.
-Nodes using a changed style are found by scanning the visible nodes'
-style references, inheriting styles included. A property test checks
+Nodes using a changed style come from an index of items by style,
+inheriting styles included. A property test checks
 that any sequence of edits, undos and redos leaves the items a fresh
 build makes.
 

@@ -478,6 +478,19 @@ impl BoardCanvas {
     }
 
     #[cfg(test)]
+    pub(crate) fn canvas_len_for_tests(&self) -> usize {
+        self.canvas.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn canvas_item_for_tests(
+        &self,
+        id: imaginarium_render::canvas::ItemId,
+    ) -> Option<(u64, Rect)> {
+        Some((self.canvas.z(id)?, self.canvas.bounds(id)?))
+    }
+
+    #[cfg(test)]
     pub(crate) fn document_mut_for_tests(&mut self) -> &mut Document {
         &mut self.document
     }
@@ -493,19 +506,24 @@ impl BoardCanvas {
         let Some(items) = &mut self.items else {
             return;
         };
-        for changes in std::mem::take(&mut self.pending) {
-            let update = items.apply(self.document.view(), &changes, fonts, &colors);
-            for id in &update.removed {
-                self.canvas.remove(*id);
+        // All at once: each set names what changed, the view is after all.
+        let changes = crate::items::merge(std::mem::take(&mut self.pending));
+        let update = items.apply(self.document.view(), &changes, fonts, &colors);
+        for id in &update.removed {
+            self.canvas.remove(*id);
+        }
+        for node in &update.upserted {
+            if let Some(item) = items.by_node.get(node) {
+                self.canvas.upsert(item.id, item.z, item.bounds);
             }
-            for node in &update.upserted {
-                if let Some(item) = items.by_node.get(node) {
-                    self.canvas.upsert(item.id, item.z, item.bounds);
-                }
+        }
+        for node in &update.rekeyed {
+            if let Some(item) = items.by_node.get(node) {
+                self.canvas.rekey(item.id, item.z);
             }
-            for node in &changes.deleted {
-                self.names.remove(node);
-            }
+        }
+        for node in &changes.deleted {
+            self.names.remove(node);
         }
         // Gone or hidden nodes leave the selection and the hover.
         let still =
