@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use accesskit::{Action, ActionRequest, Node, NodeId};
 use imaginarium_reactive::Effect;
 use imaginarium_render::Scene;
-use imaginarium_render::kurbo::{Point, Rect, Size};
+use imaginarium_render::kurbo::{Point, Rect, Size, Vec2};
 use imaginarium_text::Fonts;
 use taffy::{AvailableSpace, TaffyTree};
 
@@ -116,6 +116,37 @@ pub trait Widget: Any {
         false
     }
 
+    /// How far its children are moved up and left (a scroll container's
+    /// offset). Their boxes are placed shifted by it.
+    fn scroll_offset(&self) -> Vec2 {
+        Vec2::ZERO
+    }
+
+    /// Whether it takes pointer input at `point` before its children (a
+    /// scroll bar drawn over its content). `bounds` and `content` are its
+    /// box and [`Cx::content_size`].
+    fn claims(&self, bounds: Rect, content: Size, point: Point) -> bool {
+        let _ = (bounds, content, point);
+        false
+    }
+
+    /// Whether it draws over its children ([`Widget::paint_over`]).
+    fn paints_over(&self) -> bool {
+        false
+    }
+
+    /// Draws over its children (a scroll bar), every frame, after them.
+    fn paint_over(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        let _ = (cx, scene);
+    }
+
+    /// Asked to bring `target` (window coordinates, a descendant's box)
+    /// into view, as when the focus moves to it. `true` if it moved.
+    fn reveal(&mut self, cx: &mut Cx<'_>, target: Rect) -> bool {
+        let _ = (cx, target);
+        false
+    }
+
     /// Its accessibility node (`None`: transparent, its children belong to
     /// the parent's node). Extra nodes (text runs, items it draws itself)
     /// go into [`Cx::access_tree`] with ids from [`WidgetId::access_base`],
@@ -155,6 +186,7 @@ pub trait Widget: Any {
 struct Requests {
     paint: bool,
     layout: bool,
+    place: bool,
     focus: Option<bool>,
     capture: Option<bool>,
     close_layer: bool,
@@ -165,6 +197,7 @@ struct Requests {
 pub struct Cx<'a> {
     id: WidgetId,
     bounds: Rect,
+    content: Size,
     focused: bool,
     focus_visible: bool,
     hovered: bool,
@@ -183,6 +216,12 @@ impl Cx<'_> {
     /// Its box from the last layout, in window coordinates.
     pub fn bounds(&self) -> Rect {
         self.bounds
+    }
+
+    /// How far its children reach from its top left corner, before any
+    /// scroll offset: the size a scroll container scrolls through.
+    pub fn content_size(&self) -> Size {
+        self.content
     }
 
     /// Whether it has the keyboard focus.
@@ -231,6 +270,12 @@ impl Cx<'_> {
     pub fn request_layout(&mut self) {
         self.requests.layout = true;
         self.requests.paint = true;
+    }
+
+    /// Its children moved without changing size (a scroll offset): place
+    /// the boxes again, which reuses the layout.
+    pub fn request_place(&mut self) {
+        self.requests.place = true;
     }
 
     /// Takes the keyboard focus.
@@ -291,6 +336,8 @@ struct NodeData {
     children: Vec<WidgetId>,
     layout: taffy::NodeId,
     bounds: Rect,
+    /// How far its children reach (see [`Cx::content_size`]).
+    content: Size,
     /// The widget's own drawing, kept until it is invalidated.
     scene: Scene,
     paint_dirty: bool,
@@ -301,6 +348,20 @@ struct NodeData {
 struct Slot {
     generation: u32,
     node: Option<NodeData>,
+}
+
+/// A [`VirtualList`](crate::VirtualList)'s rows and how to make more.
+struct ListState {
+    scroll: WidgetId,
+    body: WidgetId,
+    spacer: WidgetId,
+    row_height: f64,
+    overscan: usize,
+    count: std::rc::Rc<dyn Fn() -> usize>,
+    /// Taken out while it builds a row (it gets the tree).
+    build: Option<crate::scroll::RowBuilder>,
+    /// Built rows: index → their slot.
+    rows: std::collections::BTreeMap<usize, WidgetId>,
 }
 
 /// An open layer: its content's root and how it behaves.
@@ -359,6 +420,8 @@ pub struct Ui {
     deferred_closes: Vec<WidgetId>,
     /// Where the focus goes after a layer was removed from outside.
     pending_return: Option<WidgetId>,
+    /// Lists whose rows the tree builds as they come into view.
+    lists: Vec<ListState>,
     /// Whether the last input was the keyboard (focus rings show) rather
     /// than the pointer.
     keyboard: bool,
@@ -394,6 +457,7 @@ impl Ui {
             focusing: false,
             deferred_closes: Vec::new(),
             pending_return: None,
+            lists: Vec::new(),
             keyboard: true,
         }
     }
@@ -440,6 +504,7 @@ impl Ui {
             children: Vec::new(),
             layout,
             bounds: Rect::ZERO,
+            content: Size::ZERO,
             scene: Scene::new(),
             paint_dirty: true,
             effects: Vec::new(),
@@ -562,6 +627,194 @@ impl Ui {
         }
     }
 
+    /// Brings `id` into view: every scroll container around it scrolls
+    /// as far as needed (the focus does this on its own).
+    pub fn reveal(&mut self, fonts: &mut Fonts, id: WidgetId) {
+        let Some(mut target) = self.node(id).map(|node| node.bounds) else {
+            return;
+        };
+        let mut current = self.node(id).and_then(|node| node.parent);
+        while let Some(ancestor) = current {
+            let before = self.node(ancestor).map(|node| node.widget.scroll_offset());
+            self.call(fonts, ancestor, |widget, cx| widget.reveal(cx, target));
+            let after = self.node(ancestor).map(|node| node.widget.scroll_offset());
+            if let (Some(before), Some(after)) = (before, after) {
+                // Seen from further out, the target moved with the scroll.
+                target = target - (after - before);
+            }
+            current = self.node(ancestor).and_then(|node| node.parent);
+        }
+    }
+
+    /// Adds a [`VirtualList`](crate::VirtualList) in `scroll` (its style: height, growth) and
+    /// returns the scroll container. Its rows are built during layout, as
+    /// they come into view.
+    pub fn add_virtual_list(
+        &mut self,
+        list: crate::scroll::VirtualList,
+        scroll: crate::scroll::Scroll,
+    ) -> WidgetId {
+        let count = (list.count)();
+        let spacer = self.add(crate::scroll::ListSpacer { height: 0.0 });
+        let body = self.add_with_children(
+            crate::scroll::ListBody {
+                height: list.row_height * count as f64,
+                count,
+                label: list.label.clone(),
+            },
+            &[spacer],
+        );
+        let id = self.add_with_children(scroll, &[body]);
+        let watched = list.count.clone();
+        self.watch(id, true, move || {
+            watched();
+        });
+        self.lists.push(ListState {
+            scroll: id,
+            body,
+            spacer,
+            row_height: list.row_height,
+            overscan: list.overscan,
+            count: list.count,
+            build: Some(list.build),
+            rows: std::collections::BTreeMap::new(),
+        });
+        self.layout_dirty = true;
+        id
+    }
+
+    /// Scrolls the list in `scroll` (from [`Ui::add_virtual_list`]) so its
+    /// row `index` is in view (the palette's selection moving with ↑↓).
+    pub fn scroll_to_row(&mut self, scroll: WidgetId, index: usize) {
+        let Some(list) = self.lists.iter().find(|list| list.scroll == scroll) else {
+            return;
+        };
+        let row_height = list.row_height;
+        let Some(view) = self.node(scroll).map(|node| node.bounds.height()) else {
+            return;
+        };
+        let Some(widget) = self.widget_mut::<crate::scroll::Scroll>(scroll) else {
+            return;
+        };
+        let (top, bottom) = (index as f64 * row_height, (index + 1) as f64 * row_height);
+        let offset = widget.offset();
+        if top < offset {
+            widget.set_offset(top);
+        } else if bottom > offset + view {
+            widget.set_offset(bottom - view);
+        }
+    }
+
+    /// Builds the rows that came into view and removes those far out of it,
+    /// in every list. `true` if any row came or went.
+    fn update_lists(&mut self) -> bool {
+        let mut changed = false;
+        for index in 0..self.lists.len() {
+            let (scroll, body, spacer, row_height, overscan) = {
+                let list = &self.lists[index];
+                (
+                    list.scroll,
+                    list.body,
+                    list.spacer,
+                    list.row_height,
+                    list.overscan,
+                )
+            };
+            let count = imaginarium_reactive::untrack(|| (self.lists[index].count)());
+            let Some(view) = self.node(scroll).map(|node| node.bounds.height()) else {
+                continue;
+            };
+            let offset = self
+                .widget::<crate::scroll::Scroll>(scroll)
+                .map_or(0.0, crate::scroll::Scroll::offset);
+            // Before the first layout the view has no height: build a
+            // screenful's worth of overscan only.
+            let first = ((offset / row_height).floor() as usize).saturating_sub(overscan);
+            let last = (((offset + view) / row_height).ceil() as usize + overscan).min(count);
+            let wanted = first.min(last)..last;
+            // The body's height and the rows' set size follow the count.
+            if let Some(body_widget) = self.node_mut(body).and_then(|node| {
+                (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListBody>()
+            }) && body_widget.count != count
+            {
+                body_widget.count = count;
+                body_widget.height = row_height * count as f64;
+                self.mark(body, true);
+                let slots: Vec<WidgetId> = self.lists[index].rows.values().copied().collect();
+                for slot in slots {
+                    if let Some(row) = self.node_mut(slot).and_then(|node| {
+                        (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::RowSlot>()
+                    }) {
+                        row.count = count;
+                    }
+                }
+            }
+            let gone: Vec<usize> = self.lists[index]
+                .rows
+                .keys()
+                .copied()
+                .filter(|row| !wanted.contains(row))
+                .collect();
+            if !gone.is_empty() {
+                let removed: Vec<WidgetId> = gone
+                    .iter()
+                    .filter_map(|row| self.lists[index].rows.remove(row))
+                    .collect();
+                // Detached from the body first: removing a subtree assumes
+                // its parent is going too.
+                let kept: Vec<WidgetId> = std::iter::once(spacer)
+                    .chain(self.lists[index].rows.values().copied())
+                    .collect();
+                self.set_children(body, &kept);
+                for slot in removed {
+                    self.remove_subtree(slot);
+                }
+                changed = true;
+            }
+            let missing: Vec<usize> = wanted
+                .filter(|row| !self.lists[index].rows.contains_key(row))
+                .collect();
+            if !missing.is_empty()
+                && let Some(mut build) = self.lists[index].build.take()
+            {
+                for row in missing {
+                    let content = build(self, row);
+                    let slot = self.add_with_children(
+                        crate::scroll::RowSlot {
+                            index: row,
+                            count,
+                            height: row_height,
+                        },
+                        &[content],
+                    );
+                    // The builder may have changed the lists (it got the
+                    // tree), so look this one up again.
+                    if let Some(list) = self.lists.get_mut(index) {
+                        list.rows.insert(row, slot);
+                    }
+                }
+                if let Some(list) = self.lists.get_mut(index) {
+                    list.build = Some(build);
+                }
+                changed = true;
+            }
+            if changed {
+                let first_built = self.lists[index].rows.keys().next().copied().unwrap_or(0);
+                if let Some(space) = self.node_mut(spacer).and_then(|node| {
+                    (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListSpacer>()
+                }) {
+                    space.height = first_built as f64 * row_height;
+                }
+                self.mark(spacer, true);
+                let children: Vec<WidgetId> = std::iter::once(spacer)
+                    .chain(self.lists[index].rows.values().copied())
+                    .collect();
+                self.set_children(body, &children);
+            }
+        }
+        changed
+    }
+
     /// Whether layer `id` is open.
     pub fn is_layer_open(&self, id: LayerId) -> bool {
         self.layers.iter().any(|layer| layer.id == id)
@@ -651,6 +904,7 @@ impl Ui {
         if self.root == Some(id) {
             self.root = None;
         }
+        self.lists.retain(|list| list.scroll != id);
         // Removed from outside: the layer goes without its callback, and
         // the focus goes back at the next layout.
         if let Some(index) = self.layers.iter().position(|layer| layer.root == id) {
@@ -700,6 +954,14 @@ impl Ui {
     /// asking for a frame (content that shows per-frame data, like timings).
     pub fn refresh(&mut self, id: WidgetId) {
         self.mark(id, true);
+    }
+
+    /// The children of `id`, for tests.
+    #[cfg(test)]
+    pub(crate) fn widget_children_for_tests(&self, id: WidgetId) -> Vec<WidgetId> {
+        self.node(id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default()
     }
 
     /// The widget's box from the last layout.
@@ -775,6 +1037,7 @@ impl Ui {
         let mut cx = Cx {
             id,
             bounds: node.bounds,
+            content: node.content,
             focused,
             focus_visible: focused && self.keyboard,
             hovered,
@@ -792,6 +1055,10 @@ impl Ui {
     fn apply(&mut self, fonts: &mut Fonts, id: WidgetId, requests: Requests) {
         if requests.paint || requests.layout {
             self.mark(id, requests.layout);
+            request_frame();
+        }
+        if requests.place {
+            self.layout_dirty = true;
             request_frame();
         }
         match requests.capture {
@@ -830,6 +1097,7 @@ impl Ui {
         if let Some(new) = id {
             self.call(fonts, new, |widget, cx| widget.focus_changed(cx, true));
             self.mark(new, false);
+            self.reveal(fonts, new);
         }
         crate::window::reset_ime();
         request_frame();
@@ -869,15 +1137,27 @@ impl Ui {
         for id in std::mem::take(&mut self.restyle) {
             self.mark(id, true);
         }
-        if let Some(root) = self.root
-            && let Some(root_layout) = self.node(root).map(|node| node.layout)
-        {
-            let available = taffy::Size {
-                width: AvailableSpace::Definite(area.width() as f32),
-                height: AvailableSpace::Definite(area.height() as f32),
-            };
-            self.compute(fonts, root_layout, available);
-            self.place(root, area.origin());
+        // Lists build the rows in view; a first layout (or a resize) can
+        // show other rows than the last one did, so they look again after
+        // placing, at most once more.
+        for pass in 0..2 {
+            let changed = self.update_lists();
+            if pass == 1 && !changed {
+                break;
+            }
+            if let Some(root) = self.root
+                && let Some(root_layout) = self.node(root).map(|node| node.layout)
+            {
+                let available = taffy::Size {
+                    width: AvailableSpace::Definite(area.width() as f32),
+                    height: AvailableSpace::Definite(area.height() as f32),
+                };
+                self.compute(fonts, root_layout, available);
+                self.place(root, area.origin());
+            }
+            if self.lists.is_empty() {
+                break;
+            }
         }
         self.layout_layers(fonts, area);
         if self.focus.is_none()
@@ -935,6 +1215,7 @@ impl Ui {
                         let mut cx = Cx {
                             id,
                             bounds: node.bounds,
+                            content: node.content,
                             focused: false,
                             focus_visible: false,
                             hovered: false,
@@ -1101,14 +1382,30 @@ impl Ui {
             Size::new(f64::from(layout.size.width), f64::from(layout.size.height)),
         );
         let children = node.children.clone();
-        if let Some(node) = self.node_mut(id)
-            && node.bounds != bounds
-        {
-            node.bounds = bounds;
-            node.paint_dirty = true;
+        let offset = node.widget.scroll_offset();
+        // How far the children reach, from their Taffy boxes.
+        let mut content = Size::ZERO;
+        for &child in &children {
+            if let Some(child) = self.node(child)
+                && let Ok(child) = self.taffy.layout(child.layout)
+            {
+                content.width = content
+                    .width
+                    .max(f64::from(child.location.x + child.size.width));
+                content.height = content
+                    .height
+                    .max(f64::from(child.location.y + child.size.height));
+            }
+        }
+        if let Some(node) = self.node_mut(id) {
+            node.content = content;
+            if node.bounds != bounds {
+                node.bounds = bounds;
+                node.paint_dirty = true;
+            }
         }
         for child in children {
-            self.place(child, origin);
+            self.place(child, origin - offset);
         }
     }
 
@@ -1169,6 +1466,11 @@ impl Ui {
         for child in children {
             self.paint_node(fonts, child, scene);
         }
+        // Drawn every frame (cheap: a scroll bar), over the children and
+        // inside the clip.
+        if self.node(id).is_some_and(|node| node.widget.paints_over()) {
+            self.call(fonts, id, |widget, cx| widget.paint_over(cx, scene));
+        }
         if clips {
             scene.pop();
         }
@@ -1185,6 +1487,9 @@ impl Ui {
         let inside = node.bounds.contains(point);
         if !inside && node.widget.clips() {
             return None;
+        }
+        if inside && node.widget.claims(node.bounds, node.content, point) {
+            return Some(id);
         }
         node.children
             .iter()
@@ -1524,6 +1829,7 @@ impl Ui {
         let mut cx = Cx {
             id,
             bounds: data.bounds,
+            content: data.content,
             focused,
             focus_visible: focused && self.keyboard,
             hovered,

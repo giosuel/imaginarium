@@ -1058,3 +1058,177 @@ fn a_late_screen_reader_request_cannot_reach_the_widget_in_a_reused_slot() {
     assert!(ui.access_action(&mut fonts, &fresh));
     assert_eq!(clicks.get(), 1);
 }
+
+fn wheel(at: Point, dy: f64) -> Input {
+    Input::Scroll {
+        delta: imaginarium_render::kurbo::Vec2::new(0.0, dy),
+        position: at,
+        modifiers: Modifiers::default(),
+    }
+}
+
+/// A scroll container 100 px tall with ten 40 px buttons in it.
+fn scroller(ui: &mut Ui, clicks: &Rc<Cell<u32>>) -> (WidgetId, Vec<WidgetId>) {
+    use crate::scroll::Scroll;
+    let rows: Vec<WidgetId> = (0..10)
+        .map(|_| {
+            let b = ui.add(button(clicks));
+            ui.add_with_children(Flex::row().height(40.0), &[b])
+        })
+        .collect();
+    let content = ui.add_with_children(Flex::column(), &rows);
+    let scroll = ui.add_with_children(Scroll::new().height(100.0), &[content]);
+    let root = ui.add_with_children(Flex::column().fill(), &[scroll]);
+    ui.set_root(root);
+    (scroll, rows)
+}
+
+#[test]
+fn a_scroll_container_scrolls_and_hands_the_rest_on() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (scroll, rows) = scroller(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let inside = ui.bounds(scroll).unwrap().center();
+    let first = ui.bounds(rows[0]).unwrap();
+    assert!(ui.input(&mut fonts, &wheel(inside, -30.0)));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 30.0);
+    assert_eq!(
+        ui.bounds(rows[0]).unwrap().y0,
+        first.y0 - 30.0,
+        "the content moved up"
+    );
+    // Far past the end: it stops at 400 − 100 and says so once more.
+    assert!(ui.input(&mut fonts, &wheel(inside, -10_000.0)));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 300.0);
+    assert!(
+        !ui.input(&mut fonts, &wheel(inside, -10.0)),
+        "at the end the scroll goes on"
+    );
+    // Rows scrolled out can't be clicked through the clip.
+    let above = Point::new(inside.x, ui.bounds(scroll).unwrap().y0 - 5.0);
+    assert!(ui.bounds(rows[0]).unwrap().contains(Point::new(
+        ui.bounds(rows[0]).unwrap().center().x,
+        ui.bounds(rows[0]).unwrap().center().y
+    )));
+    ui.input(&mut fonts, &pointer(above, true, true));
+    ui.input(&mut fonts, &pointer(above, true, false));
+    assert_eq!(clicks.get(), 0);
+}
+
+#[test]
+fn the_focus_scrolls_into_view() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (scroll, rows) = scroller(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let view = ui.bounds(scroll).unwrap();
+    let last_button = ui.widget_children_for_tests(rows[9])[0];
+    ui.set_focus(&mut fonts, Some(last_button));
+    frame(&mut ui, &mut fonts);
+    let shown = ui.bounds(last_button).unwrap();
+    assert!(
+        shown.y1 <= view.y1 + 0.5 && shown.y0 >= view.y0 - 0.5,
+        "{shown:?} in {view:?}"
+    );
+    assert!(ui.widget::<Scroll>(scroll).unwrap().offset() > 0.0);
+}
+
+#[test]
+fn the_scroll_bar_pages_and_drags() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (scroll, _) = scroller(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let view = ui.bounds(scroll).unwrap();
+    // Beside the thumb (it is at the top): a page down.
+    let track = Point::new(view.x1 - 5.0, view.y1 - 5.0);
+    ui.input(&mut fonts, &pointer(track, true, true));
+    ui.input(&mut fonts, &pointer(track, true, false));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 90.0);
+    assert_eq!(
+        clicks.get(),
+        0,
+        "the bar took the press, not the row under it"
+    );
+    // Drag the thumb to the bottom.
+    let offset = ui.widget::<Scroll>(scroll).unwrap().offset();
+    let thumb_top = view.y0 + (100.0 - 25.0) * offset / 300.0 + 2.0;
+    let grab = Point::new(view.x1 - 5.0, thumb_top);
+    ui.input(&mut fonts, &pointer(grab, true, true));
+    ui.input(
+        &mut fonts,
+        &Input::PointerMoved(Point::new(grab.x, view.y1 + 200.0)),
+    );
+    ui.input(
+        &mut fonts,
+        &pointer(Point::new(grab.x, view.y1 + 200.0), true, false),
+    );
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 300.0);
+}
+
+#[test]
+fn a_virtual_list_builds_only_the_rows_in_view() {
+    use crate::scroll::{Scroll, VirtualList};
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let count = signal(10_000usize);
+    let built = Rc::new(Cell::new(0));
+    let list = ui.add_virtual_list(
+        VirtualList::new(30.0, move || count.get(), {
+            let built = built.clone();
+            move |ui, _row| {
+                built.set(built.get() + 1);
+                ui.add(Flex::row().fill())
+            }
+        })
+        .label("Results"),
+        Scroll::new().height(300.0),
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[list]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    // 10 rows in view and 4 below; none above at the top.
+    assert_eq!(
+        ui.stats().widgets,
+        4 + 14 * 2,
+        "root, scroll, body, spacer, and slot + row each"
+    );
+    assert_eq!(built.get(), 14);
+    let update = check_access(&mut ui, &mut fonts);
+    let item = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::ListItem)
+        .map(|(_, node)| node.size_of_set());
+    assert_eq!(
+        item,
+        Some(Some(10_000)),
+        "a screen reader hears the full length"
+    );
+
+    // Scrolled to the middle: rows around row 5,000.
+    ui.scroll_to_row(list, 5_000);
+    frame(&mut ui, &mut fonts);
+    let offset = ui.widget::<Scroll>(list).unwrap().offset();
+    assert!((offset - (5_001.0 * 30.0 - 300.0)).abs() < 0.5, "{offset}");
+    assert!(ui.stats().widgets <= 4 + 18 * 2);
+
+    // Fewer rows: the list follows the signal and the offset stays in range.
+    count.set(20);
+    frame(&mut ui, &mut fonts);
+    frame(&mut ui, &mut fonts);
+    assert!(ui.widget::<Scroll>(list).unwrap().offset() <= 20.0 * 30.0 - 300.0 + 0.5);
+    assert!(ui.stats().widgets <= 4 + 20 * 2);
+}
