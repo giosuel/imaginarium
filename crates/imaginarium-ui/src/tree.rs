@@ -17,6 +17,7 @@ use taffy::{AvailableSpace, TaffyTree};
 
 use crate::access::AccessTree;
 use crate::clipboard::Clipboard;
+use crate::layers::{Anchor, LayerId, LayerKind, LayerOptions, place as place_layer};
 use crate::window::{Input, Key, request_frame};
 
 /// A widget in a [`Ui`]. Ids of removed widgets are never reused for
@@ -27,12 +28,34 @@ pub struct WidgetId {
     generation: u32,
 }
 
+/// How a widget's accessibility node ids are laid out in 64 bits: the
+/// slot (index + 1) in the top 24 bits, the low 16 bits of its generation
+/// below that, and 24 bits for the widget's own extra nodes.
+const ACCESS_INDEX_SHIFT: u32 = 40;
+const ACCESS_GENERATION_SHIFT: u32 = 24;
+const ACCESS_GENERATION_MASK: u64 = 0xffff;
+/// Extra nodes a widget may number below its base (text runs, canvas
+/// items): 2²⁴ − 1.
+pub const ACCESS_LOCAL_IDS: u64 = (1 << ACCESS_GENERATION_SHIFT) - 1;
+
 impl WidgetId {
     /// The first accessibility node id of this widget. A widget's own node
-    /// is this; it may use the next 2³² − 1 ids for nodes of its own
-    /// (text runs, canvas items).
+    /// is this; it may use the next [`ACCESS_LOCAL_IDS`] ids for nodes of
+    /// its own (text runs, canvas items). The id carries the widget's
+    /// generation, so a screen reader's late request about a removed
+    /// widget can't reach the widget that took its slot.
     pub fn access_base(self) -> u64 {
-        (u64::from(self.index) + 1) << 32
+        debug_assert!(u64::from(self.index) + 1 < 1 << (64 - ACCESS_INDEX_SHIFT));
+        ((u64::from(self.index) + 1) << ACCESS_INDEX_SHIFT)
+            | ((u64::from(self.generation) & ACCESS_GENERATION_MASK) << ACCESS_GENERATION_SHIFT)
+    }
+
+    /// The widget an accessibility node id belongs to, as far as the id
+    /// says (its slot and generation bits).
+    fn from_access(node: u64) -> Option<(u32, u64)> {
+        let index = (node >> ACCESS_INDEX_SHIFT).checked_sub(1)?;
+        let generation = (node >> ACCESS_GENERATION_SHIFT) & ACCESS_GENERATION_MASK;
+        Some((u32::try_from(index).ok()?, generation))
     }
 }
 
@@ -134,6 +157,7 @@ struct Requests {
     layout: bool,
     focus: Option<bool>,
     capture: Option<bool>,
+    close_layer: bool,
     access_children: Vec<NodeId>,
 }
 
@@ -142,6 +166,7 @@ pub struct Cx<'a> {
     id: WidgetId,
     bounds: Rect,
     focused: bool,
+    focus_visible: bool,
     hovered: bool,
     fonts: &'a mut Fonts,
     clipboard: &'a mut Clipboard,
@@ -163,6 +188,13 @@ impl Cx<'_> {
     /// Whether it has the keyboard focus.
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// Whether it has the focus and the keyboard is in use, so a focus
+    /// ring should show (CSS's `:focus-visible`). A click focuses without
+    /// a ring; the next key press brings it.
+    pub fn is_focus_visible(&self) -> bool {
+        self.focus_visible
     }
 
     /// Whether the pointer is over it.
@@ -222,6 +254,12 @@ impl Cx<'_> {
         self.requests.capture = Some(false);
     }
 
+    /// Closes the layer this widget is in (a menu item that ran, a dialog's
+    /// Cancel), and the layers opened after it.
+    pub fn close_layer(&mut self) {
+        self.requests.close_layer = true;
+    }
+
     /// The accessibility tree being built (only in
     /// [`Widget::accessibility`]).
     pub fn access_tree(&mut self) -> Option<&mut AccessTree> {
@@ -265,6 +303,19 @@ struct Slot {
     node: Option<NodeData>,
 }
 
+/// An open layer: its content's root and how it behaves.
+struct Layer {
+    id: LayerId,
+    root: WidgetId,
+    options: LayerOptions,
+    /// The focus when it opened, which gets it back when it closes.
+    return_focus: Option<WidgetId>,
+    /// Moves the focus into it after its first layout.
+    focus_pending: bool,
+    /// Not laid out yet (a dialog ends drags and hover below it then).
+    fresh: bool,
+}
+
 /// What the last frame cost the tree, for the gate report.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TreeStats {
@@ -299,6 +350,18 @@ pub struct Ui {
     stats: TreeStats,
     /// The theme generation the widgets last painted with.
     theme_seen: u64,
+    /// Popovers, dialogs and tooltips above the root, bottom to top.
+    layers: Vec<Layer>,
+    next_layer: u64,
+    /// Inside `set_focus`: a widget's focus callback that closes its layer
+    /// waits until the focus change is done.
+    focusing: bool,
+    deferred_closes: Vec<WidgetId>,
+    /// Where the focus goes after a layer was removed from outside.
+    pending_return: Option<WidgetId>,
+    /// Whether the last input was the keyboard (focus rings show) rather
+    /// than the pointer.
+    keyboard: bool,
 }
 
 impl Default for Ui {
@@ -326,6 +389,12 @@ impl Ui {
             clipboard: Clipboard::default(),
             stats: TreeStats::default(),
             theme_seen: crate::theme::generation(),
+            layers: Vec::new(),
+            next_layer: 0,
+            focusing: false,
+            deferred_closes: Vec::new(),
+            pending_return: None,
+            keyboard: true,
         }
     }
 
@@ -419,6 +488,117 @@ impl Ui {
         self.layout_dirty = true;
     }
 
+    /// Opens `content` (added, without a parent) as a layer above the
+    /// window: a popover, a dialog or a tooltip (`docs/design/shell.md`
+    /// §6). It is laid out at its own size and placed next to its anchor;
+    /// the newest layer is on top.
+    pub fn open_layer(&mut self, content: WidgetId, options: LayerOptions) -> LayerId {
+        debug_assert!(
+            self.node(content).is_some_and(|node| node.parent.is_none()),
+            "a layer's content must be a widget without a parent"
+        );
+        let id = LayerId(self.next_layer);
+        self.next_layer += 1;
+        let focus_pending = options.focus_first;
+        self.layers.push(Layer {
+            id,
+            root: content,
+            options,
+            return_focus: self.focus,
+            focus_pending,
+            fresh: true,
+        });
+        self.layout_dirty = true;
+        request_frame();
+        id
+    }
+
+    /// Closes layer `id` and the layers opened after it (submenus), from
+    /// the top: their widgets are removed, the focus goes back to where it
+    /// was when they opened, and their `on_close` callbacks run. `false`
+    /// if it wasn't open.
+    pub fn close_layer(&mut self, fonts: &mut Fonts, id: LayerId) -> bool {
+        let Some(index) = self.layers.iter().position(|layer| layer.id == id) else {
+            return false;
+        };
+        let mut closed: Vec<Layer> = self.layers.drain(index..).collect();
+        closed.reverse();
+        let mut callbacks = Vec::new();
+        for layer in closed {
+            let had_focus = self
+                .focus
+                .is_some_and(|focus| self.top_of(focus) == layer.root);
+            self.remove_subtree(layer.root);
+            if had_focus || self.focus.is_none() {
+                let back = layer.return_focus.filter(|&id| self.is_shown(id));
+                self.set_focus(fonts, back);
+            }
+            callbacks.extend(layer.options.on_close);
+        }
+        self.layout_dirty = true;
+        request_frame();
+        for mut callback in callbacks {
+            callback();
+        }
+        true
+    }
+
+    /// Tells the tree the keyboard was used, for keys the view handles
+    /// itself before the tree (app shortcuts like `Ctrl+K`), so the focus
+    /// ring shows in what they open.
+    pub fn note_keyboard(&mut self) {
+        self.set_keyboard(true);
+    }
+
+    /// Records whether the keyboard or the pointer was used last; the
+    /// focused widget repaints when its ring comes or goes.
+    fn set_keyboard(&mut self, keyboard: bool) {
+        if self.keyboard != keyboard {
+            self.keyboard = keyboard;
+            if let Some(focus) = self.focus {
+                self.mark(focus, false);
+                request_frame();
+            }
+        }
+    }
+
+    /// Whether layer `id` is open.
+    pub fn is_layer_open(&self, id: LayerId) -> bool {
+        self.layers.iter().any(|layer| layer.id == id)
+    }
+
+    /// The topmost ancestor of `id` (the root, a layer's content, or a
+    /// detached widget).
+    fn top_of(&self, id: WidgetId) -> WidgetId {
+        let mut current = id;
+        while let Some(parent) = self.node(current).and_then(|node| node.parent) {
+            current = parent;
+        }
+        current
+    }
+
+    /// The topmost modal layer, which takes all input.
+    fn modal(&self) -> Option<&Layer> {
+        self.layers
+            .iter()
+            .rev()
+            .find(|layer| layer.options.kind == LayerKind::Modal)
+    }
+
+    /// Whether `id` may take input now: everything, unless a dialog is
+    /// open; then only the dialog and the layers above it.
+    fn reachable(&self, id: WidgetId) -> bool {
+        let Some(modal) = self
+            .layers
+            .iter()
+            .rposition(|layer| layer.options.kind == LayerKind::Modal)
+        else {
+            return true;
+        };
+        let top = self.top_of(id);
+        self.layers[modal..].iter().any(|layer| layer.root == top)
+    }
+
     /// Removes `id` and everything below it, disposing their effects.
     pub fn remove(&mut self, id: WidgetId) {
         let Some(parent) = self.node(id).map(|node| node.parent) else {
@@ -441,6 +621,13 @@ impl Ui {
             return;
         };
         let children = std::mem::take(&mut node.children);
+        // Taffy drops each removed child from its parent's list, which is
+        // quadratic for a wide parent; emptying the list first keeps it
+        // linear.
+        let layout = node.layout;
+        if !children.is_empty() {
+            let _ = self.taffy.set_children(layout, &[]);
+        }
         for child in children {
             self.remove_subtree(child);
         }
@@ -463,6 +650,14 @@ impl Ui {
         }
         if self.root == Some(id) {
             self.root = None;
+        }
+        // Removed from outside: the layer goes without its callback, and
+        // the focus goes back at the next layout.
+        if let Some(index) = self.layers.iter().position(|layer| layer.root == id) {
+            let layer = self.layers.remove(index);
+            if self.focus.is_none() {
+                self.pending_return = layer.return_focus;
+            }
         }
         self.layout_dirty = true;
     }
@@ -581,6 +776,7 @@ impl Ui {
             id,
             bounds: node.bounds,
             focused,
+            focus_visible: focused && self.keyboard,
             hovered,
             fonts,
             clipboard: &mut self.clipboard,
@@ -611,6 +807,13 @@ impl Ui {
             Some(false) if self.focus == Some(id) => self.set_focus(fonts, None),
             _ => {}
         }
+        if requests.close_layer {
+            if self.focusing {
+                self.deferred_closes.push(id);
+            } else {
+                self.close_layer_of(fonts, id);
+            }
+        }
     }
 
     /// Moves the keyboard focus to `id` (or nowhere).
@@ -618,6 +821,7 @@ impl Ui {
         if self.focus == id {
             return;
         }
+        let outer = !std::mem::replace(&mut self.focusing, true);
         if let Some(old) = self.focus.take() {
             self.call(fonts, old, |widget, cx| widget.focus_changed(cx, false));
             self.mark(old, false);
@@ -629,6 +833,21 @@ impl Ui {
         }
         crate::window::reset_ime();
         request_frame();
+        if outer {
+            self.focusing = false;
+            for widget in std::mem::take(&mut self.deferred_closes) {
+                self.close_layer_of(fonts, widget);
+            }
+        }
+    }
+
+    /// Closes the layer `widget` is in, if any.
+    fn close_layer_of(&mut self, fonts: &mut Fonts, widget: WidgetId) {
+        let top = self.top_of(widget);
+        if let Some(layer) = self.layers.iter().find(|layer| layer.root == top) {
+            let layer = layer.id;
+            self.close_layer(fonts, layer);
+        }
     }
 
     /// Lays the tree out in `area` (the window, in logical pixels) if
@@ -639,9 +858,9 @@ impl Ui {
             self.area = area;
             self.layout_dirty = true;
         }
-        let Some(root) = self.root else {
+        if self.root.is_none() && self.layers.is_empty() {
             return;
-        };
+        }
         if !self.layout_dirty {
             self.stats.layout = None;
             return;
@@ -650,13 +869,48 @@ impl Ui {
         for id in std::mem::take(&mut self.restyle) {
             self.mark(id, true);
         }
-        let Some(root_layout) = self.node(root).map(|node| node.layout) else {
-            return;
-        };
-        let available = taffy::Size {
-            width: AvailableSpace::Definite(area.width() as f32),
-            height: AvailableSpace::Definite(area.height() as f32),
-        };
+        if let Some(root) = self.root
+            && let Some(root_layout) = self.node(root).map(|node| node.layout)
+        {
+            let available = taffy::Size {
+                width: AvailableSpace::Definite(area.width() as f32),
+                height: AvailableSpace::Definite(area.height() as f32),
+            };
+            self.compute(fonts, root_layout, available);
+            self.place(root, area.origin());
+        }
+        self.layout_layers(fonts, area);
+        if self.focus.is_none()
+            && let Some(back) = self.pending_return.take()
+            && self.is_shown(back)
+        {
+            self.set_focus(fonts, Some(back));
+        }
+        self.layout_dirty = false;
+        self.stats.layout = Some(start.elapsed());
+        // Keys must not go to a widget nobody sees, and a screen reader's
+        // focus must be on a node that exists.
+        if let Some(focus) = self.focus
+            && !self.is_shown(focus)
+        {
+            self.set_focus(fonts, None);
+        }
+        if let Some(capture) = self.capture
+            && !self.is_shown(capture)
+        {
+            self.capture = None;
+        }
+    }
+
+    /// Runs Taffy on the tree under `layout`, measuring leaves with their
+    /// widgets.
+    fn compute(
+        &mut self,
+        fonts: &mut Fonts,
+        layout: taffy::NodeId,
+        available: taffy::Size<AvailableSpace>,
+    ) {
+        let root_layout = layout;
         let slots = &mut self.slots;
         let clipboard = &mut self.clipboard;
         let _ = self.taffy.compute_layout_with_measure(
@@ -682,6 +936,7 @@ impl Ui {
                             id,
                             bounds: node.bounds,
                             focused: false,
+                            focus_visible: false,
                             hovered: false,
                             fonts: &mut *fonts,
                             clipboard: &mut *clipboard,
@@ -697,20 +952,112 @@ impl Ui {
                 )
             },
         );
-        self.place(root, area.origin());
-        self.layout_dirty = false;
-        self.stats.layout = Some(start.elapsed());
-        // Keys must not go to a widget nobody sees, and a screen reader's
-        // focus must be on a node that exists.
-        if let Some(focus) = self.focus
-            && !self.is_shown(focus)
-        {
-            self.set_focus(fonts, None);
+    }
+
+    /// Lays out and places every layer: at its content's own size, next to
+    /// its anchor. Layers whose anchor widget went away close.
+    fn layout_layers(&mut self, fonts: &mut Fonts, area: Rect) {
+        let content_sized = taffy::Size {
+            width: AvailableSpace::MaxContent,
+            height: AvailableSpace::MaxContent,
+        };
+        let mut orphans = Vec::new();
+        for index in 0..self.layers.len() {
+            let (root, anchor, placement, align, gap) = {
+                let layer = &self.layers[index];
+                let o = &layer.options;
+                (layer.root, o.anchor, o.placement, o.align, o.gap)
+            };
+            let Some(layout) = self.node(root).map(|node| node.layout) else {
+                continue;
+            };
+            self.compute(fonts, layout, content_sized);
+            let size_of = |taffy: &TaffyTree<WidgetId>| {
+                taffy
+                    .layout(layout)
+                    .map(|l| Size::new(f64::from(l.size.width), f64::from(l.size.height)))
+                    .unwrap_or(Size::ZERO)
+            };
+            let mut size = size_of(&self.taffy);
+            // Wider than the window: laid out again at the window's width,
+            // so its text wraps. (Taller content needs a scroll container.)
+            let max_width = (area.width() - 2.0 * crate::layers::EDGE).max(0.0);
+            if size.width > max_width {
+                self.compute(
+                    fonts,
+                    layout,
+                    taffy::Size {
+                        width: AvailableSpace::Definite(max_width as f32),
+                        height: AvailableSpace::MaxContent,
+                    },
+                );
+                size = size_of(&self.taffy);
+            }
+            let anchor = match anchor {
+                Anchor::Widget(widget) => {
+                    if !self.is_shown(widget) {
+                        orphans.push(self.layers[index].id);
+                        continue;
+                    }
+                    self.node(widget).map(|node| node.bounds)
+                }
+                Anchor::Rect(rect) => Some(rect),
+                Anchor::Point(point) => Some(Rect::from_points(point, point)),
+                Anchor::Center => None,
+            };
+            let origin = match anchor {
+                Some(anchor) => place_layer(anchor, size, area, placement, align, gap),
+                None => {
+                    crate::layers::keep_inside(area.center() - size.to_vec2() / 2.0, size, area)
+                }
+            };
+            self.place(root, origin);
         }
-        if let Some(capture) = self.capture
-            && !self.is_shown(capture)
-        {
-            self.capture = None;
+        for id in orphans {
+            self.close_layer(fonts, id);
+        }
+        // The focus moves into a layer once it has boxes to focus. Layers
+        // opened together (a menu and its submenu) give it back to the one
+        // below, not all to the window.
+        let mut below_was_pending = false;
+        for index in 0..self.layers.len() {
+            let pending = std::mem::take(&mut self.layers[index].focus_pending);
+            if pending {
+                if below_was_pending {
+                    self.layers[index].return_focus = self.focus;
+                }
+                let mut order = Vec::new();
+                self.focusables(self.layers[index].root, &mut order);
+                let wanted = self.layers[index]
+                    .options
+                    .initial_focus
+                    .filter(|wanted| order.contains(wanted));
+                if let Some(first) = wanted.or_else(|| order.first().copied()) {
+                    self.set_focus(fonts, Some(first));
+                }
+            }
+            below_was_pending = pending;
+            // A new dialog ends drags and hover below it.
+            if std::mem::take(&mut self.layers[index].fresh)
+                && self.layers[index].options.kind == LayerKind::Modal
+            {
+                if self.capture.is_some_and(|id| !self.reachable(id)) {
+                    self.capture = None;
+                    self.implicit_capture = false;
+                }
+                if let Some(hover) = self.hover
+                    && !self.reachable(hover)
+                {
+                    self.hover = None;
+                    self.call(fonts, hover, |widget, cx| widget.hover_changed(cx, false));
+                }
+                // Nothing behind it keeps the keys.
+                if let Some(focus) = self.focus
+                    && !self.reachable(focus)
+                {
+                    self.set_focus(fonts, None);
+                }
+            }
         }
     }
 
@@ -728,7 +1075,10 @@ impl Ui {
             }
             match node.parent {
                 Some(parent) => current = parent,
-                None => return self.root == Some(current),
+                None => {
+                    return self.root == Some(current)
+                        || self.layers.iter().any(|layer| layer.root == current);
+                }
             }
         }
     }
@@ -767,6 +1117,18 @@ impl Ui {
         self.stats.repainted = 0;
         self.stats.widgets = self.slots.iter().filter(|slot| slot.node.is_some()).count();
         if let Some(root) = self.root {
+            self.paint_node(fonts, root, scene);
+        }
+        let layers: Vec<(WidgetId, LayerKind)> = self
+            .layers
+            .iter()
+            .map(|layer| (layer.root, layer.options.kind))
+            .collect();
+        for (root, kind) in layers {
+            if kind == LayerKind::Modal {
+                let scrim = crate::theme::theme().color(crate::theme::Token::Scrim);
+                scene.fill(&self.area, scrim);
+            }
             self.paint_node(fonts, root, scene);
         }
     }
@@ -831,6 +1193,49 @@ impl Ui {
             .or(inside.then_some(id))
     }
 
+    /// The widget at `point`, from the top layer down: tooltips are passed
+    /// through, and nothing below a modal layer is reached.
+    fn hit_top(&self, point: Point) -> Option<WidgetId> {
+        for layer in self.layers.iter().rev() {
+            match layer.options.kind {
+                LayerKind::Tooltip => continue,
+                kind => {
+                    if let Some(hit) = self.hit(layer.root, point) {
+                        return Some(hit);
+                    }
+                    if kind == LayerKind::Modal {
+                        return None;
+                    }
+                }
+            }
+        }
+        self.root.and_then(|root| self.hit(root, point))
+    }
+
+    /// A press outside the top popovers closes them (and only them), and
+    /// is used up by that: it doesn't also click what lies below.
+    fn dismiss_outside(&mut self, fonts: &mut Fonts, point: Point) -> bool {
+        let mut first_closed = None;
+        for (index, layer) in self.layers.iter().enumerate().rev() {
+            // Tooltips take no input, so they neither shield nor close.
+            if layer.options.kind == LayerKind::Tooltip {
+                continue;
+            }
+            let inside = self.hit(layer.root, point).is_some();
+            if inside || layer.options.kind != LayerKind::Popover || !layer.options.dismissable {
+                break;
+            }
+            first_closed = Some(index);
+        }
+        match first_closed {
+            Some(index) => {
+                let id = self.layers[index].id;
+                self.close_layer(fonts, id)
+            }
+            None => false,
+        }
+    }
+
     fn ancestors(&self, id: WidgetId) -> Vec<WidgetId> {
         let mut chain = vec![id];
         let mut current = id;
@@ -857,12 +1262,15 @@ impl Ui {
     /// Handles a window input. Returns whether it was handled.
     pub fn input(&mut self, fonts: &mut Fonts, input: &Input) -> bool {
         self.apply_pending();
-        let Some(root) = self.root else {
+        let Some(root) = self
+            .root
+            .or_else(|| self.layers.last().map(|layer| layer.root))
+        else {
             return false;
         };
         match input {
             Input::PointerMoved(position) => {
-                let target = self.hit(root, *position);
+                let target = self.hit_top(*position);
                 if target != self.hover {
                     if let Some(old) = self.hover {
                         self.call(fonts, old, |widget, cx| widget.hover_changed(cx, false));
@@ -889,13 +1297,21 @@ impl Ui {
             Input::PointerButton {
                 pressed, position, ..
             } => {
+                if *pressed {
+                    self.set_keyboard(false);
+                }
                 self.buttons_held = if *pressed {
                     self.buttons_held.saturating_add(1)
                 } else {
                     self.buttons_held.saturating_sub(1)
                 };
-                let target = self.capture.or_else(|| self.hit(root, *position));
-                if *pressed && self.capture.is_none() {
+                if *pressed && self.capture.is_none() && self.dismiss_outside(fonts, *position) {
+                    return true;
+                }
+                let target = self.capture.or_else(|| self.hit_top(*position));
+                // A click beside a dialog does nothing, not even unfocus.
+                let blocked = target.is_none() && self.modal().is_some();
+                if *pressed && self.capture.is_none() && !blocked {
                     // Click to focus: the nearest focusable widget, or none.
                     let focus = target.and_then(|target| {
                         self.ancestors(target)
@@ -918,7 +1334,7 @@ impl Ui {
                 }
                 handled
             }
-            Input::Scroll { position, .. } => match self.hit(root, *position) {
+            Input::Scroll { position, .. } => match self.hit_top(*position) {
                 Some(target) => self.bubble(fonts, target, input),
                 None => false,
             },
@@ -936,10 +1352,37 @@ impl Ui {
                 handled
             }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
-                let handled = match self.focus {
-                    Some(target) => self.bubble(fonts, target, input),
-                    None => self.bubble(fonts, root, input),
-                };
+                if let Input::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = input
+                    && navigates(key, modifiers)
+                {
+                    self.set_keyboard(true);
+                }
+                // Keys go to the focus, unless it is behind a dialog (one that
+                // just opened, or has nothing to focus): then to the dialog.
+                let fallback = self.modal().map_or(root, |modal| modal.root);
+                let target = self
+                    .focus
+                    .filter(|&focus| self.reachable(focus))
+                    .unwrap_or(fallback);
+                let handled = self.bubble(fonts, target, input);
+                if !handled
+                    && let Input::Key {
+                        key: Key::Escape,
+                        pressed: true,
+                        ..
+                    } = input
+                    && let Some(top) = self.layers.iter().rev().find(|layer| {
+                        layer.options.dismissable && layer.options.kind != LayerKind::Tooltip
+                    })
+                {
+                    let id = top.id;
+                    return self.close_layer(fonts, id);
+                }
                 if !handled
                     && let Input::Key {
                         key: Key::Tab,
@@ -974,11 +1417,18 @@ impl Ui {
     /// Moves the focus to the next (or previous) focusable widget in tree
     /// order, wrapping around.
     pub fn focus_next(&mut self, fonts: &mut Fonts, forward: bool) {
-        let Some(root) = self.root else {
+        // Tab stays inside the top dialog, or inside the layer the focus
+        // is in (a menu), or else in the window's root.
+        let scope = match (self.modal(), self.focus.map(|focus| self.top_of(focus))) {
+            (Some(modal), _) => Some(modal.root),
+            (None, Some(top)) if self.layers.iter().any(|layer| layer.root == top) => Some(top),
+            _ => self.root,
+        };
+        let Some(scope) = scope else {
             return;
         };
         let mut order = Vec::new();
-        self.focusables(root, &mut order);
+        self.focusables(scope, &mut order);
         if order.is_empty() {
             return;
         }
@@ -1030,7 +1480,14 @@ impl Ui {
 
     /// Adds the tree's accessibility nodes under the window.
     pub fn access(&mut self, fonts: &mut Fonts, tree: &mut AccessTree) {
-        if let Some(root) = self.root {
+        // Behind a dialog, nothing is offered to the screen reader.
+        let roots: Vec<WidgetId> = self
+            .root
+            .into_iter()
+            .chain(self.layers.iter().map(|layer| layer.root))
+            .filter(|&root| self.reachable(root))
+            .collect();
+        for root in roots {
             let top = self.access_node(fonts, root, tree);
             for id in top {
                 tree.add_top_level(id);
@@ -1038,6 +1495,7 @@ impl Ui {
         }
         if let Some(focus) = self.focus
             && tree.focus().is_none()
+            && self.reachable(focus)
         {
             tree.set_focus(NodeId(focus.access_base()));
         }
@@ -1067,6 +1525,7 @@ impl Ui {
             id,
             bounds: data.bounds,
             focused,
+            focus_visible: focused && self.keyboard,
             hovered,
             fonts: &mut *fonts,
             clipboard: &mut self.clipboard,
@@ -1095,27 +1554,47 @@ impl Ui {
 
     /// Routes a screen reader's request to the widget owning the node.
     pub fn access_action(&mut self, fonts: &mut Fonts, request: &ActionRequest) -> bool {
-        let index = (request.target_node.0 >> 32).checked_sub(1);
-        let Some(index) = index.and_then(|index| u32::try_from(index).ok()) else {
+        let Some((index, generation)) = WidgetId::from_access(request.target_node.0) else {
             return false;
         };
         let Some(slot) = self.slots.get(index as usize) else {
             return false;
         };
+        // A late request about a removed widget names its old generation;
+        // the slot's new widget doesn't answer it.
+        if u64::from(slot.generation) & ACCESS_GENERATION_MASK != generation {
+            return false;
+        }
         let id = WidgetId {
             index,
             generation: slot.generation,
         };
+        // A screen reader can't click or focus what a dialog covers.
+        if self.node(id).is_none() || !self.reachable(id) {
+            return false;
+        }
         if request.action == Action::Focus {
             // A request about a removed widget can arrive late, and its
             // slot may be empty or hold another widget by then.
             if !self.node(id).is_some_and(|node| node.widget.focusable()) {
                 return false;
             }
+            // A screen reader moves the focus the way the keyboard does.
+            self.set_keyboard(true);
             self.set_focus(fonts, Some(id));
             return true;
         }
         self.call(fonts, id, |widget, cx| widget.access_action(cx, request))
             .unwrap_or(false)
     }
+}
+
+/// Whether a key press is keyboard navigation, which shows focus rings: not
+/// a modifier on its own, and not a pointer chord like Ctrl+wheel or
+/// Shift+click's Shift (as CSS's `:focus-visible` heuristics do).
+fn navigates(key: &Key, modifiers: &crate::window::Modifiers) -> bool {
+    let modifier_alone = matches!(key, Key::Other(name)
+        if ["Control", "Shift", "Alt", "AltGraph", "Super", "Meta", "Hyper"].contains(&name.as_str()));
+    (!modifier_alone && !(modifiers.ctrl || modifiers.alt || modifiers.meta))
+        || matches!(key, Key::Tab)
 }
