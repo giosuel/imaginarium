@@ -51,6 +51,7 @@
 
 mod access;
 mod clipboard;
+pub mod icons;
 mod layers;
 mod scroll;
 #[cfg(test)]
