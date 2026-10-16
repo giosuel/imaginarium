@@ -502,6 +502,33 @@ pub fn untrack<R>(f: impl FnOnce() -> R) -> R {
     with_runtime(|rt| rt.untrack(f))
 }
 
+/// Runs `f` outside any owner and computation: what it creates belongs to
+/// nobody and lives until it is disposed explicitly (or the thread ends),
+/// even when `f` runs inside an effect. For values that outlive the code
+/// that first needs them, such as the toolkit's theme.
+///
+/// ```
+/// use imaginarium_reactive::{Signal, detached, effect, signal};
+///
+/// let input = signal(0);
+/// let made = std::rc::Rc::new(std::cell::Cell::new(None::<Signal<u8>>));
+/// let effect = effect({
+///     let made = made.clone();
+///     move || {
+///         input.get();
+///         if made.get().is_none() {
+///             made.set(Some(detached(|| signal(7))));
+///         }
+///     }
+/// });
+/// input.set(1); // the effect runs again; an owned signal would be gone
+/// assert_eq!(made.get().map(|s| s.get()), Some(7));
+/// effect.dispose();
+/// ```
+pub fn detached<R>(f: impl FnOnce() -> R) -> R {
+    with_runtime(|rt| rt.detached(f))
+}
+
 /// Runs `cleanup` when the current owner (scope, memo or effect) is
 /// disposed or, for memos and effects, before they run again. Outside any
 /// owner it never runs.

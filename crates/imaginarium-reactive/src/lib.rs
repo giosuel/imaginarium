@@ -74,6 +74,6 @@ mod handles;
 mod runtime;
 
 pub use handles::{
-    Effect, Memo, Scope, Signal, Trigger, batch, effect, live_nodes_for_tests, memo, on_cleanup,
-    signal, trigger, untrack,
+    Effect, Memo, Scope, Signal, Trigger, batch, detached, effect, live_nodes_for_tests, memo,
+    on_cleanup, signal, trigger, untrack,
 };
