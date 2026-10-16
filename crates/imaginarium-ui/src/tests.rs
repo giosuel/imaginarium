@@ -330,7 +330,8 @@ fn removing_a_wide_subtree_is_linear() {
     ui.layout(&mut fonts, AREA);
     let start = std::time::Instant::now();
     ui.remove(column);
-    assert!(start.elapsed().as_secs() < 2, "{:?}", start.elapsed());
+    // Linear: milliseconds in a debug build (quadratic took about 2 s).
+    assert!(start.elapsed().as_millis() < 500, "{:?}", start.elapsed());
 }
 
 #[test]

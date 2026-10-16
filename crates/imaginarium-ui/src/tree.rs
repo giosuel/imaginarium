@@ -441,6 +441,13 @@ impl Ui {
             return;
         };
         let children = std::mem::take(&mut node.children);
+        // Taffy drops each removed child from its parent's list, which is
+        // quadratic for a wide parent; emptying the list first keeps it
+        // linear.
+        let layout = node.layout;
+        if !children.is_empty() {
+            let _ = self.taffy.set_children(layout, &[]);
+        }
         for child in children {
             self.remove_subtree(child);
         }
