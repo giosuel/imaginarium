@@ -284,13 +284,15 @@ the first), a top bar, a bottom bar (the timeline later), and overlays.
 
 - **File dialogs:** native open and save dialogs, through the desktop
   portal on Linux (so they work on Hyprland, GNOME and KDE alike, and in a
-  Flatpak). Candidate: `rfd` with its portal backend; checked with the
-  two-week rule and `cargo deny` when M3.6 adds it, and run on a dialog
-  worker so the UI never waits.
-- **The system theme:** whether the desktop prefers dark (portal setting
-  `color-scheme` on Linux, the platform APIs elsewhere) for
+  Flatpak). Candidate: `rfd` 0.17.2 (2026-01-12, MIT) with its portal
+  backend, which uses `ashpd` 0.13 (MIT) over D-Bus. Both pass the
+  two-week rule today; M3.6 checks the whole tree they pull in (an async
+  runtime for `ashpd`, `zbus`) with `cargo deny` and `dep-age`, and runs
+  the dialogs on a worker so the UI never waits.
+- **The system theme:** whether the desktop prefers dark, for
   `ui.theme = system`. winit reports it on Windows and macOS; on Linux it
-  needs the portal (the same crate family as the dialogs).
+  comes from the portal's `color-scheme` setting, which `ashpd` also
+  reads.
 
 ## 11. Open questions
 

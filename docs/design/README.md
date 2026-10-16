@@ -14,6 +14,8 @@ with the code, or point to the normative spec that replaces it.
 | [`m2-gate.md`](m2-gate.md): running the gate app, the manual checklist, the results | Draft (results in M2.7) | M2.3 |
 | [`ui-toolkit.md`](ui-toolkit.md): shell, widget tree, Taffy layout, paint caching, input and focus, signals, accessibility | Draft (accepted with the M2 gate) | M2.4 |
 | [`rendering.md`](rendering.md): display lists, tiles and levels, invalidation, compositor, backends | Implemented (accepted with the M2 gate) | M2.2, M2.5 |
+| [`shell.md`](shell.md): the board window, panels, tool bar, start window, settings, themes, icons | Draft | M3.0 |
+| [`canvas.md`](canvas.md): nodes to canvas items, updates, hit testing, selection, the editing path, clipboard | Draft | M3.0 |
 | `text-engine.md`: rich text, editing, IME, pagination | To be written | M5 |
 | `ai.md`: capabilities, providers, tool bridge, jobs, privacy | To be written | M6 |
 | `hub.md`: accounts, OPAQUE, roles, storage, admin | To be written | M8 |

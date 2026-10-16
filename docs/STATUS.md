@@ -956,7 +956,9 @@ What M3 builds on:
 - **The toolkit and the tile canvas** (M2; ADR-0007, ADR-0019).
 
 - [ ] **M3.0 Design** (`docs/design/shell.md`, `docs/design/canvas.md`,
-  and an ADR for each significant decision):
+  and an ADR for each significant decision). Drafts written 2026-10-16:
+  `shell.md`, `canvas.md`, ADR-0020 (the document on the UI thread),
+  ADR-0021 (one shape model) and schema §5.6; for the owner to review.
   - **Mockups first** (owner, 2026-10-16): the start window, the board
     window with its tools, the contextual toolbar, the inspector, the
     palette, menus and the settings, in light and dark, before any UI is
