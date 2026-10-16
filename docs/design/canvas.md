@@ -111,6 +111,15 @@ gets a ready view.
 `hit_rect(rect)` (the marquee) returns the nodes whose bounds lie fully
 inside, at the same level as the first hit.
 
+**As built (M3.2).** Candidates are the items whose bounds overlap a
+square of the tolerance around the pointer (`Canvas::items_overlapping`;
+a horizontal line's bounds are thinner than the tolerance), front to
+back. Points a frame clips away don't hit its children. Labels and text
+boxes are hit on their text too. The marquee takes each item's
+selectable unit (the outermost group not entered), and the outermost
+frame wholly inside it instead of the frame's children; a unit counts
+when its turned box lies wholly inside.
+
 ## 5. Selection and handles
 
 - **Selection** is a signal in the window's state: an ordered set of node
@@ -125,6 +134,15 @@ inside, at the same level as the first hit.
   resize and rotate as one box.
 - **Keyboard:** arrows nudge by 1 pt (Shift: 10), Esc clears, Tab moves to
   the next node in z order, Enter edits text or enters a group.
+- **As built (M3.2, selection):** `BoardCanvas::selection()` is the
+  signal; a click selects, Shift+click adds or removes, a press on empty
+  board starts a marquee (Shift keeps the selection), a double-click
+  enters a group and Esc leaves it with the group selected, then clears.
+  The hover outline and the selection's outlines (the accent, 35 %
+  toward white in the dark theme) and the marquee are drawn on top of
+  the tiles. Screen readers get the visible items (2,000 at most) below
+  the board's `Canvas` node, the last selected one focused; focusing one
+  selects it.
 
 ## 6. The editing path
 
