@@ -44,4 +44,6 @@ mod tests_gesture;
 #[cfg(test)]
 mod tests_select;
 #[cfg(test)]
+mod tests_text;
+#[cfg(test)]
 mod tests_updates;

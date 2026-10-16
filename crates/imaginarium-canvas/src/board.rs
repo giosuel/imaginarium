@@ -21,6 +21,10 @@ use imaginarium_ui::{
     ACCESS_LOCAL_IDS, Cx, Input, Key, Theme, Token, Widget, access_rect, mix, theme,
 };
 
+mod edit;
+
+use edit::{Editing, FIELD_ACCESS};
+
 use crate::commands::{self, box_args, move_args};
 use crate::gesture::{self, Handle, SelectionBox, Side, Start};
 use crate::hit;
@@ -40,6 +44,8 @@ enum Press {
     Node { at: Point, narrow: Option<NodeId> },
     /// Dragging a marquee from `start` (document space); `additive` keeps
     /// the selection it started with.
+    /// Pressed in the text field being edited: it has the pointer.
+    Field,
     Marquee {
         start: Point,
         current: Point,
@@ -119,6 +125,8 @@ pub struct BoardCanvas {
     entered: Option<NodeId>,
     press: Option<Press>,
     gesture: Option<Gesture>,
+    /// The text being edited in place.
+    editing: Option<Editing>,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
     /// The board's box in the last layout.
@@ -148,6 +156,7 @@ impl BoardCanvas {
             entered: None,
             press: None,
             gesture: None,
+            editing: None,
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
@@ -545,6 +554,7 @@ impl BoardCanvas {
         if self.entered.is_some_and(|node| !items.is_visible(node)) {
             self.entered = None;
         }
+        self.sync_editing(fonts);
     }
 
     /// Renders tiles on `workers` instead of in the frame (ADR-0019).
@@ -671,6 +681,7 @@ impl BoardCanvas {
         let mut stats = CanvasStats::default();
         if let Some(items) = &self.items {
             let mut painter = ItemPainter::new(items, &[]);
+            painter.editing = self.editing.as_ref().map(|editing| editing.node);
             // Rendering every visible tile would delay the first frame:
             // draw it directly, tiles from the next one.
             stats = if self.painted == 0 {
@@ -685,6 +696,7 @@ impl BoardCanvas {
         self.owed_at = owed.then_some(now);
         self.paint_names(fonts, scene, bounds);
         self.paint_selection(fonts, scene, bounds);
+        self.paint_editing(fonts, scene);
         scene.pop();
         self.bounds = bounds;
     }
@@ -943,6 +955,16 @@ impl BoardCanvas {
                             narrow: None,
                         });
                     }
+                    // A double-click on a text box or shape edits its text.
+                    Some(node)
+                        if *clicks >= 2
+                            && self.document.view().node(node).is_some_and(|node| {
+                                matches!(node.kind(), NodeKind::Text | NodeKind::Shape)
+                            }) =>
+                    {
+                        cx.release_pointer();
+                        self.start_editing(cx.fonts(), node, Some((*position, 1)));
+                    }
                     Some(node) => {
                         // A click outside the entered group leaves it.
                         if let Some(group) = self.entered
@@ -1090,6 +1112,15 @@ impl BoardCanvas {
             return false;
         };
         match key {
+            Key::Enter if !modifiers.command() => {
+                // Enter edits the text of the one selected text box or shape.
+                let [node] = self.selection.get_untracked()[..] else {
+                    return false;
+                };
+                let started = self.start_editing(cx.fonts(), node, None);
+                cx.request_paint();
+                started
+            }
             Key::Escape => {
                 let had = !self.selection.get_untracked().is_empty() || self.entered.is_some();
                 // Out of an entered group, with the group selected.
@@ -1255,6 +1286,9 @@ impl Widget for BoardCanvas {
         // Input reads the items (hit testing): bring them up to date.
         self.sync(cx.fonts());
         self.bounds = cx.bounds();
+        if let Some(handled) = self.edit_input(cx, input) {
+            return handled;
+        }
         if self.pointer(cx, input) || self.key(cx, input) {
             return true;
         }
@@ -1288,10 +1322,14 @@ impl Widget for BoardCanvas {
             screen: Rect::ZERO,
             scale_factor: imaginarium_ui::scale_factor(),
         });
-        match (self.owed_at, canvas) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [self.owed_at, canvas, self.editing_wake_at()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    fn ime_area(&mut self, cx: &mut Cx<'_>) -> Option<Rect> {
+        self.editing_ime_area(cx.fonts())
     }
 
     fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
@@ -1339,7 +1377,7 @@ impl Widget for BoardCanvas {
             };
             // The item's id, which it keeps for its life on the board: a
             // screen reader's node stays the same as others come and go.
-            if item.id.0 == 0 || item.id.0 > ACCESS_LOCAL_IDS {
+            if item.id.0 == 0 || item.id.0 >= FIELD_ACCESS.min(ACCESS_LOCAL_IDS) {
                 continue;
             }
             let id = accesskit::NodeId(base + item.id.0);
@@ -1375,12 +1413,16 @@ impl Widget for BoardCanvas {
             }
             cx.add_access_child(id);
         }
+        self.editing_access(cx, base, focused);
         Some(board)
     }
 
     fn access_action(&mut self, cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
         // Focusing an item's node selects it.
         let local = request.target_node.0.wrapping_sub(cx.id().access_base());
+        if let Some(handled) = self.editing_access_action(cx, request, local) {
+            return handled;
+        }
         if request.action != Action::Focus || local == 0 {
             return false;
         }
