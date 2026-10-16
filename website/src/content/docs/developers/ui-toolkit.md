@@ -75,8 +75,9 @@ The event loop sleeps until something happens. A frame is drawn when:
   signal changes.
 
 `FrameInfo::causes` tells which. An idle window draws nothing and uses no
-CPU (gate criterion 6). So don't return `true` from `View::presented`
-unless something is animating, and let effects ask for frames.
+CPU (gate criterion 6). So don't return `true` from `View::presented`;
+widgets that animate ask for their frames through `wake_at` (see
+Animation), and effects ask for frames themselves.
 
 A frame skipped because the window is hidden isn't retried in a loop:
 the next one comes when the window shows again.
@@ -229,12 +230,43 @@ Rows have one height. The count closure is the list's data dependency:
 when a signal it reads changes, the list rebuilds its rows, so read the
 data there (not only its length in a separate signal).
 
+## Animation
+
+Hover colors, layers and keyboard scrolls already move; your own widget
+animates with a `Transition`:
+
+```rust
+use imaginarium_ui::animation::{Easing, Transition, durations};
+
+// In the widget: `glow: Transition`, starting at `Transition::new(0.0)`.
+fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+    let target = if hovered { 1.0 } else { 0.0 };
+    self.glow.to(target, durations::HOVER, Easing::EaseOut);
+    cx.request_paint();
+}
+fn wake_at(&self) -> Option<Instant> {
+    self.glow.wake_at()
+}
+fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+    self.glow.advance();
+    cx.request_paint();
+}
+// In `paint`, read `self.glow.value()`.
+```
+
+The window wakes the widget every frame while it moves and once more
+when it arrives, then draws nothing. With reduced motion
+(`animation::set_reduce_motion`) every transition arrives at once. In
+tests, fix the clock with `animation::set_clock_for_tests` and step
+through.
+
 ## Component gallery
 
 `cargo run --release -p imaginarium-ui --example gallery` shows every
 component in its states, in the current theme, with a switch between dark
 and light (`--light` starts light; `--open popover`, `dialog` or `tooltip`
-opens a layer at once, for screenshots). Every new component gets a section
+opens a layer at once, for screenshots; `--reduce-motion` turns motion
+off). Every new component gets a section
 there before the shell uses it, and its screenshots go into the PR.
 
 ## Themes

@@ -9,6 +9,7 @@
 //! cargo run --release -p imaginarium-ui --example gallery -- --light          # start in the light theme
 //! cargo run --release -p imaginarium-ui --example gallery -- --open dialog    # popover, dialog or tooltip
 //! cargo run --release -p imaginarium-ui --example gallery -- --frames 30      # close after 30 frames
+//! cargo run --release -p imaginarium-ui --example gallery -- --reduce-motion  # every change instant
 //! ```
 
 use std::cell::{Cell, RefCell};
@@ -21,7 +22,7 @@ use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, Input,
     InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme, ThemeKind, Token, Ui,
-    UiError, View, VirtualList, WidgetId, WindowOptions, set_theme, theme,
+    UiError, View, VirtualList, WidgetId, WindowOptions, animation, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -32,6 +33,7 @@ enum Ask {
     Dialog,
     Tooltip,
     CloseDialog,
+    ReduceMotion,
 }
 
 type Asks = Rc<RefCell<Vec<Ask>>>;
@@ -44,6 +46,8 @@ struct Gallery {
     openers: Rc<Cell<[Option<WidgetId>; 3]>>,
     dialog: Option<LayerId>,
     tooltip: Option<LayerId>,
+    /// Says whether motion is reduced.
+    motion: WidgetId,
     close_after: Option<u64>,
     frames: u64,
 }
@@ -89,6 +93,13 @@ impl Gallery {
                 Ask::CloseDialog => {
                     if let Some(dialog) = self.dialog.take() {
                         self.ui.close_layer(&mut self.fonts, dialog);
+                    }
+                }
+                Ask::ReduceMotion => {
+                    let reduce = !animation::reduce_motion();
+                    animation::set_reduce_motion(reduce);
+                    if let Some(label) = self.ui.widget_mut::<Label>(self.motion) {
+                        label.set_text(motion_text(reduce));
                     }
                 }
             }
@@ -286,12 +297,23 @@ fn tooltip(ui: &mut Ui) -> WidgetId {
     )
 }
 
+fn motion_text(reduced: bool) -> &'static str {
+    if reduced {
+        "Motion is reduced: every change is instant."
+    } else {
+        "Hover or press a button, open a layer, or press Page Down in the list."
+    }
+}
+
 fn main() -> Result<(), UiError> {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().position(|arg| arg == name);
     let value = |name: &str| flag(name).and_then(|at| args.get(at + 1)).cloned();
     if flag("--light").is_some() {
         set_theme(Theme::light(DEFAULT_ACCENT));
+    }
+    if flag("--reduce-motion").is_some() {
+        animation::set_reduce_motion(true);
     }
     let asks: Asks = Rc::default();
     let openers: Rc<Cell<[Option<WidgetId>; 3]>> = Rc::default();
@@ -464,12 +486,37 @@ fn main() -> Result<(), UiError> {
     );
     let icons = section(&mut ui, &icons_title, &[grid]);
 
+    // Motion, and the switch that turns it off.
+    let reduce = ask_button(
+        &mut ui,
+        "Toggle reduced motion",
+        ButtonColors::secondary(),
+        &asks,
+        Ask::ReduceMotion,
+    );
+    let motion =
+        ui.add(Label::new(motion_text(animation::reduce_motion()), body()).color(Token::TextMuted));
+    let motion_section = section(
+        &mut ui,
+        "Motion · 100 ms hover, 120 ms menus, 160 ms dialogs and keyboard scrolls",
+        &[reduce, motion],
+    );
+
     let page = ui.add_with_children(
         Flex::column()
             .gap(16.0)
             .padding(24.0, 24.0)
             .background(Token::BoardBg),
-        &[header, buttons, inputs, text, layers, scrolling, icons],
+        &[
+            header,
+            buttons,
+            inputs,
+            text,
+            layers,
+            scrolling,
+            motion_section,
+            icons,
+        ],
     );
     // The gallery itself scrolls once it is taller than the window.
     let page = ui.add_with_children(
@@ -499,6 +546,7 @@ fn main() -> Result<(), UiError> {
         openers,
         dialog: None,
         tooltip: None,
+        motion,
         close_after: value("--frames").and_then(|frames| frames.parse().ok()),
         frames: 0,
     };

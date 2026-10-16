@@ -185,6 +185,29 @@ and the list's full length, so screen readers hear "5 of 10,000".
 `benches/list.rs`: a wheel step on 100,000 rows takes about 0.12 ms, a
 jump far away about 1.1 ms (this VM).
 
+## Animation
+
+`animation.rs`: a `Transition` is a number moving to a target over a
+duration with an easing (ease-out for things arriving), starting from
+wherever it is, so a change of mind half-way doesn't jump. A widget keeps
+one, reads it when it paints and returns its `wake_at` from
+`Widget::wake_at`; each `Widget::wake` calls `advance` and repaints. While
+it moves it wakes every 8.3 ms (a 60 Hz display presents every other
+wake). After it arrives it still wants one wake, however late the last
+one came, so the final frame shows the target exactly; then nothing
+redraws. The durations are `animation::durations`: 100 ms for hover and
+press colors (buttons), 120 ms for popovers and tooltips, 160 ms for
+dialogs with their scrim and for keyboard scrolls. Layers fade in
+(`Scene::push_opacity` around the layer; the scrim's alpha scales with
+it). A scroll by keyboard or screen reader glides; the wheel and the
+thumb follow the hand at once and take over from a glide, and bringing
+the focus into view is immediate.
+
+`set_reduce_motion(true)` makes every transition arrive at once; the app
+sets it from `ui.reduce_motion` (`shell.md` §5). Times come from
+`animation::now()`, which tests fix with `set_clock_for_tests` to step
+through a transition.
+
 ## Themes
 
 The interface's colors are tokens of a `Theme` (`theme.rs`; values in
@@ -222,6 +245,6 @@ the tests now feed the updates to `accesskit_consumer`.
 
 ## Not yet
 
-Drag and drop, animation, incremental accessibility updates (the whole tree is sent
+Drag and drop, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
 worker pool (PLAN §4.3).
