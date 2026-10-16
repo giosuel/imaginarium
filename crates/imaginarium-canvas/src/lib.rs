@@ -36,3 +36,5 @@ pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_updates;
