@@ -4,7 +4,7 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 ## Current position
 
@@ -13,7 +13,8 @@ Last updated: 2026-10-15
 - **Next step:** **M2.9 Wrap-up: the manual checklist** (criteria 4 and
   5, never reported), then tick M2.9 and the tag `v0.0.3-m2`, which the
   owner pushes. Then **M3.0** (the plan is in the M3 section below, with
-  the owner's answers of 2026-10-16).
+  the owner's answers of 2026-10-16). It starts with mockups, which are
+  under way: the owner reviews them before any UI is built.
   - The measured runs are done (2026-10-15/16, `m2-gate.md`, "M2.9 run"
     and "M2.9 run 2"): criteria 1, 2, 3 and 6 pass on the iGPU, the dGPU
     and without vsync. Criterion 1's frame rate is judged over a
@@ -956,6 +957,11 @@ What M3 builds on:
 
 - [ ] **M3.0 Design** (`docs/design/shell.md`, `docs/design/canvas.md`,
   and an ADR for each significant decision):
+  - **Mockups first** (owner, 2026-10-16): the start window, the board
+    window with its tools, the contextual toolbar, the inspector, the
+    palette, menus and the settings, in light and dark, before any UI is
+    built. They are HTML pages sent to the owner, not committed; what
+    they settle goes into `shell.md`.
   - **Where the document lives:** on the UI thread, with opening, saving
     and big pastes on workers, or on a model thread of its own. Measured
     before deciding.
@@ -975,10 +981,12 @@ What M3 builds on:
       same styles and transform.
     - Every shape becomes a path for painting, hit testing, bounds and
       export, so paths add a kind of data, not a second pipeline.
+    - "Convert to path" turns a rectangle into an editable path when the
+      user asks, as in a vector tool (owner, 2026-10-16).
     - How path data is stored in the CRDT is designed now, and built when
       paths come.
   - **The window:**
-    - the look, after Excalidraw;
+    - the look: Excalidraw's clean, floating style, not its layout;
     - the pill and the tools in it, the contextual toolbar, the inspector,
       the palette and menus, with their layers and the focus between them;
     - the start window.
@@ -986,10 +994,14 @@ What M3 builds on:
     - themes as tokens: light, dark, high contrast, following the system,
       reduced motion;
     - the icon set and its license.
-  - **Saving:** autosave only, as in Google Docs.
+  - **Saving:** the mechanics of Google Docs in a desktop application with
+    native open and save dialogs (owner, 2026-10-16).
     - Every change is appended (`UPDT`s) on a worker within about a
       second, with crash recovery.
-    - A new board is a file at once, in a default folder (a setting).
+    - A new board starts untitled and is kept as a draft (autosaved too)
+      until the save dialog gives it a place; from then on, nothing needs
+      saving by hand. What closing an untitled board does is proposed in
+      the mockups.
     - Newer files open read-only (`Mode`).
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
@@ -1046,9 +1058,9 @@ What M3 builds on:
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
 - [ ] **M3.6 Files:**
-  - no Save: autosave of every change on a worker, and crash recovery;
-  - new boards in the default folder; open (native dialogs), rename,
-    move, make a copy;
+  - autosave of every change on a worker, and crash recovery;
+  - native open and save dialogs; untitled boards kept as drafts until
+    they are saved; rename, move, save a copy;
   - recent files, and newer files opening read-only;
   - optionally, password-protected files (the crypto exists; it needs the
     prompt).
@@ -1081,18 +1093,22 @@ What M3 builds on:
 5. M3.8 where it fits, and M3.9 last.
 
 **The owner's answers** (2026-10-16, PLAN §14):
-1. **The look:** clean, modern and simple, after Excalidraw's interface;
-   a highly capable, feature-rich multi-editor that stays simple to use.
+1. **The look:** clean, modern and simple, in the style and feel of
+   Excalidraw's interface (not its layout); a highly capable,
+   feature-rich multi-editor that stays simple to use.
 2. **Windows:** one per document, and a start window like Blender's
    splash.
-3. **Saving:** autosave as in Google Docs, no Save.
+3. **Saving:** the save mechanics of Google Docs (nobody saves by hand),
+   with native open and save dialogs.
 4. **Shapes:** the simple ones first, stored and handled the way
-   path-based vector shapes (as in Inkscape) will be later. Images and
+   path-based vector shapes (as in Inkscape) will be later. A rectangle
+   stays a rectangle and can be converted to a path. Images and
    connectors come later.
 
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
+
 ## Known issues and notes
 
 - **Signatures are verified on open** (since M1.8: every record a document

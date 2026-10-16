@@ -425,19 +425,24 @@ Decided (2026-10-16):
   the shapes pan); together: 0.67 % for the pan, 0.42 % for the zoom.
   Can be revisited if the stalls show up in use (M3 has them on its
   list).
-- **The look (M3):** clean, modern and simple, after Excalidraw's interface.
-  The aim is a highly capable, feature-rich multi-editor that stays simple
-  to use.
+- **The look (M3):** clean, modern and simple, in the style and feel of
+  Excalidraw's interface: light chrome in floating panels. Its layout and
+  the placement of its toolbars and controls aren't followed, and shapes
+  are crisp, not hand-drawn. The aim is a highly capable, feature-rich
+  multi-editor that stays simple to use.
 - **Windows (M3):** one window per document. The program opens with a
   start window, like Blender's splash: new boards, recent files, open.
-- **Saving (M3):** autosave, as in Google Docs: there is no Save. Every
-  change reaches the file on its own, and the same append-only updates
-  are what collaboration syncs (M8).
+- **Saving (M3):** the save mechanics are like Google Docs': every change
+  reaches the file on its own, so nobody has to save by hand. It stays a
+  desktop application with native open and save dialogs (the dialog
+  gives a new board its place). The append-only updates that autosave
+  writes are the same ones collaboration syncs (M8).
 - **Vector shapes (M3):** M3 starts with simple shapes: rectangle (also
   rounded), ellipse, line, triangle, diamond, text and frames. They are
   stored and handled the way complex path-based vector shapes (as in
-  Inkscape) will be later, so those fit in without a second model.
-  Images and connectors come later.
+  Inkscape) will be later, so those fit in without a second model. As in
+  a vector tool, a rectangle stays a rectangle with its parameters, and
+  the user can convert it to a path. Images and connectors come later.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
