@@ -85,6 +85,17 @@ the shape), rotate (Shift snaps to 15°) and round a rectangle's corners;
 arrows nudge by 1 pt, Shift by 10. A gesture is one undo step.
 `board.node_at(point)` hit-tests like a click.
 
+## Tools
+
+`board.tool()` is a signal of the tool in use; `board.set_tool(tool)`
+or the `tool.*` commands change it. Select (`V`) is the default; the
+Hand (`H`) pans; Rectangle `R`, Ellipse `O`, Diamond `D`, Triangle
+`Shift+T`, Line `L` and Frame `F` draw by dragging (a click places a
+default size) and hand back to Select after one shape; Text `T` places a
+text box where you click and starts editing it. What is drawn inside a
+frame goes into the frame. `board.insert_shape`, `insert_frame` and
+`insert_text` do the same from the palette or the AI.
+
 ## Editing text
 
 A double-click on a text box or shape, or Enter with one selected, puts

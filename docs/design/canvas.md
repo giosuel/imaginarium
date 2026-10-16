@@ -203,6 +203,16 @@ selection) and nudging, each a command without arguments. The board's
 keys go through a `Keymap` (`keys.rs`, the shortcuts of the context
 menu's mockup); Esc and Tab stay the board's own navigation.
 
+**As built (M3.3, tools):** `BoardCanvas::tool()` (a signal) and
+`set_tool`; the `tool.*` commands with the keys of `shell.md` §3.3. A
+shape or frame tool's press starts a draw gesture: once the pointer
+travels, `board.insert_shape` (or `insert_frame`) inserts it, and its box
+follows the pointer (`board.set_box`; a line's `flip` follows the drag's
+direction); a click without a drag places the tool's size (160 × 96,
+frames 480 × 320). Either is one undo step, and Select comes back. The
+text tool inserts a text box at the click and edits it. A new node goes
+into the topmost unlocked frame at its place. The hand pans.
+
 ## 7. Text on the board
 
 M3 edits plain text in place (rich text is M5): a double-click or Enter
