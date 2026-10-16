@@ -486,6 +486,10 @@ Decided (2026-10-16):
 - **Dark first:** "I like the dark mode. lets implement this first and
   then light mode later on." M3 builds the dark theme; light and high
   contrast follow, on the same tokens.
+- **M2 closes without its manual checklist** (2026-10-16): "lets skip
+  this for now, and I will do a proper test later. we can move on and
+  close M2". The measured criteria (1, 2, 3, 6) passed; 4 and 5 are
+  checked by hand later.
 - **Shape colors in the dark theme are the palette's dark versions:**
   each palette color has a light and a dark version, and the dark theme
   shows the dark one ("I prefer dark palette colors"). Colors outside the

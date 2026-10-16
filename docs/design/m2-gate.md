@@ -950,6 +950,14 @@ Times are in ms.
   1,200 (0.42 %), the drag 0. **Criterion 1 passes on the iGPU,** judged
   over the session's runs (owner, 2026-10-16).
 
+## Closing M2 (owner, 2026-10-16)
+
+The measured runs passed criteria 1, 2, 3 and 6 (above). The manual
+checklist was not run: "lets skip this for now, and I will do a proper
+test later. we can move on and close M2". Criteria 4 and 5 stay
+unchecked on a real desktop until then (STATUS, Known issues). M2 is
+tagged `v0.0.3-m2` on `e499dc5`.
+
 ## Decision (owner, 2026-10-13)
 
 **We keep our toolkit** (ADR-0007, "Gate result").
