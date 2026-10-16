@@ -64,6 +64,16 @@ and the gate report has both the total time to the first frame and
 `without_gpu_setup_ms` (the total minus what the window waited for the GPU
 and spent on it); the criterion uses the latter.
 
+## Amendment: criterion 1's frame rate (owner decision, 2026-10-16)
+"60 fps or more" is measured as at most 1 % of the frame intervals over
+20 ms (a missed refresh at 60 Hz), with vertical sync (since the M2.9
+review). It is judged over all the runs of a session on one GPU
+together. A run has 240 intervals per phase, so on its own two slow
+frames from a driver hiccup would decide it. The p99 frame time must
+pass in each run. In the M2.9 runs one integrated-GPU run of five
+failed alone (4 of 240), and all five together had 0.67 % (pan) and
+0.42 % (zoom).
+
 ## Gate result (owner decision, 2026-10-13)
 **We keep our toolkit.** The results are in `docs/design/m2-gate.md`. The
 decision rests on the fourth run, with the fix-3 binary on the gate
