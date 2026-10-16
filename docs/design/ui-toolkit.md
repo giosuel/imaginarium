@@ -142,6 +142,30 @@ taller one needs a scroll container).
   (losing the focus) closes it after the focus change is done, so the
   focus never detours.
 
+## Scrolling
+
+`Scroll` (`scroll.rs`) moves its content by an offset: its children are
+placed shifted by `Widget::scroll_offset`, so their boxes, hit testing and
+accessibility stay in window coordinates, and a scroll only places the
+boxes again (`Cx::request_place`; Taffy's cache keeps the layout). It
+takes the wheel and touchpad (not with Ctrl, which zooms) and hands a
+scroll on at either end, takes Page Up and Down and, when nothing inside
+uses them, Home and End; a thin bar over the content (`Widget::claims`
+and `paint_over`) is dragged, or clicked beside for a page. When the focus
+moves, every scroll container around it brings it into view
+(`Widget::reveal`, `Ui::reveal`).
+
+`VirtualList` (`Ui::add_virtual_list`) is a `Scroll` over rows of one
+height that exist only while in view, plus an overscan: during layout the
+tree builds the rows that came into view with the list's builder and
+removes those that left, behind a spacer as tall as the rows above (rows
+are in flow, not absolutely placed: Taffy's cached list of out-of-flow
+children went stale as rows came and went). The count is a closure, so a
+signal it reads updates the list. Rows are `ListItem`s with their position
+and the list's full length, so screen readers hear "5 of 10,000".
+`benches/list.rs`: a wheel step on 100,000 rows takes about 0.12 ms, a
+jump far away about 1.1 ms (this VM).
+
 ## Themes
 
 The interface's colors are tokens of a `Theme` (`theme.rs`; values in

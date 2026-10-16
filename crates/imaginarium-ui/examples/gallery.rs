@@ -20,8 +20,8 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, Input,
-    InputColors, Label, LayerId, LayerOptions, TextInput, Theme, ThemeKind, Token, Ui, UiError,
-    View, WidgetId, WindowOptions, set_theme, theme,
+    InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme, ThemeKind, Token, Ui,
+    UiError, View, VirtualList, WidgetId, WindowOptions, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -404,15 +404,57 @@ fn main() -> Result<(), UiError> {
         &[popover, dialog, tip],
     );
 
+    // Scrolling: 10,000 rows, of which only those in view exist.
+    let rows = ui.add_virtual_list(
+        VirtualList::new(
+            32.0,
+            || 10_000,
+            |ui, row| {
+                let name = ui.add(Label::new(format!("Board {}", row + 1), body()));
+                let spring = ui.add(Flex::row().grow(1.0));
+                let days = row % 30 + 1;
+                let when = if days == 1 {
+                    "yesterday".to_owned()
+                } else {
+                    format!("{days} days ago")
+                };
+                let when = ui.add(Label::new(when, TextStyle::new(12.0)).color(Token::TextSubtle));
+                // Room on the right for the scroll bar.
+                ui.add_with_children(
+                    Flex::row().fill().style(|style| {
+                        style.padding.left = taffy::prelude::length(10.0);
+                        style.padding.right = taffy::prelude::length(20.0);
+                    }),
+                    &[name, spring, when],
+                )
+            },
+        )
+        .label("Recent boards"),
+        Scroll::new().height(192.0).label("Recent boards"),
+    );
+    let rows = ui.add_with_children(Flex::column().grow(1.0), &[rows]);
+    let scrolling = section(
+        &mut ui,
+        "Scrolling · 10,000 rows, built as they come into view",
+        &[rows],
+    );
+
     let page = ui.add_with_children(
         Flex::column()
             .gap(16.0)
             .padding(24.0, 24.0)
-            .fill()
             .background(Token::BoardBg),
-        &[header, buttons, inputs, text, layers],
+        &[header, buttons, inputs, text, layers, scrolling],
     );
-    ui.set_root(page);
+    // The gallery itself scrolls once it is taller than the window.
+    let page = ui.add_with_children(
+        Scroll::new().style(|style| {
+            style.size.height = taffy::prelude::percent(1.0);
+        }),
+        &[page],
+    );
+    let window = ui.add_with_children(Flex::column().fill().background(Token::BoardBg), &[page]);
+    ui.set_root(window);
 
     match value("--open").as_deref() {
         Some("popover") => asks.borrow_mut().push(Ask::Popover),

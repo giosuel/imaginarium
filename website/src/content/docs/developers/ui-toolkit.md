@@ -192,6 +192,29 @@ The tree does the rest:
 `LayerOptions::focus(widget)` picks where the focus starts (a dialog's
 safe button, not its destructive one).
 
+## Scrolling and long lists
+
+`Scroll::new()` is a scroll container for one child (set its height, or
+let it grow). It handles the wheel, the touchpad, Page Up/Down and its
+scroll bar, and keeps the focused widget in view. For long lists, let the
+tree build only the rows in view:
+
+```rust
+use imaginarium_ui::{Scroll, VirtualList};
+
+let results = ui.add_virtual_list(
+    VirtualList::new(32.0, move || matches.get().len(), move |ui, row| {
+        ui.add(Label::new(matches.with_untracked(|m| m[row].title.clone()), style))
+    })
+    .label("Results"),
+    Scroll::new().grow(1.0),
+);
+ui.scroll_to_row(results, selected); // keep the selection in view
+```
+
+Rows have one height. The count closure may read signals, and the list
+updates when they change.
+
 ## Component gallery
 
 `cargo run --release -p imaginarium-ui --example gallery` shows every
