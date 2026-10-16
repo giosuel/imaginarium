@@ -11,11 +11,13 @@ Last updated: 2026-10-16
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.2 `imaginarium-canvas`** (the document on the
-  tile canvas), then M3.3 and M3.4. M3.1 is done (2026-10-16): layers,
-  scrolling and virtual lists, icons, animation, theme tokens and access
-  ids, each in the gallery; its PRs are stacked on
-  https://github.com/giosuel/imaginarium/pull/40.
+- **Next step:** **M3.3 Commands and keymaps** (the board's commands
+  for inserting, deleting, duplicating, the clipboard, order, groups,
+  undo and zoom, and shortcuts from the keymaps), then M3.4. M3.2 is
+  done (2026-10-16/17): `imaginarium-canvas` shows and edits a board
+  (painting, updates from change sets, selection, transform handles,
+  text in place, benchmarks), each part reviewed by a fresh agent; its
+  PRs are stacked on M3.1's (https://github.com/giosuel/imaginarium/pull/44).
   - **The component gallery** (owner, 2026-10-16): every component in its
     states, dark and light, before the shell uses it
     (`crates/imaginarium-ui/examples/gallery.rs`). New components get a
@@ -23,7 +25,7 @@ Last updated: 2026-10-16
   - M3.0 is done: the mockups (owner's design canvas, not committed),
     `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
     §5.6 (#37).
-- **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
+- **Code status:** Cargo workspace with 17 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -37,7 +39,9 @@ Last updated: 2026-10-16
   `vello_cpu`, glyphs), `imaginarium-text` (Parley: fonts, layout,
   editing), `imaginarium-ui` (window, input, IME, text field, AccessKit,
   frame pipeline, the widget tree on Taffy with signals, widgets,
-  clipboard) and `imaginarium-gate` (the M2 gate app: a board with text,
+  clipboard, layers, scrolling, icons, animation), `imaginarium-canvas`
+  (the board: a document's nodes on the tile canvas, selection, handles,
+  text in place, the board's commands) and `imaginarium-gate` (the M2 gate app: a board with text,
   search, in-place editing, a command palette, measurements,
   `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
@@ -1006,7 +1010,15 @@ What M3 builds on:
     themes live);
   - access ids with generations (from M2.9; done 2026-10-16: a late
     screen reader request about a removed widget is refused).
-- [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
+- [x] **M3.2 `imaginarium-canvas`**: the document on the tile canvas
+  (done 2026-10-17: `BoardCanvas`, `canvas.md` "As built" notes;
+  benchmarks on this VM, release: a drag step 0.03 ms, hit testing
+  0.009 ms, a style used by 1,000 of 10,000 nodes 5.5 ms, a paste of
+  1,000 shapes 8 ms on the canvas plus 105 ms in the model; opening
+  10,000 nodes 282 ms in the model and 44 ms for the items and the first
+  frame, 512 ms and 200 ms with a label each). Not done: reading the
+  nodes in bulk on open (below, Known issues); the drag lift wasn't
+  needed (a drag redraws 1 to 4 tiles a frame).
   - **Painting:**
     - shapes: rectangle (also rounded), ellipse, line, triangle and
       diamond, each as a path (M3.0's vector model), with fill, stroke,
@@ -1108,6 +1120,18 @@ What M3 builds on:
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
 
 ## Known issues and notes
+
+- **Opening a big board is slow in the model** (M3.2 benchmarks): 282 ms
+  for 10,000 shapes (Loro import and reading the view key by key), and
+  the canvas lays out every label on the UI thread at open (200 ms for
+  10,000). To do before boards that big are common: read the nodes in
+  bulk on the opening worker (`LoroTree::get_value_with_meta`, ADR-0020),
+  and lay out off-screen labels lazily or on a worker.
+- **A gesture right after another edit undoes together with it**: the
+  model merges undo steps within 500 ms (`UndoConfig`), groups included.
+- **Text editing**: a collaborator typing before the caret moves it by
+  their text's length; with tile workers the edited text shows twice for
+  a frame when editing starts.
 
 - **The M2 gate's manual checklist hasn't been run** (deferred by the
   owner, 2026-10-16). So criterion 4 (text input with an input method,
