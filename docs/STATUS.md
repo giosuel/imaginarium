@@ -12,8 +12,8 @@ Last updated: 2026-10-15
   `v0.0.1-m0`, `v0.0.2-m1`).
 - **Next step:** **M2.9 Wrap-up: the manual checklist** (criteria 4 and
   5, never reported), then tick M2.9 and the tag `v0.0.3-m2`, which the
-  owner pushes. Then **M3.0** (the plan is in the M3 section below; it
-  needs the owner's answers to its four questions).
+  owner pushes. Then **M3.0** (the plan is in the M3 section below, with
+  the owner's answers of 2026-10-16).
   - The measured runs are done (2026-10-15/16, `m2-gate.md`, "M2.9 run"
     and "M2.9 run 2"): criteria 1, 2, 3 and 6 pass on the iGPU, the dGPU
     and without vsync. Criterion 1's frame rate is judged over a
@@ -968,15 +968,29 @@ What M3 builds on:
     - a `ChangeSet` becomes `upsert`, `remove` and `invalidate` calls;
     - hit testing;
     - the clipboard format for nodes.
-  - **The window:** the pill, the contextual toolbar, the inspector, the
-    palette and menus; their layers and the focus between them.
+  - **Vector shapes** (ADR): one model for simple shapes now and
+    path-based shapes later.
+    - As in SVG and Inkscape, a rectangle keeps its parameters (size,
+      corner radius) and a path its path data, both `shape` nodes with the
+      same styles and transform.
+    - Every shape becomes a path for painting, hit testing, bounds and
+      export, so paths add a kind of data, not a second pipeline.
+    - How path data is stored in the CRDT is designed now, and built when
+      paths come.
+  - **The window:**
+    - the look, after Excalidraw;
+    - the pill and the tools in it, the contextual toolbar, the inspector,
+      the palette and menus, with their layers and the focus between them;
+    - the start window.
   - **Themes and icons:**
     - themes as tokens: light, dark, high contrast, following the system,
       reduced motion;
     - the icon set and its license.
-  - **Saving:**
-    - appending `UPDT`s on a worker, autosave and crash recovery;
-    - newer files open read-only (`Mode`).
+  - **Saving:** autosave only, as in Google Docs.
+    - Every change is appended (`UPDT`s) on a worker within about a
+      second, with crash recovery.
+    - A new board is a file at once, in a default folder (a setting).
+    - Newer files open read-only (`Mode`).
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
 - [ ] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
@@ -988,8 +1002,9 @@ What M3 builds on:
   - access ids with generations (from M2.9).
 - [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
   - **Painting:**
-    - shapes: rectangle, ellipse, line, triangle and diamond, with fill,
-      stroke, radius and opacity from styles;
+    - shapes: rectangle (also rounded), ellipse, line, triangle and
+      diamond, each as a path (M3.0's vector model), with fill, stroke,
+      radius and opacity from styles;
     - text boxes;
     - frames, which clip their children.
   - **Updates from `ChangeSet`s:** a remote change or an undo repaints only
@@ -1021,7 +1036,9 @@ What M3 builds on:
   - the contextual toolbar, built from the commands available for the
     selection;
   - the inspector (`Ctrl+I`: geometry and style);
-  - a start window (new, open, recent);
+  - the start window, like Blender's splash: new boards, recent files,
+    open;
+  - one window per document;
   - the app's startup: settings, commands, fonts and the GPU in parallel,
     under 400 ms to an interactive empty board (PLAN §10).
 - [ ] **M3.5 Settings UI**, generated from the registry:
@@ -1029,9 +1046,10 @@ What M3 builds on:
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
 - [ ] **M3.6 Files:**
-  - new, open, save and save as, with native dialogs;
-  - incremental saving and autosave on a worker;
-  - crash recovery, recent files, newer files opening read-only;
+  - no Save: autosave of every change on a worker, and crash recovery;
+  - new boards in the default folder; open (native dialogs), rename,
+    move, make a copy;
+  - recent files, and newer files opening read-only;
   - optionally, password-protected files (the crypto exists; it needs the
     prompt).
 - [ ] **M3.7 Themes:** light, dark and high contrast, following the
@@ -1062,19 +1080,15 @@ What M3 builds on:
 4. M3.5 to M3.7 in any order.
 5. M3.8 where it fits, and M3.9 last.
 
-**Questions for the owner** (needed during M3.0; recommendations in
-brackets):
-1. **The look:** apps whose look fits (Figma, tldraw, Excalidraw,
-   Freeform, …), an accent color, light or dark first. (A calm, light,
-   neutral look on Inter with one accent color; dark from the same
-   tokens.)
-2. **Windows:** one window per document, or tabs in one window. (One
-   window per document, plus a start window for new, open and recent.)
-3. **Saving:** autosave or an explicit Save. (Autosave once a file has a
-   place; the first save of a new board asks where.)
-4. **M3's shapes:** rectangle (also rounded), ellipse, line, triangle,
-   diamond, text and frames. (Yes; connectors come in M4, images with
-   blob storage after M3.)
+**The owner's answers** (2026-10-16, PLAN §14):
+1. **The look:** clean, modern and simple, after Excalidraw's interface;
+   a highly capable, feature-rich multi-editor that stays simple to use.
+2. **Windows:** one per document, and a start window like Blender's
+   splash.
+3. **Saving:** autosave as in Google Docs, no Save.
+4. **Shapes:** the simple ones first, stored and handled the way
+   path-based vector shapes (as in Inkscape) will be later. Images and
+   connectors come later.
 
 ## Open questions (owner)
 

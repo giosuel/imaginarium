@@ -425,6 +425,19 @@ Decided (2026-10-16):
   the shapes pan); together: 0.67 % for the pan, 0.42 % for the zoom.
   Can be revisited if the stalls show up in use (M3 has them on its
   list).
+- **The look (M3):** clean, modern and simple, after Excalidraw's interface.
+  The aim is a highly capable, feature-rich multi-editor that stays simple
+  to use.
+- **Windows (M3):** one window per document. The program opens with a
+  start window, like Blender's splash: new boards, recent files, open.
+- **Saving (M3):** autosave, as in Google Docs: there is no Save. Every
+  change reaches the file on its own, and the same append-only updates
+  are what collaboration syncs (M8).
+- **Vector shapes (M3):** M3 starts with simple shapes: rectangle (also
+  rounded), ellipse, line, triangle, diamond, text and frames. They are
+  stored and handled the way complex path-based vector shapes (as in
+  Inkscape) will be later, so those fit in without a second model.
+  Images and connectors come later.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
