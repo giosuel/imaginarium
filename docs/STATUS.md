@@ -8,51 +8,16 @@ Last updated: 2026-10-16
 
 ## Current position
 
-- **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
-  `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.9 Wrap-up: the manual checklist** (criteria 4 and
-  5, never reported), then tick M2.9 and the tag `v0.0.3-m2`, which the
-  owner pushes. Then **M3.0** (the plan is in the M3 section below, with
-  the owner's answers of 2026-10-16). It starts with mockups, which are
-  under way: the owner reviews them before any UI is built.
-  - The measured runs are done (2026-10-15/16, `m2-gate.md`, "M2.9 run"
-    and "M2.9 run 2"): criteria 1, 2, 3 and 6 pass on the iGPU, the dGPU
-    and without vsync. Criterion 1's frame rate is judged over a
-    session's runs (owner, 2026-10-16, PLAN §14): one iGPU run of five
-    failed it alone (a driver cold start), together 0.67 % (pan) and
-    0.42 % (zoom) of intervals over 20 ms.
-  - The cards pan's swapchain waits of the first M2.9 run were a one-off:
-    run 2 found no surface set-ups at all (the report counts them now).
-  - M2.8 is done (2026-10-14). The runs are in `m2-gate.md`, the summary
-    in the M2.8 item below. The gate is decided: we keep our toolkit
-    (owner, 2026-10-13; ADR-0007).
-  - **Done in M2.9 (2026-10-15):**
-    - **The review of all M2 code:** four reviewer agents at medium
-      effort (render; ui; the gate; reactive, text, commands and xtask).
-      No critical findings; 4 high, 9 medium, 8 medium-low, about 20 low.
-      All are fixed test-first, or not changed with a reason.
-      https://github.com/giosuel/imaginarium/pull/33 (`fix/m2.9-review`,
-      stacked on #32). See the M2.9 item.
-    - **Developer docs:** the website's "UI toolkit" guide, the
-      `counter` example, the M2 crates in the architecture table, and
-      `ui-toolkit.md` accepted (`docs/m2.9-wrap-up`, stacked on #33).
-    - The owner decided: no `--backend cpu` window (PLAN §14).
-  - Open PRs, which the owner merges in order at the end: #21 to #33,
-    then the wrap-up PR.
-  - For M3 (canvas), from M2.8:
-    - covering the fill as a board opens (the owner: maybe an
-      animation), and moving the cards' text layout, which limits it, off
-      the UI thread;
-    - the cards board's slow frames on the iGPU (its first frame, and the
-      pan's frame 198);
-    - rendering the next level ahead while zooming in, if needed;
-    - a window-wide memory budget for tile pages (22 pages, 352 MB;
-      pages are never given back yet).
-  - For M3, from M2.9:
-    - access ids name a widget's slot, not its generation (a late screen
-      reader request can reach the widget that took the slot);
-    - a dragged shape may show twice for a frame as the drag starts, if
-      the last run's checklist (5b) sees it.
+- **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
+  (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
+  without its manual checklist, which the owner runs later (Known issues).
+- **Next step:** **M3.1 Toolkit additions**, the next piece: layers for
+  popovers and menus (outside clicks, Esc, focus return), then scroll
+  containers, icons and animation. Theme tokens are done (#38). M3.2 (the
+  canvas crate) can start alongside, in another crate.
+  - M3.0 is done: the mockups (owner's design canvas, not committed),
+    `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
+    §5.6 (#37).
 - **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
@@ -578,7 +543,7 @@ design is in `docs/design/file-format.md` and ADRs 0009–0011 and 0016.
     review's changes); website `imag` page updated;
   - [x] tag `v0.0.2-m1` (annotated, on the merge commit `f95151c`).
 
-## M2: UI prototype gate (checklist)
+## M2: UI prototype gate ✅ (tag `v0.0.3-m2`)
 
 ADR-0007 makes our own toolkit conditional on a **time-boxed prototype**
 that meets six pass criteria on Linux, Windows and macOS with integrated
@@ -879,7 +844,7 @@ app runs. Two owner exceptions for M2:
     tiles still need a compositor pass of their own is for the next
     run's GPU times to say.
   - Next: the owner's fourth set of runs, criteria 1 and 2 on the iGPU.
-- [ ] **M2.9 Wrap-up** (started 2026-10-15):
+- [x] **M2.9 Wrap-up** (2026-10-15/16):
   - [x] **The review of all M2 code**
     (https://github.com/giosuel/imaginarium/pull/33, `fix/m2.9-review`):
     - Four reviewer agents at medium effort, read-only.
@@ -916,11 +881,14 @@ app runs. Two owner exceptions for M2:
     the `counter` example (`crates/imaginarium-ui/examples/counter.rs`),
     the M2 crates in the architecture table, `ui-toolkit.md` accepted.
   - [x] `--backend cpu` dropped (owner, PLAN §14).
-  - [ ] **The owner's last gate run:** "M2.9 final" package, three runs
-    (iGPU, dGPU, no vsync) and the manual checklist
-    (`docs/design/m2-gate.md`, "M2.9 run").
-  - [ ] STATUS after the run; the tag `v0.0.3-m2` on the merge commit
-    (the owner pushes it).
+  - [x] **The owner's last gate runs:** "M2.9 final" and "M2.9 run 2"
+    (iGPU, dGPU, no vsync): criteria 1, 2, 3 and 6 pass
+    (`docs/design/m2-gate.md`).
+  - [ ] **The manual checklist** (criteria 4 and 5): **deferred** by the
+    owner (2026-10-16: "lets skip this for now, and I will do a proper
+    test later. we can move on and close M2"). See Known issues.
+  - [x] The tag `v0.0.3-m2` on `e499dc5`, the merge of #35, the last M2
+    code (the owner pushes it).
 
 **Wasm (browser) build: not a goal now** (owner, 2026-10-12: focus on the
 native build, keep the browser build in mind). Core and toolkit crates stay
@@ -955,10 +923,10 @@ What M3 builds on:
   saving yet.
 - **The toolkit and the tile canvas** (M2; ADR-0007, ADR-0019).
 
-- [ ] **M3.0 Design** (`docs/design/shell.md`, `docs/design/canvas.md`,
-  and an ADR for each significant decision). Drafts written 2026-10-16:
-  `shell.md`, `canvas.md`, ADR-0020 (the document on the UI thread),
-  ADR-0021 (one shape model) and schema §5.6; for the owner to review.
+- [x] **M3.0 Design** (done 2026-10-16, #37): `docs/design/shell.md`,
+  `docs/design/canvas.md`, ADR-0020 (the document on the UI thread) and
+  ADR-0021 (one shape model), both accepted by the owner, and schema
+  §5.6.
   - **Mockups first** (owner, 2026-10-16): the start window, the board
     window with its tools, the contextual toolbar, the inspector, the
     palette, menus and the settings, in light and dark, before any UI is
@@ -1123,6 +1091,15 @@ What M3 builds on:
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
 
 ## Known issues and notes
+
+- **The M2 gate's manual checklist hasn't been run** (deferred by the
+  owner, 2026-10-16). So criterion 4 (text input with an input method,
+  and Orca) and criterion 5 (HiDPI, fractional and mixed scales) are
+  unchecked on a real desktop; the automated tests cover the logic
+  (IME events, the accessibility tree through `accesskit_consumer`), not
+  the desktop integration. The owner runs it later
+  (`docs/design/m2-gate.md`, "Manual checklist"); what it finds is fixed
+  in the milestone then under way.
 
 - **Signatures are verified on open** (since M1.8: every record a document
   with an ACL chain is read from), but that is slow for big shared
