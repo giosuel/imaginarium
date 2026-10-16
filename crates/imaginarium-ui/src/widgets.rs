@@ -461,6 +461,8 @@ pub struct Button {
     action: Box<dyn FnMut()>,
     colors: ButtonColors,
     pressed: bool,
+    /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
+    tone: crate::animation::Transition,
     padding: (f64, f64),
     min_height: f64,
 }
@@ -478,6 +480,7 @@ impl Button {
             action: Box::new(action),
             colors,
             pressed: false,
+            tone: crate::animation::Transition::new(0.0),
             padding: (12.0, 6.0),
             min_height: 0.0,
         }
@@ -505,6 +508,21 @@ impl Button {
     }
 }
 
+impl Button {
+    /// Heads the background for its state.
+    fn retone(&mut self, hovered: bool) {
+        use crate::animation::{Easing, durations};
+        let target = if self.pressed {
+            2.0
+        } else if hovered {
+            1.0
+        } else {
+            0.0
+        };
+        self.tone.to(target, durations::HOVER, Easing::EaseOut);
+    }
+}
+
 impl Widget for Button {
     fn measure(
         &mut self,
@@ -524,16 +542,21 @@ impl Widget for Button {
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
         let theme = theme();
-        let background = if self.pressed {
-            self.colors.pressed
-        } else if cx.is_hovered() {
-            self.colors.hover
+        // The background fades between rest, hover and press.
+        let tone = self.tone.value();
+        let (rest, hover, pressed) = (
+            self.colors.background.resolve(&theme),
+            self.colors.hover.resolve(&theme),
+            self.colors.pressed.resolve(&theme),
+        );
+        let background = if tone <= 1.0 {
+            crate::theme::mix(rest, hover, tone as f32)
         } else {
-            self.colors.background
+            crate::theme::mix(hover, pressed, (tone - 1.0) as f32)
         };
         let radius = theme.control_radius;
         let shape = RoundedRect::from_rect(bounds, radius);
-        scene.fill(&shape, background.resolve(&theme));
+        scene.fill(&shape, background);
         if let Some(border) = self.colors.border {
             let inset = RoundedRect::from_rect(bounds.inset(-0.5), radius - 0.5);
             scene.stroke(&inset, 1.0, border.resolve(&theme));
@@ -569,6 +592,7 @@ impl Widget for Button {
                     }
                     self.pressed = false;
                 }
+                self.retone(cx.is_hovered() && inside);
                 cx.request_paint();
                 true
             }
@@ -596,7 +620,17 @@ impl Widget for Button {
         cx.request_paint();
     }
 
-    fn hover_changed(&mut self, cx: &mut Cx<'_>, _hovered: bool) {
+    fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+        self.retone(hovered);
+        cx.request_paint();
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.tone.wake_at()
+    }
+
+    fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+        self.tone.advance();
         cx.request_paint();
     }
 
