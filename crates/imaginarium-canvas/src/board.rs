@@ -23,8 +23,10 @@ use imaginarium_ui::{
 
 mod edit;
 mod ops;
+mod tools;
 
 pub(crate) use ops::{DUPLICATE_OFFSET, Order};
+pub use tools::{Preset, Tool};
 
 use edit::{Editing, FIELD_ACCESS};
 
@@ -62,6 +64,17 @@ enum Press {
 enum Gesture {
     /// Dragging the selection: `applied` is where the last move left it.
     Move { applied: Point, pointer: Point },
+    /// Drawing a shape (`preset`) or a frame (`None`) from `origin`
+    /// (document space): inserted once the press travels, its box
+    /// following the pointer after.
+    Draw {
+        preset: Option<tools::Preset>,
+        origin: Point,
+        pointer: Point,
+        node: Option<NodeId>,
+    },
+    /// The hand tool panning: the pointer's last place (window space).
+    Pan { last: Point, pointer: Point },
     Resize {
         handle: (Side, Side),
         selection: SelectionBox,
@@ -144,6 +157,8 @@ pub struct BoardCanvas {
     pending_edit: Option<NodeId>,
     /// Shortcuts to the board's commands.
     keymap: imaginarium_commands::Keymap,
+    /// The tool in use.
+    tool: Signal<Tool>,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
     /// The board's box in the last layout.
@@ -178,6 +193,7 @@ impl BoardCanvas {
             editing: None,
             pending_edit: None,
             keymap: crate::keys::default_keymap(imaginarium_commands::Platform::current()),
+            tool: signal(Tool::Select),
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
@@ -343,6 +359,66 @@ impl BoardCanvas {
             }
         };
         match gesture {
+            Gesture::Draw {
+                preset,
+                origin,
+                pointer,
+                node,
+            } => {
+                let area = Rect::from_points(origin, pointer);
+                match node {
+                    None => {
+                        let args = commands::insert_args(preset, area);
+                        let id = if preset.is_some() {
+                            "board.insert_shape"
+                        } else {
+                            "board.insert_frame"
+                        };
+                        if commands::execute(self, id, &args).is_ok() {
+                            let created = self.selection.get_untracked().first().copied();
+                            if let Some(Gesture::Draw { node, .. }) = &mut self.gesture {
+                                *node = created;
+                            }
+                        }
+                    }
+                    Some(node) => {
+                        let view = self.document.view();
+                        let parent = self
+                            .items
+                            .as_ref()
+                            .and_then(|items| items.parent_world(view, node))
+                            .unwrap_or_default();
+                        let local = parent.inverse().transform_rect_bbox(area);
+                        let geometry = imaginarium_model::Geometry::new(
+                            local.x0,
+                            local.y0,
+                            local.width(),
+                            local.height(),
+                        );
+                        // A line runs from where the drag began to the pointer.
+                        let flip = (preset == Some(tools::Preset::Line)).then_some(
+                            match (pointer.x < origin.x, pointer.y < origin.y) {
+                                (false, false) => "",
+                                (true, false) => "h",
+                                (false, true) => "v",
+                                (true, true) => "hv",
+                            },
+                        );
+                        let _ = commands::execute(
+                            self,
+                            "board.set_box",
+                            &box_args(node, geometry, flip),
+                        );
+                    }
+                }
+            }
+            Gesture::Pan { last, pointer } => {
+                self.origin -= (pointer - last) / self.zoom;
+                self.gesture = Some(Gesture::Pan {
+                    last: pointer,
+                    pointer,
+                });
+            }
             Gesture::Move { applied, pointer } => {
                 let delta = pointer - applied;
                 if delta.hypot() == 0.0 {
@@ -402,14 +478,45 @@ impl BoardCanvas {
         if self.gesture.is_some() {
             self.end_gesture();
         }
-        // Only a group this gesture opened is closed at its end.
-        self.grouped = self.document.begin_undo_group(UndoScope::User).is_ok();
+        // Only a group this gesture opened is closed at its end; panning
+        // changes no document.
+        self.grouped = !matches!(gesture, Gesture::Pan { .. })
+            && self.document.begin_undo_group(UndoScope::User).is_ok();
         self.gesture = Some(gesture);
     }
 
     /// Applies the gesture's last state and closes its undo step.
     fn end_gesture(&mut self) {
         if self.gesture.is_some() {
+            // A shape tool's click without a drag places the tool's size.
+            if let Some(Gesture::Draw {
+                preset,
+                origin,
+                node: None,
+                ..
+            }) = self.gesture.clone()
+            {
+                let tool = preset.map_or(Tool::Frame, Tool::Shape);
+                let area = Self::click_area(tool, origin);
+                let id = if preset.is_some() {
+                    "board.insert_shape"
+                } else {
+                    "board.insert_frame"
+                };
+                let _ = commands::execute(self, id, &commands::insert_args(preset, area));
+                // Placed: nothing more to draw.
+                self.gesture = Some(Gesture::Draw {
+                    preset,
+                    origin,
+                    pointer: origin,
+                    node: self.selection.get_untracked().first().copied(),
+                });
+                self.armed = Some(origin);
+            }
+            if matches!(self.gesture, Some(Gesture::Draw { .. })) {
+                // One shape, then Select returns.
+                self.set_tool(Tool::Select);
+            }
             self.flush_gesture();
             self.gesture = None;
             self.armed = None;
@@ -507,6 +614,11 @@ impl BoardCanvas {
         };
         self.pending_edit = Some(node);
         true
+    }
+
+    /// Forgets an edit asked for (a text inserted with its text).
+    pub(crate) fn cancel_pending_edit(&mut self) {
+        self.pending_edit = None;
     }
 
     /// Brings the board up to date with the document now (painting and
@@ -1056,6 +1168,42 @@ impl BoardCanvas {
             } => {
                 cx.request_focus();
                 cx.capture_pointer();
+                let at = self.to_document(cx.bounds(), *position);
+                match self.tool.get_untracked() {
+                    Tool::Select => {}
+                    Tool::Hand => {
+                        self.begin_gesture(Gesture::Pan {
+                            last: *position,
+                            pointer: *position,
+                        });
+                        return true;
+                    }
+                    Tool::Text => {
+                        let args = commands::text_args(at);
+                        let _ = commands::execute(self, "board.insert_text", &args);
+                        self.set_tool(Tool::Select);
+                        self.sync(cx.fonts());
+                        cx.release_pointer();
+                        cx.request_paint();
+                        return true;
+                    }
+                    tool @ (Tool::Shape(_) | Tool::Frame) => {
+                        let preset = match tool {
+                            Tool::Shape(preset) => Some(preset),
+                            _ => None,
+                        };
+                        self.selection.set_if_changed(Vec::new());
+                        self.begin_gesture(Gesture::Draw {
+                            preset,
+                            origin: at,
+                            pointer: at,
+                            node: None,
+                        });
+                        self.armed = Some(*position);
+                        cx.request_paint();
+                        return true;
+                    }
+                }
                 if *clicks == 1
                     && let Some((handle, selection)) = self.handle_at(*position)
                 {
@@ -1142,9 +1290,12 @@ impl BoardCanvas {
                 if let Some(gesture) = &mut self.gesture {
                     match gesture {
                         Gesture::Move { pointer: at, .. }
+                        | Gesture::Draw { pointer: at, .. }
                         | Gesture::Resize { pointer: at, .. }
                         | Gesture::Rotate { pointer: at, .. }
                         | Gesture::Radius { pointer: at, .. } => *at = pointer,
+                        // The hand pans in window space.
+                        Gesture::Pan { pointer: at, .. } => *at = *position,
                     }
                     if self
                         .armed

@@ -598,6 +598,225 @@ board_command!(
     |board, _| Ok(done(board.request_edit()))
 );
 
+const PRESETS: &[&str] = &["rect", "ellipse", "diamond", "triangle", "line"];
+
+/// The box arguments of an insert, in board coordinates: given, or the
+/// tool's click size in the middle of the view.
+fn insert_area(
+    board: &BoardCanvas,
+    args: &Args,
+    preset: Option<crate::board::Preset>,
+) -> imaginarium_render::kurbo::Rect {
+    let tool = preset.map_or(crate::board::Tool::Frame, crate::board::Tool::Shape);
+    let default = BoardCanvas::click_area(tool, board.view_middle());
+    let x = args.float("x").unwrap_or(default.x0);
+    let y = args.float("y").unwrap_or(default.y0);
+    let w = args.float("w").unwrap_or(default.width());
+    let h = args.float("h").unwrap_or(default.height());
+    imaginarium_render::kurbo::Rect::new(x, y, x + w, y + h)
+}
+
+/// `board.insert_shape`.
+pub static INSERT_SHAPE: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.insert_shape",
+    CommandMeta::new(
+        "Insert shape",
+        "Insert a shape (rect, ellipse, diamond, triangle or line) with its box at x, y (board points, top left) and w by h; without a box, in the middle of the view. It goes into the frame at that place, and is selected.",
+    )
+    .category("Insert")
+    .synonyms(&["add shape", "rectangle", "circle", "ellipse", "diamond", "triangle", "line", "form"])
+    .icon("square-plus"),
+    |board, args| {
+        let preset = args
+            .str("preset")
+            .and_then(crate::board::Preset::parse)
+            .ok_or_else(|| CommandError::InvalidArgs {
+                id: "board.insert_shape",
+                reason: "`preset` names no shape".into(),
+            })?;
+        let area = insert_area(board, args, Some(preset));
+        board
+            .insert_box(Some(preset), area)
+            .map_err(failed("board.insert_shape"))?;
+        Ok(Outcome::Done)
+    },
+)
+.args(ArgsSchema {
+    args: &[
+        ArgSpec {
+            name: "preset",
+            description: "Which shape.",
+            kind: ArgKind::Enum { variants: PRESETS },
+            required: true,
+        },
+        float("x", "Left edge in board points.", -LIMIT, LIMIT, false),
+        float("y", "Top edge in board points.", -LIMIT, LIMIT, false),
+        float("w", "Width in points.", 0.0, LIMIT, false),
+        float("h", "Height in points.", 0.0, LIMIT, false),
+    ],
+});
+
+/// `board.insert_frame`.
+pub static INSERT_FRAME: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.insert_frame",
+    CommandMeta::new(
+        "Insert frame",
+        "Insert a frame (an area that clips what is in it, with a name above) with its box at x, y (board points) and w by h; without a box, in the middle of the view.",
+    )
+    .category("Insert")
+    .synonyms(&["artboard", "area", "section", "rahmen"])
+    .icon("frame"),
+    |board, args| {
+        let area = insert_area(board, args, None);
+        board.insert_box(None, area).map_err(failed("board.insert_frame"))?;
+        Ok(Outcome::Done)
+    },
+)
+.args(ArgsSchema {
+    args: &[
+        float("x", "Left edge in board points.", -LIMIT, LIMIT, false),
+        float("y", "Top edge in board points.", -LIMIT, LIMIT, false),
+        float("w", "Width in points.", 0.0, LIMIT, false),
+        float("h", "Height in points.", 0.0, LIMIT, false),
+    ],
+});
+
+/// `board.insert_text`.
+pub static INSERT_TEXT: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.insert_text",
+    CommandMeta::new(
+        "Insert text",
+        "Insert a text box with its top left at x, y (board points; without them, the middle of the view). With `text`, it holds that text; without, editing starts so the user types it.",
+    )
+    .category("Insert")
+    .synonyms(&["add text", "note", "write", "textfeld"])
+    .icon("type"),
+    |board, args| {
+        let middle = board.view_middle();
+        let at = imaginarium_render::kurbo::Point::new(
+            args.float("x").unwrap_or(middle.x),
+            args.float("y").unwrap_or(middle.y),
+        );
+        let id = board.insert_text_at(at).map_err(failed("board.insert_text"))?;
+        if let Some(text) = args.str("text").filter(|text| !text.is_empty()) {
+            board.cancel_pending_edit();
+            board
+                .transact(&Actor::User, |txn| txn.insert_text(id, 0, text))
+                .map_err(failed("board.insert_text"))?;
+        }
+        Ok(Outcome::Done)
+    },
+)
+.args(ArgsSchema {
+    args: &[
+        float("x", "Left edge in board points.", -LIMIT, LIMIT, false),
+        float("y", "Top edge in board points.", -LIMIT, LIMIT, false),
+        ArgSpec {
+            name: "text",
+            description: "The text it holds (plain text).",
+            kind: ArgKind::String {
+                max_len: Some(1 << 20),
+            },
+            required: false,
+        },
+    ],
+});
+
+macro_rules! tool {
+    ($name:ident, $id:literal, $title:literal, $description:literal, [$($synonym:literal),*], $icon:literal, $tool:expr) => {
+        board_command!(
+            /// A tool of the tool bar.
+            $name, $id, $title, $description, "Tools", [$($synonym),*], $icon, always,
+            |board, _| {
+                board.set_tool($tool);
+                Ok(Outcome::Done)
+            }
+        );
+    };
+}
+
+tool!(
+    TOOL_SELECT,
+    "tool.select",
+    "Select tool",
+    "Select and move nodes with the pointer.",
+    ["pointer", "arrow"],
+    "mouse-pointer-2",
+    crate::board::Tool::Select
+);
+tool!(
+    TOOL_HAND,
+    "tool.hand",
+    "Hand tool",
+    "Drag to pan the board.",
+    ["pan", "move view", "grab"],
+    "hand",
+    crate::board::Tool::Hand
+);
+tool!(
+    TOOL_RECTANGLE,
+    "tool.rectangle",
+    "Rectangle tool",
+    "Draw a rectangle by dragging on the board.",
+    ["box", "square", "rechteck"],
+    "square",
+    crate::board::Tool::Shape(crate::board::Preset::Rectangle)
+);
+tool!(
+    TOOL_ELLIPSE,
+    "tool.ellipse",
+    "Ellipse tool",
+    "Draw an ellipse by dragging on the board.",
+    ["circle", "oval", "kreis"],
+    "circle",
+    crate::board::Tool::Shape(crate::board::Preset::Ellipse)
+);
+tool!(
+    TOOL_DIAMOND,
+    "tool.diamond",
+    "Diamond tool",
+    "Draw a diamond (a decision in a flow chart) by dragging on the board.",
+    ["rhombus", "decision", "raute"],
+    "diamond",
+    crate::board::Tool::Shape(crate::board::Preset::Diamond)
+);
+tool!(
+    TOOL_TRIANGLE,
+    "tool.triangle",
+    "Triangle tool",
+    "Draw a triangle by dragging on the board.",
+    ["dreieck"],
+    "triangle",
+    crate::board::Tool::Shape(crate::board::Preset::Triangle)
+);
+tool!(
+    TOOL_LINE,
+    "tool.line",
+    "Line tool",
+    "Draw a straight line by dragging from one end to the other.",
+    ["stroke", "linie"],
+    "slash",
+    crate::board::Tool::Shape(crate::board::Preset::Line)
+);
+tool!(
+    TOOL_TEXT,
+    "tool.text",
+    "Text tool",
+    "Click on the board to place a text box and type.",
+    ["type", "write"],
+    "type",
+    crate::board::Tool::Text
+);
+tool!(
+    TOOL_FRAME,
+    "tool.frame",
+    "Frame tool",
+    "Draw a frame (an area that clips what is in it) by dragging on the board.",
+    ["artboard", "section"],
+    "frame",
+    crate::board::Tool::Frame
+);
+
 macro_rules! nudge {
     ($name:ident, $id:literal, $title:literal, $description:literal, $dx:expr, $dy:expr) => {
         board_command!(
@@ -678,7 +897,19 @@ pub fn board_commands() -> &'static [&'static FnCommand<BoardCanvas>] {
     &BOARD_COMMANDS
 }
 
-static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 31] = [
+static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 43] = [
+    &INSERT_SHAPE,
+    &INSERT_FRAME,
+    &INSERT_TEXT,
+    &TOOL_SELECT,
+    &TOOL_HAND,
+    &TOOL_RECTANGLE,
+    &TOOL_ELLIPSE,
+    &TOOL_DIAMOND,
+    &TOOL_TRIANGLE,
+    &TOOL_LINE,
+    &TOOL_TEXT,
+    &TOOL_FRAME,
     &MOVE,
     &SET_BOX,
     &SET_RADIUS,
@@ -720,6 +951,30 @@ pub(crate) fn replace_args(node: NodeId, at: usize, delete: usize, insert: &str)
         .with("at", int(at))
         .with("delete", int(delete))
         .with("insert", ArgValue::String(insert.to_owned()))
+}
+
+/// Arguments of an insert: `preset` (a shape, or a frame for `None`) in
+/// `area` (board points).
+pub(crate) fn insert_args(
+    preset: Option<crate::board::Preset>,
+    area: imaginarium_render::kurbo::Rect,
+) -> Args {
+    let args = Args::new()
+        .with("x", ArgValue::Float(area.x0))
+        .with("y", ArgValue::Float(area.y0))
+        .with("w", ArgValue::Float(area.width().max(0.0)))
+        .with("h", ArgValue::Float(area.height().max(0.0)));
+    match preset {
+        Some(preset) => args.with("preset", ArgValue::String(preset.name().into())),
+        None => args,
+    }
+}
+
+/// Arguments of `board.insert_text` at `at`.
+pub(crate) fn text_args(at: imaginarium_render::kurbo::Point) -> Args {
+    Args::new()
+        .with("x", ArgValue::Float(at.x))
+        .with("y", ArgValue::Float(at.y))
 }
 
 /// Arguments of `shape.set_radius`.

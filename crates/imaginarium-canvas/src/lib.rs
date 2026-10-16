@@ -35,7 +35,7 @@ mod paint;
 mod shapes;
 pub mod style;
 
-pub use board::{BoardCanvas, MAX_ZOOM, MIN_ZOOM};
+pub use board::{BoardCanvas, MAX_ZOOM, MIN_ZOOM, Preset, Tool};
 pub use copy::{NodeCopy, ParagraphCopy, RunCopy};
 pub use items::BoardColors;
 pub use shapes::{Outline, shape_path};
@@ -50,5 +50,7 @@ mod tests_gesture;
 mod tests_select;
 #[cfg(test)]
 mod tests_text;
+#[cfg(test)]
+mod tests_tools;
 #[cfg(test)]
 mod tests_updates;
