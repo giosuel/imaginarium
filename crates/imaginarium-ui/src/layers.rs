@@ -221,12 +221,18 @@ pub(crate) fn place(
             (x, along(anchor.y0, anchor.y1, size.height))
         }
     };
-    // Inside the window where it fits; pinned to the start edge where it
-    // doesn't (its start is what people read first).
+    keep_inside(Point::new(x, y), size, area)
+}
+
+/// Moves a layer of `size` at `origin` inside `area`, `EDGE` from its
+/// edges where it fits; pinned to the start edge where it doesn't (its
+/// start is what people read first).
+pub(crate) fn keep_inside(origin: Point, size: Size, area: Rect) -> Point {
+    let inner = area.inset(-EDGE);
     let clamp = |value: f64, length: f64, lo: f64, hi: f64| value.min(hi - length).max(lo);
     Point::new(
-        clamp(x, size.width, inner.x0, inner.x1),
-        clamp(y, size.height, inner.y0, inner.y1),
+        clamp(origin.x, size.width, inner.x0, inner.x1),
+        clamp(origin.y, size.height, inner.y0, inner.y1),
     )
 }
 
