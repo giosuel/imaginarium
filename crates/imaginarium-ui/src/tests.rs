@@ -29,6 +29,7 @@ fn button_colors() -> ButtonColors {
         pressed: Color::WHITE.into(),
         text: Color::BLACK.into(),
         focus: Color::BLACK.into(),
+        border: None,
     }
 }
 
@@ -901,4 +902,96 @@ fn a_layer_removed_from_outside_gives_the_focus_back() {
     frame(&mut ui, &mut fonts);
     assert!(!ui.is_layer_open(layer));
     assert_eq!(ui.focused(), Some(opener));
+}
+
+#[test]
+fn a_click_focuses_without_a_ring_and_a_key_brings_it() {
+    /// Records `is_focus_visible` each time it paints.
+    struct Ring(Rc<Cell<Option<bool>>>);
+    impl Widget for Ring {
+        fn style(&self) -> taffy::Style {
+            taffy::Style {
+                size: taffy::Size {
+                    width: length(80.0),
+                    height: length(30.0),
+                },
+                ..taffy::Style::default()
+            }
+        }
+        fn focusable(&self) -> bool {
+            true
+        }
+        fn paint(&mut self, cx: &mut Cx<'_>, _scene: &mut imaginarium_render::Scene) {
+            self.0.set(Some(cx.is_focus_visible()));
+        }
+    }
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let ring = Rc::new(Cell::new(None));
+    let widget = ui.add(Ring(ring.clone()));
+    let root = ui.add_with_children(Flex::column().fill(), &[widget]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(widget).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.focused(), Some(widget));
+    assert_eq!(ring.get(), Some(false), "a click shows no ring");
+    ui.input(&mut fonts, &key(Key::ArrowDown));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ring.get(), Some(true), "the keyboard does");
+}
+
+#[test]
+fn a_dialog_starts_on_the_widget_it_names() {
+    use crate::layers::LayerOptions;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let (content, _, second) = menu(&mut ui, &clicks);
+    ui.open_layer(content, LayerOptions::modal().focus(second));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.focused(), Some(second));
+}
+
+#[test]
+fn a_label_wraps_down_to_its_longest_word() {
+    use crate::widgets::Label;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let text = ui.add(Label::new(
+        "several short words in a row",
+        TextStyle::new(14.0),
+    ));
+    // A row too narrow for the line: the label shrinks and wraps.
+    let row = ui.add_with_children(Flex::row().width(90.0), &[text]);
+    let root = ui.add_with_children(Flex::column().fill(), &[row]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let bounds = ui.bounds(text).unwrap();
+    assert!(bounds.width() <= 90.5, "{bounds:?}");
+    assert!(bounds.height() > 30.0, "it wrapped: {bounds:?}");
+}
+
+#[test]
+fn icons_parse_their_paths_and_take_their_size() {
+    use crate::widgets::Icon;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let icon =
+        ui.add(Icon::new(&["M5 12h14", "not a path", "M12 5v14"], 20.0, Token::Text).label("Add"));
+    let root = ui.add_with_children(Flex::row().fill(), &[icon]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.bounds(icon).unwrap().size(), Size::new(20.0, 20.0));
+    let update = check_access(&mut ui, &mut fonts);
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(id, _)| *id == NodeId(icon.access_base()))
+    );
 }

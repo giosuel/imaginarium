@@ -73,6 +73,7 @@ pub struct LayerOptions {
     pub(crate) align: Align,
     pub(crate) gap: f64,
     pub(crate) focus_first: bool,
+    pub(crate) initial_focus: Option<WidgetId>,
     pub(crate) dismissable: bool,
     pub(crate) on_close: Option<Box<dyn FnMut()>>,
 }
@@ -88,6 +89,7 @@ impl LayerOptions {
             align: Align::Start,
             gap: 8.0,
             focus_first: true,
+            initial_focus: None,
             dismissable: true,
             on_close: None,
         }
@@ -102,6 +104,7 @@ impl LayerOptions {
             align: Align::Center,
             gap: 0.0,
             focus_first: true,
+            initial_focus: None,
             dismissable: true,
             on_close: None,
         }
@@ -116,6 +119,7 @@ impl LayerOptions {
             align: Align::Center,
             gap: 6.0,
             focus_first: false,
+            initial_focus: None,
             dismissable: false,
             on_close: None,
         }
@@ -144,6 +148,14 @@ impl LayerOptions {
     /// was when the layer closes.
     pub fn focus_first(mut self, focus: bool) -> Self {
         self.focus_first = focus;
+        self
+    }
+
+    /// Which widget in it takes the focus when it opens, instead of the
+    /// first one (a dialog's safe default: Save, not Don't save).
+    pub fn focus(mut self, widget: WidgetId) -> Self {
+        self.initial_focus = Some(widget);
+        self.focus_first = true;
         self
     }
 

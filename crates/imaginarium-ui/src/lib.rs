@@ -60,7 +60,7 @@ mod window;
 pub use clipboard::Clipboard;
 pub use layers::{Align, Anchor, LayerId, LayerKind, LayerOptions, Placement};
 pub use tree::{Cx, TreeStats, Ui, Widget, WidgetId, invalidate};
-pub use widgets::{Button, ButtonColors, Flex, InputColors, Label, TextInput, label};
+pub use widgets::{Button, ButtonColors, Flex, Icon, InputColors, Label, TextInput, label};
 
 pub use access::{AccessTree, ROOT, rect as access_rect};
 pub use text_field::{FieldResponse, TextField};

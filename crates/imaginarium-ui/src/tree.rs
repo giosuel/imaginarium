@@ -144,6 +144,7 @@ pub struct Cx<'a> {
     id: WidgetId,
     bounds: Rect,
     focused: bool,
+    focus_visible: bool,
     hovered: bool,
     fonts: &'a mut Fonts,
     clipboard: &'a mut Clipboard,
@@ -165,6 +166,13 @@ impl Cx<'_> {
     /// Whether it has the keyboard focus.
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// Whether it has the focus and the keyboard is in use, so a focus
+    /// ring should show (CSS's `:focus-visible`). A click focuses without
+    /// a ring; the next key press brings it.
+    pub fn is_focus_visible(&self) -> bool {
+        self.focus_visible
     }
 
     /// Whether the pointer is over it.
@@ -329,6 +337,9 @@ pub struct Ui {
     deferred_closes: Vec<WidgetId>,
     /// Where the focus goes after a layer was removed from outside.
     pending_return: Option<WidgetId>,
+    /// Whether the last input was the keyboard (focus rings show) rather
+    /// than the pointer.
+    keyboard: bool,
 }
 
 impl Default for Ui {
@@ -361,6 +372,7 @@ impl Ui {
             focusing: false,
             deferred_closes: Vec::new(),
             pending_return: None,
+            keyboard: true,
         }
     }
 
@@ -507,6 +519,18 @@ impl Ui {
             callback();
         }
         true
+    }
+
+    /// Records whether the keyboard or the pointer was used last; the
+    /// focused widget repaints when its ring comes or goes.
+    fn set_keyboard(&mut self, keyboard: bool) {
+        if self.keyboard != keyboard {
+            self.keyboard = keyboard;
+            if let Some(focus) = self.focus {
+                self.mark(focus, false);
+                request_frame();
+            }
+        }
     }
 
     /// Whether layer `id` is open.
@@ -723,6 +747,7 @@ impl Ui {
             id,
             bounds: node.bounds,
             focused,
+            focus_visible: focused && self.keyboard,
             hovered,
             fonts,
             clipboard: &mut self.clipboard,
@@ -882,6 +907,7 @@ impl Ui {
                             id,
                             bounds: node.bounds,
                             focused: false,
+                            focus_visible: false,
                             hovered: false,
                             fonts: &mut *fonts,
                             clipboard: &mut *clipboard,
@@ -973,7 +999,11 @@ impl Ui {
                 }
                 let mut order = Vec::new();
                 self.focusables(self.layers[index].root, &mut order);
-                if let Some(&first) = order.first() {
+                let wanted = self.layers[index]
+                    .options
+                    .initial_focus
+                    .filter(|wanted| order.contains(wanted));
+                if let Some(first) = wanted.or_else(|| order.first().copied()) {
                     self.set_focus(fonts, Some(first));
                 }
             }
@@ -1238,6 +1268,9 @@ impl Ui {
             Input::PointerButton {
                 pressed, position, ..
             } => {
+                if *pressed {
+                    self.set_keyboard(false);
+                }
                 self.buttons_held = if *pressed {
                     self.buttons_held.saturating_add(1)
                 } else {
@@ -1290,6 +1323,9 @@ impl Ui {
                 handled
             }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
+                if let Input::Key { pressed: true, .. } = input {
+                    self.set_keyboard(true);
+                }
                 // Keys go to the focus, unless it is behind a dialog (one that
                 // just opened, or has nothing to focus): then to the dialog.
                 let fallback = self.modal().map_or(root, |modal| modal.root);
@@ -1453,6 +1489,7 @@ impl Ui {
             id,
             bounds: data.bounds,
             focused,
+            focus_visible: focused && self.keyboard,
             hovered,
             fonts: &mut *fonts,
             clipboard: &mut self.clipboard,

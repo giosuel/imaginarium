@@ -116,8 +116,11 @@ impl App {
 
         // The toolbar.
         let logo = ui.add(Logo);
-        let title =
-            ui.add(Label::new("Imaginarium", TextStyle::new(15.0).weight(700.0)).color(INK));
+        let title = ui.add(
+            Label::new("Imaginarium", TextStyle::new(15.0).weight(700.0))
+                .color(INK)
+                .single_line(),
+        );
         let spacer = ui.add(Flex::row().grow(1.0));
         let count = label(
             &mut ui,
@@ -134,6 +137,7 @@ impl App {
             pressed: INK.with_alpha(0.14).into(),
             text: INK.into(),
             focus: ACCENT.into(),
+            border: None,
         };
         let commands_button = ui.add(Button::new(
             "Commands  Ctrl+K",
@@ -262,7 +266,7 @@ impl App {
         let hints = ui.add(Label::new(
             "wheel/drag: pan · Ctrl+wheel: zoom · double-click: edit · Ctrl+K: commands · Tab: focus",
             TextStyle::new(12.0),
-        ).color(INK.with_alpha(0.45)));
+        ).color(INK.with_alpha(0.45)).single_line());
         let spring = ui.add(Flex::row().grow(1.0));
         let status_bar = ui.add_with_children(
             Flex::row()
@@ -317,6 +321,12 @@ impl App {
                 )
             },
         );
+        // The gate's status texts stay on one line, clipped by their bars.
+        for id in [count, status, footer] {
+            if let Some(label) = ui.widget_mut::<Label>(id) {
+                label.set_single_line(true);
+            }
+        }
         let footer_row = ui.add_with_children(Flex::row().padding(4.0, 2.0), &[footer]);
         let palette = ui.add_with_children(
             Palette {
