@@ -40,6 +40,10 @@ pub enum Token {
     TextSubtle,
     /// Accent fills: primary buttons, the selection, toggles.
     Accent,
+    /// An accent fill under the pointer.
+    AccentHover,
+    /// An accent fill while pressed.
+    AccentPressed,
     /// Accent text and icons on panels (the active tool, links).
     AccentInk,
     /// Text and icons on an [`Token::Accent`] fill.
@@ -54,7 +58,7 @@ pub enum Token {
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 17] = [
+    pub const ALL: [Token; 19] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -67,6 +71,8 @@ impl Token {
         Token::TextMuted,
         Token::TextSubtle,
         Token::Accent,
+        Token::AccentHover,
+        Token::AccentPressed,
         Token::AccentInk,
         Token::OnAccent,
         Token::Danger,
@@ -96,9 +102,22 @@ pub struct Theme {
     pub panel_radius: f64,
     /// Corner radius of buttons and inputs.
     pub control_radius: f64,
-    /// Opacity of the panels' shadow: black at this alpha, scaled per
-    /// layer.
-    pub shadow_alpha: f32,
+    /// The panels' shadow, drawn as layers of black from the widest to the
+    /// tightest: how far each spreads past the panel, and its alpha.
+    pub shadow: [ShadowLayer; 3],
+}
+
+/// One layer of a panel's shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowLayer {
+    /// How far it spreads past the panel's edge, in logical pixels.
+    pub spread: f64,
+    /// Black at this alpha.
+    pub alpha: f32,
+}
+
+const fn layer(spread: f64, alpha: f32) -> ShadowLayer {
+    ShadowLayer { spread, alpha }
 }
 
 impl Theme {
@@ -125,18 +144,22 @@ impl Theme {
                 (Token::ControlActive, mix(accent, panel, 0.72)),
                 (Token::Text, rgb(0xededf0)),
                 (Token::TextMuted, rgb(0xa1a1aa)),
-                (Token::TextSubtle, rgb(0x8e8e99)),
+                // Light enough for 4.5:1 on a hovered row too.
+                (Token::TextSubtle, rgb(0x9494a0)),
                 // Fills keep the accent itself (white text on it passes for
                 // every offered accent); text and icons on dark panels use
                 // a lighter version.
                 (Token::Accent, accent),
+                (Token::AccentHover, mix(accent, Color::BLACK, 0.08)),
+                (Token::AccentPressed, mix(accent, Color::BLACK, 0.16)),
                 (Token::AccentInk, mix(accent, Color::WHITE, 0.45)),
                 (Token::OnAccent, Color::WHITE),
                 (Token::Danger, rgb(0xf87171)),
                 (Token::Warning, rgb(0xf5a524)),
                 (Token::TooltipBg, rgb(0x3f3f46)),
             ],
-            0.45,
+            // Black on black needs more weight than the light theme's.
+            [layer(14.0, 0.10), layer(6.0, 0.14), layer(2.0, 0.24)],
         )
     }
 
@@ -159,6 +182,8 @@ impl Theme {
                 (Token::TextMuted, rgb(0x52525b)),
                 (Token::TextSubtle, rgb(0x6b6b76)),
                 (Token::Accent, accent),
+                (Token::AccentHover, mix(accent, Color::BLACK, 0.08)),
+                (Token::AccentPressed, mix(accent, Color::BLACK, 0.16)),
                 // A little darker, so accent text keeps 4.5:1 on the
                 // active tool's tint too (orange missed it by a hair).
                 (Token::AccentInk, mix(accent, Color::BLACK, 0.15)),
@@ -167,11 +192,15 @@ impl Theme {
                 (Token::Warning, rgb(0xb45309)),
                 (Token::TooltipBg, rgb(0x18181b)),
             ],
-            0.08,
+            [layer(12.0, 0.03), layer(6.0, 0.05), layer(2.0, 0.08)],
         )
     }
 
-    fn build(kind: ThemeKind, colors: [(Token, Color); Token::ALL.len()], shadow: f32) -> Self {
+    fn build(
+        kind: ThemeKind,
+        colors: [(Token, Color); Token::ALL.len()],
+        shadow: [ShadowLayer; 3],
+    ) -> Self {
         let mut table = [Color::TRANSPARENT; Token::ALL.len()];
         for (token, color) in colors {
             table[token as usize] = color;
@@ -181,7 +210,7 @@ impl Theme {
             colors: table,
             panel_radius: 12.0,
             control_radius: 8.0,
-            shadow_alpha: shadow,
+            shadow,
         }
     }
 
@@ -267,6 +296,9 @@ pub fn theme() -> Rc<Theme> {
 
 /// Switches the theme. Every widget repaints (and labels re-shape) before
 /// the next frame, which this asks for.
+///
+/// Don't call it from an effect that reads [`theme`]: the switch runs that
+/// effect again. Settings changes call it from their handler instead.
 pub fn set_theme(new: Theme) {
     let unchanged = THEME.with(|theme| **theme.borrow() == new);
     if unchanged {
@@ -329,18 +361,33 @@ mod tests {
     /// Text and the backgrounds it is drawn on, which must reach 4.5:1
     /// (WCAG AA for body text) in every theme and for every accent the
     /// settings offer.
-    const PAIRS: [(Token, Token); 11] = [
+    const PAIRS: [(Token, Token); 16] = [
         (Token::Text, Token::PanelBg),
         (Token::Text, Token::BoardBg),
         (Token::Text, Token::ControlHover),
+        (Token::Text, Token::ControlActive),
         (Token::TextMuted, Token::PanelBg),
         (Token::TextMuted, Token::ControlHover),
         (Token::TextSubtle, Token::PanelBg),
+        (Token::TextSubtle, Token::ControlHover),
         (Token::AccentInk, Token::PanelBg),
         (Token::AccentInk, Token::ControlActive),
         (Token::OnAccent, Token::Accent),
+        (Token::OnAccent, Token::AccentHover),
+        (Token::OnAccent, Token::AccentPressed),
         (Token::OnAccent, Token::TooltipBg),
         (Token::Danger, Token::PanelBg),
+        (Token::Warning, Token::PanelBg),
+    ];
+
+    /// Non-text parts that must be seen (WCAG 1.4.11, 3:1): the focus ring
+    /// on panels and on the board. Left out on purpose: control borders,
+    /// which are quiet in the design (`shell.md` §7; a field is told by its
+    /// placeholder and focus ring), and accent fills, which are told by the
+    /// text on them.
+    const PARTS: [(Token, Token); 2] = [
+        (Token::AccentInk, Token::PanelBg),
+        (Token::AccentInk, Token::BoardBg),
     ];
 
     /// The accents in Settings › Appearance (indigo, teal, orange, violet).
@@ -355,6 +402,22 @@ mod tests {
                     assert!(
                         ratio >= 4.5,
                         "{:?} accent #{accent:06x}: {text:?} on {background:?} is {ratio:.2}:1",
+                        theme.kind()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focus_rings_and_accent_fills_stand_out() {
+        for accent in ACCENTS {
+            for theme in [Theme::dark(rgb(accent)), Theme::light(rgb(accent))] {
+                for (part, background) in PARTS {
+                    let ratio = contrast(theme.color(part), theme.color(background));
+                    assert!(
+                        ratio >= 3.0,
+                        "{:?} accent #{accent:06x}: {part:?} on {background:?} is {ratio:.2}:1",
                         theme.kind()
                     );
                 }

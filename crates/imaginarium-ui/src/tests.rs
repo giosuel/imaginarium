@@ -390,3 +390,44 @@ fn a_theme_switch_repaints_every_widget_and_reshapes_labels() {
     );
     set_theme(dark);
 }
+
+#[test]
+fn inputs_and_buttons_follow_the_theme() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let style = TextStyle::new(14.0);
+    let field = ui.add(TextInput::new("Name", "", style, InputColors::themed()));
+    let save = ui.add(Button::new("Save", style, ButtonColors::primary(), || {}));
+    let panel = ui.add_with_children(Flex::column().fill(), &[field, save]);
+    ui.set_root(panel);
+    let mut scene = imaginarium_render::Scene::new();
+    let dark = Theme::dark(DEFAULT_ACCENT);
+    let light = Theme::light(DEFAULT_ACCENT);
+    let colors = |ui: &mut Ui| {
+        let text = ui
+            .widget_mut::<TextInput>(field)
+            .unwrap()
+            .field()
+            .editor()
+            .style()
+            .color;
+        let label = ui.widget::<Button>(save).unwrap().label_color();
+        (text, label)
+    };
+
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(
+        colors(&mut ui),
+        (dark.color(Token::Text), Some(dark.color(Token::OnAccent)))
+    );
+
+    set_theme(light.clone());
+    ui.layout(&mut fonts, AREA);
+    ui.paint(&mut fonts, &mut scene);
+    assert_eq!(
+        colors(&mut ui),
+        (light.color(Token::Text), Some(light.color(Token::OnAccent)))
+    );
+    set_theme(dark);
+}

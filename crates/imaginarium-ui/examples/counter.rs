@@ -16,7 +16,7 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Input, InputColors, Label,
+    AccessTree, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Input, InputColors,
     TextInput, Theme, ThemeKind, Token, Ui, UiError, View, WindowOptions, label, set_theme, theme,
 };
 
@@ -110,14 +110,11 @@ fn main() -> Result<(), UiError> {
     ));
     // A label computed from signals: it lays out again when they change,
     // and nothing else does.
-    let greeting = label(&mut ui, style, move || {
+    let greeting = label(&mut ui, style, Token::Text, move || {
         let name = name.get();
         let who = if name.is_empty() { "there" } else { &name };
         format!("Hello, {who}! You clicked {} times.", clicks.get())
     });
-    if let Some(greeting) = ui.widget_mut::<Label>(greeting) {
-        greeting.set_color(Token::Text);
-    }
     let buttons = ui.add_with_children(Flex::row().gap(8.0), &[button, switch]);
     let column = ui.add_with_children(
         Flex::column()

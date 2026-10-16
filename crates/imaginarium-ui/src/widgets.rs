@@ -171,15 +171,13 @@ impl Widget for Flex {
         let bounds = cx.bounds();
         let theme = theme();
         if self.shadow {
-            // The light theme's alpha (0.08) gives the original layers.
-            let strength = theme.shadow_alpha / 0.08;
-            for (spread, alpha) in [(12.0, 0.03), (6.0, 0.05), (2.0, 0.08)] {
+            for layer in theme.shadow {
+                let spread = layer.spread;
                 let shadow = RoundedRect::from_rect(
                     bounds.inflate(spread, spread) + Vec2::new(0.0, spread / 2.0),
                     self.radius + spread,
                 );
-                let alpha: f32 = alpha * strength;
-                scene.fill(&shadow, Color::BLACK.with_alpha(alpha.min(1.0)));
+                scene.fill(&shadow, Color::BLACK.with_alpha(layer.alpha));
             }
         }
         let shape = RoundedRect::from_rect(bounds, self.radius);
@@ -217,11 +215,13 @@ enum Source {
 }
 
 /// A piece of text. It wraps when its box is narrower than the text.
+///
+/// It is drawn in [`Token::Text`](crate::Token::Text) unless
+/// [`Label::color`] says otherwise; the style's own color is not used.
 pub struct Label {
     source: Source,
     style: TextStyle,
-    /// Overrides the style's color, so the text follows the theme.
-    color: Option<Paint>,
+    color: Paint,
     /// The text, the width and the color it was laid out for.
     block: Option<(String, Option<f32>, Color, TextBlock)>,
     layout: Style,
@@ -233,23 +233,21 @@ impl Label {
         Self {
             source: Source::Fixed(text.into()),
             style,
-            color: None,
+            color: Paint::Token(crate::theme::Token::Text),
             block: None,
             layout: Style::default(),
         }
     }
 
-    /// Draws the text in `paint` instead of the style's color; with a
-    /// token, the text follows the theme.
+    /// Draws the text in `paint` (a token follows the theme).
     pub fn color(mut self, paint: impl Into<Paint>) -> Self {
-        self.color = Some(paint.into());
+        self.color = paint.into();
         self
     }
 
-    /// Changes the color (see [`Label::color`]), for labels made by
-    /// [`label`].
+    /// Changes the color.
     pub fn set_color(&mut self, paint: impl Into<Paint>) {
-        self.color = Some(paint.into());
+        self.color = paint.into();
     }
 
     /// Changes the text.
@@ -281,7 +279,7 @@ impl Label {
     /// (cheap) when only the width changes, as Taffy asks for several.
     fn block(&mut self, cx: &mut Cx<'_>, width: Option<f32>) -> &TextBlock {
         let text = self.text();
-        let color = self.color.map_or(self.style.color, Paint::current);
+        let color = self.color.current();
         match &mut self.block {
             Some((shaped, laid_for, shaped_color, block))
                 if *shaped == text && *shaped_color == color =>
@@ -310,14 +308,19 @@ fn unreachable_block() -> ! {
     panic!("Label::block always fills its cache")
 }
 
-/// Adds a label whose text `text` computes from signals; it re-lays out
-/// when they change.
-pub fn label(ui: &mut Ui, style: TextStyle, text: impl Fn() -> String + 'static) -> WidgetId {
+/// Adds a label in `color` whose text `text` computes from signals; it
+/// re-lays out when they change.
+pub fn label(
+    ui: &mut Ui,
+    style: TextStyle,
+    color: impl Into<Paint>,
+    text: impl Fn() -> String + 'static,
+) -> WidgetId {
     let text: Rc<dyn Fn() -> String> = Rc::new(text);
     let id = ui.add(Label {
         source: Source::Dynamic(text.clone()),
         style,
-        color: None,
+        color: color.into(),
         block: None,
         layout: Style::default(),
     });
@@ -381,8 +384,8 @@ impl ButtonColors {
         use crate::theme::Token;
         Self {
             background: Token::Accent.into(),
-            hover: Token::Accent.into(),
-            pressed: Token::Accent.into(),
+            hover: Token::AccentHover.into(),
+            pressed: Token::AccentPressed.into(),
             text: Token::OnAccent.into(),
             focus: Token::AccentInk.into(),
         }
@@ -429,6 +432,14 @@ impl Button {
     }
 }
 
+#[cfg(test)]
+impl Button {
+    /// The color the label was last shaped in.
+    pub(crate) fn label_color(&self) -> Option<Color> {
+        self.label.shaped_color()
+    }
+}
+
 impl Widget for Button {
     fn measure(
         &mut self,
@@ -453,11 +464,12 @@ impl Widget for Button {
         } else {
             self.colors.background
         };
-        let shape = RoundedRect::from_rect(bounds, 7.0);
+        let radius = theme.control_radius;
+        let shape = RoundedRect::from_rect(bounds, radius);
         scene.fill(&shape, background.resolve(&theme));
         if cx.is_focused() {
             scene.stroke(
-                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), 8.5),
+                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), radius + 1.5),
                 2.0,
                 self.colors.focus.resolve(&theme),
             );
@@ -650,7 +662,7 @@ impl Widget for TextInput {
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
         let theme = theme();
-        let shape = RoundedRect::from_rect(bounds, 8.0);
+        let shape = RoundedRect::from_rect(bounds, theme.control_radius);
         scene.fill(&shape, self.colors.background.resolve(&theme));
         if cx.is_focused() {
             scene.stroke(&shape, 2.0, self.colors.accent.resolve(&theme));

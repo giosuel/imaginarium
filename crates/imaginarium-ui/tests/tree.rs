@@ -164,7 +164,7 @@ fn a_label_follows_its_signal() {
     let mut fonts = Fonts::bundled_only();
     let mut ui = Ui::new();
     let count = signal(1);
-    let text = label(&mut ui, TextStyle::new(14.0), move || {
+    let text = label(&mut ui, TextStyle::new(14.0), Color::BLACK, move || {
         format!("{} items", count.get())
     });
     let row = ui.add_with_children(Flex::row().fill(), &[text]);
