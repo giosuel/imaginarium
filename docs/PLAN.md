@@ -503,6 +503,13 @@ Decided (2026-10-16):
   palette show as stored; text without a color of its own follows the
   theme.
 
+- **M3.2 overnight, stacked** (2026-10-16): "Yes, feel free to continue
+  with M3.3 if you're done early." The canvas PRs are stacked on the
+  M3.1 ones, so work doesn't wait for merges.
+- **Frame names are drawn on top of the tiles** (2026-10-16, canvas.md
+  §11): they keep the interface's size at every zoom, like the
+  selection.
+
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
 
