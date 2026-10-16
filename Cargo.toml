@@ -22,6 +22,7 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Members depend on each other via `name.workspace = true`.
+imaginarium-canvas = { path = "crates/imaginarium-canvas" }
 imaginarium-cli = { path = "crates/imaginarium-cli" }
 imaginarium-commands = { path = "crates/imaginarium-commands" }
 imaginarium-crypto = { path = "crates/imaginarium-crypto" }

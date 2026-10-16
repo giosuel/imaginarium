@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 /// The exact first line every `.rs` file must have.
 pub(crate) const HEADER: &str = "// SPDX-License-Identifier: AGPL-3.0-or-later";
 
+/// The first line of vendored third-party data (the Lucide icons), which
+/// isn't under the project's license.
+pub(crate) const VENDORED_HEADER: &str = "// SPDX-License-Identifier: ISC AND MIT";
+
+/// Files that carry [`VENDORED_HEADER`] instead, relative to the root.
+const VENDORED: &[&str] = &["crates/imaginarium-ui/src/icons/lucide.rs"];
+
 /// Directory names that are never scanned: build output, VCS data,
 /// generated artifacts and third-party code.
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "artifacts", "profiling"];
@@ -26,7 +33,12 @@ pub(crate) fn check(root: &Path) -> Result<Vec<PathBuf>, String> {
     files.sort();
     let mut missing = Vec::new();
     for file in files {
-        if !has_header(&file)? {
+        let vendored = VENDORED.iter().any(|path| {
+            file.strip_prefix(root)
+                .is_ok_and(|rel| rel == Path::new(path))
+        });
+        let header = if vendored { VENDORED_HEADER } else { HEADER };
+        if !has_header(&file, header)? {
             missing.push(file);
         }
     }
@@ -56,15 +68,15 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> 
     Ok(())
 }
 
-/// Whether the file's first line is exactly [`HEADER`] (a trailing `\r` is tolerated).
-fn has_header(file: &Path) -> Result<bool, String> {
+/// Whether the file's first line is exactly `header` (a trailing `\r` is tolerated).
+fn has_header(file: &Path, header: &str) -> Result<bool, String> {
     let handle =
         fs::File::open(file).map_err(|err| format!("cannot open {}: {err}", file.display()))?;
     let mut first = String::new();
     BufReader::new(handle)
         .read_line(&mut first)
         .map_err(|err| format!("cannot read {}: {err}", file.display()))?;
-    Ok(first.trim_end_matches(['\n', '\r']) == HEADER)
+    Ok(first.trim_end_matches(['\n', '\r']) == header)
 }
 
 #[cfg(test)]
