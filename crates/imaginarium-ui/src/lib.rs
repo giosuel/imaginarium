@@ -38,6 +38,9 @@
 //! - **Scrolling:** [`Scroll`] scrolls its content (wheel, touchpad, keys,
 //!   a scroll bar, the focus kept in view); [`VirtualList`] has widgets
 //!   only for the rows in view ([`Ui::add_virtual_list`]).
+//! - **Animation** ([`animation`]): short transitions with easing for
+//!   hover and press colors, layers fading in and keyboard scrolling, all
+//!   instant with reduced motion; nothing redraws once they arrive.
 //! - Accessibility: views describe themselves in an [`AccessTree`]; the
 //!   widget tree does it for its widgets ([`Widget::accessibility`]).
 //! - **Themes:** the interface's colors are [`Token`]s of a [`Theme`]
@@ -47,9 +50,10 @@
 //!   inside effects and memos.
 //!
 //! # Not here yet
-//! Drag and drop, and animation.
+//! Drag and drop.
 
 mod access;
+pub mod animation;
 mod clipboard;
 pub mod icons;
 mod layers;
