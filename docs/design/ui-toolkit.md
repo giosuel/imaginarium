@@ -102,6 +102,33 @@ computed once per keystroke when the list reads it. Per-frame data that
 must not cause frames (the status line's timings) is read from plain
 cells and refreshed with `Ui::refresh` during a frame.
 
+## Layers
+
+Popovers and menus, modal dialogs and tooltips are **layers**: extra roots
+above the window's root, in a stack (`layers.rs`, `Ui::open_layer`;
+`shell.md` §6). A layer's content is laid out at its own size (Taffy with
+max-content space), then placed next to its anchor: a widget (followed as
+it moves; the layer closes when it goes), a rectangle, a point or the
+window's center. It opens on the asked side, flips when only the other
+side fits, and stays 8 px inside the window.
+
+- **Input:** hit testing goes from the top layer down. Tooltips are
+  passed through; nothing below a modal is reached, and a click beside a
+  dialog does nothing, not even unfocus. A press outside the top popovers
+  closes them and is used up by that, so it doesn't also click what lies
+  below. `Esc`, when the focused widget doesn't use it, closes the top
+  dismissable layer. Keys without a focus go to the top dialog.
+- **Focus:** a popover or dialog takes the focus (its first focusable
+  widget) after its first layout, and gives it back to whatever had it
+  when it opened. Tab cycles inside the top dialog, or inside the layer
+  the focus is in.
+- **Closing:** `Ui::close_layer`, or `Cx::close_layer` from a widget in
+  it (a menu item that ran), closes it and the layers opened after it
+  (submenus), removes their widgets and runs their `on_close`.
+- **Painting and accessibility:** layers paint after the root, a dialog
+  over a scrim (`Token::Scrim`); their nodes are top-level nodes of the
+  window, after the root's.
+
 ## Themes
 
 The interface's colors are tokens of a `Theme` (`theme.rs`; values in
@@ -136,7 +163,7 @@ the tests now feed the updates to `accesskit_consumer`.
 
 ## Not yet
 
-Scroll containers, menus and popovers with their own layers, drag and
+Scroll containers, drag and
 drop, animation, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
 worker pool (PLAN §4.3). Access ids carry a widget's slot, not its

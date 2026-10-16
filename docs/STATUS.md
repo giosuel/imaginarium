@@ -11,10 +11,14 @@ Last updated: 2026-10-16
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.1 Toolkit additions**, the next piece: layers for
-  popovers and menus (outside clicks, Esc, focus return), then scroll
-  containers, icons and animation. Theme tokens are done (#38). M3.2 (the
-  canvas crate) can start alongside, in another crate.
+- **Next step:** **M3.1 Toolkit additions**, the next piece: scroll
+  containers with virtualized rows, then icons and animation. Theme
+  tokens (#38) and layers are done. M3.2 (the canvas crate) can start
+  alongside, in another crate.
+  - **The component gallery** (owner, 2026-10-16): every component in its
+    states, dark and light, before the shell uses it
+    (`crates/imaginarium-ui/examples/gallery.rs`). New components get a
+    section there, and their screenshots go to the owner.
   - M3.0 is done: the mockups (owner's design canvas, not committed),
     `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
     §5.6 (#37).
@@ -983,7 +987,10 @@ What M3 builds on:
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
 - [ ] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
-  - layers for popovers and menus: outside clicks, Esc, focus return;
+  - layers for popovers and menus: outside clicks, Esc, focus return
+    (done 2026-10-16: popovers, modal dialogs and tooltips, placed by
+    anchor with flipping, focus in and back, Tab kept inside; the gallery
+    example shows them);
   - scroll containers with virtualized rows;
   - animation (time-based, and off with reduced motion);
   - vector icons;
