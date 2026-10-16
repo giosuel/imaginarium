@@ -998,7 +998,8 @@ What M3 builds on:
     `Theme`, `Token` and `Paint` in `imaginarium-ui`, dark first, the
     widgets on tokens, a contrast test; the counter example switches
     themes live);
-  - access ids with generations (from M2.9).
+  - access ids with generations (from M2.9; done 2026-10-16: a late
+    screen reader request about a removed widget is refused).
 - [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
   - **Painting:**
     - shapes: rectangle (also rounded), ellipse, line, triangle and

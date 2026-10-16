@@ -28,12 +28,34 @@ pub struct WidgetId {
     generation: u32,
 }
 
+/// How a widget's accessibility node ids are laid out in 64 bits: the
+/// slot (index + 1) in the top 24 bits, the low 16 bits of its generation
+/// below that, and 24 bits for the widget's own extra nodes.
+const ACCESS_INDEX_SHIFT: u32 = 40;
+const ACCESS_GENERATION_SHIFT: u32 = 24;
+const ACCESS_GENERATION_MASK: u64 = 0xffff;
+/// Extra nodes a widget may number below its base (text runs, canvas
+/// items): 2²⁴ − 1.
+pub const ACCESS_LOCAL_IDS: u64 = (1 << ACCESS_GENERATION_SHIFT) - 1;
+
 impl WidgetId {
     /// The first accessibility node id of this widget. A widget's own node
-    /// is this; it may use the next 2³² − 1 ids for nodes of its own
-    /// (text runs, canvas items).
+    /// is this; it may use the next [`ACCESS_LOCAL_IDS`] ids for nodes of
+    /// its own (text runs, canvas items). The id carries the widget's
+    /// generation, so a screen reader's late request about a removed
+    /// widget can't reach the widget that took its slot.
     pub fn access_base(self) -> u64 {
-        (u64::from(self.index) + 1) << 32
+        debug_assert!(u64::from(self.index) + 1 < 1 << (64 - ACCESS_INDEX_SHIFT));
+        ((u64::from(self.index) + 1) << ACCESS_INDEX_SHIFT)
+            | ((u64::from(self.generation) & ACCESS_GENERATION_MASK) << ACCESS_GENERATION_SHIFT)
+    }
+
+    /// The widget an accessibility node id belongs to, as far as the id
+    /// says (its slot and generation bits).
+    fn from_access(node: u64) -> Option<(u32, u64)> {
+        let index = (node >> ACCESS_INDEX_SHIFT).checked_sub(1)?;
+        let generation = (node >> ACCESS_GENERATION_SHIFT) & ACCESS_GENERATION_MASK;
+        Some((u32::try_from(index).ok()?, generation))
     }
 }
 
@@ -1532,13 +1554,17 @@ impl Ui {
 
     /// Routes a screen reader's request to the widget owning the node.
     pub fn access_action(&mut self, fonts: &mut Fonts, request: &ActionRequest) -> bool {
-        let index = (request.target_node.0 >> 32).checked_sub(1);
-        let Some(index) = index.and_then(|index| u32::try_from(index).ok()) else {
+        let Some((index, generation)) = WidgetId::from_access(request.target_node.0) else {
             return false;
         };
         let Some(slot) = self.slots.get(index as usize) else {
             return false;
         };
+        // A late request about a removed widget names its old generation;
+        // the slot's new widget doesn't answer it.
+        if u64::from(slot.generation) & ACCESS_GENERATION_MASK != generation {
+            return false;
+        }
         let id = WidgetId {
             index,
             generation: slot.generation,

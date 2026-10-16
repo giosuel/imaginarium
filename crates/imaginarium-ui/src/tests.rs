@@ -1017,3 +1017,44 @@ fn icons_parse_their_paths_and_take_their_size() {
             .any(|(id, _)| *id == NodeId(icon.access_base()))
     );
 }
+
+#[test]
+fn a_late_screen_reader_request_cannot_reach_the_widget_in_a_reused_slot() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let old = ui.add(button(&clicks));
+    let root = ui.add_with_children(Flex::column().fill(), &[old]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let stale = NodeId(old.access_base());
+    ui.remove(old);
+    // The new button takes the freed slot.
+    let new = ui.add(button(&clicks));
+    ui.set_children(root, &[new]);
+    frame(&mut ui, &mut fonts);
+    assert_ne!(
+        stale,
+        NodeId(new.access_base()),
+        "same slot, other generation"
+    );
+    for action in [Action::Click, Action::Focus] {
+        let request = ActionRequest {
+            action,
+            target_node: stale,
+            target_tree: accesskit::TreeId::ROOT,
+            data: None,
+        };
+        assert!(!ui.access_action(&mut fonts, &request));
+    }
+    assert_eq!(clicks.get(), 0);
+    assert_ne!(ui.focused(), Some(new));
+    let fresh = ActionRequest {
+        action: Action::Click,
+        target_node: NodeId(new.access_base()),
+        target_tree: accesskit::TreeId::ROOT,
+        data: None,
+    };
+    assert!(ui.access_action(&mut fonts, &fresh));
+    assert_eq!(clicks.get(), 1);
+}

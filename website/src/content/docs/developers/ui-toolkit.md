@@ -282,9 +282,11 @@ Screen readers (Orca, NVDA, VoiceOver) get an accessibility tree through
 - A widget describes itself in `Widget::accessibility` by returning a
   `Node` with a role, label, bounds and actions. A widget that returns
   `None` is transparent: its children belong to its parent's node.
-- Node ids come from `WidgetId::access_base()`. A widget can add nodes of
-  its own below that id (text runs, canvas items, list options) and list
-  them with `Cx::add_access_child`.
+- Node ids come from `WidgetId::access_base()`, which carries the
+  widget's generation, so a late request about a removed widget is
+  refused. A widget can add up to `ACCESS_LOCAL_IDS` nodes of its own
+  below that id (text runs, canvas items, list options) and list them
+  with `Cx::add_access_child`.
 - After every frame, while a screen reader listens, the window sends the
   whole tree with its focus. A focus on a node that isn't in the tree
   falls back to the window, as AccessKit requires.

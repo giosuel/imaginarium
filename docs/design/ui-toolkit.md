@@ -159,8 +159,11 @@ offered accent.
 
 AccessKit through `accesskit_winit`. The tree builds one node per widget
 that returns one (`Widget::accessibility`); widgets without a node are
-transparent. Node ids are the widget's `access_base()` (index + 1 in the
-upper 32 bits), and a widget may add nodes of its own below it (text runs,
+transparent. Node ids are the widget's `access_base()`: its slot + 1 in
+the top 24 bits, the low 16 bits of its generation below that, so a late
+request about a removed widget doesn't reach the widget that took its
+slot. A widget may add `ACCESS_LOCAL_IDS` (2²⁴ − 1) nodes of its own below
+it (text runs,
 canvas items, list options). Bounds are logical pixels; the window node
 carries the scale factor. Requests from the screen reader go back to the
 widget owning the node; Focus is handled by the tree (only for a live,
@@ -179,7 +182,4 @@ the tests now feed the updates to `accesskit_consumer`.
 Scroll containers, drag and
 drop, animation, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
-worker pool (PLAN §4.3). Access ids carry a widget's slot, not its
-generation: a late screen reader request about a removed widget can reach
-the widget that took its slot (Focus is checked; the other actions
-aren't yet).
+worker pool (PLAN §4.3).
