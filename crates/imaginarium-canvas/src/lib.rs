@@ -25,20 +25,25 @@
 
 mod board;
 pub mod commands;
+mod copy;
 pub mod demo;
 mod gesture;
 mod hit;
 mod items;
+pub mod keys;
 mod paint;
 mod shapes;
 pub mod style;
 
 pub use board::{BoardCanvas, MAX_ZOOM, MIN_ZOOM};
+pub use copy::{NodeCopy, ParagraphCopy, RunCopy};
 pub use items::BoardColors;
 pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_commands;
 #[cfg(test)]
 mod tests_gesture;
 #[cfg(test)]

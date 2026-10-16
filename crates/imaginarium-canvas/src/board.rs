@@ -22,6 +22,9 @@ use imaginarium_ui::{
 };
 
 mod edit;
+mod ops;
+
+pub(crate) use ops::{DUPLICATE_OFFSET, Order};
 
 use edit::{Editing, FIELD_ACCESS};
 
@@ -136,6 +139,11 @@ pub struct BoardCanvas {
     grouped: bool,
     /// The text being edited in place.
     editing: Option<Editing>,
+    /// A node `text.edit` asked to edit, started when the fonts are at
+    /// hand (the next sync).
+    pending_edit: Option<NodeId>,
+    /// Shortcuts to the board's commands.
+    keymap: imaginarium_commands::Keymap,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
     /// The board's box in the last layout.
@@ -168,6 +176,8 @@ impl BoardCanvas {
             armed: None,
             grouped: false,
             editing: None,
+            pending_edit: None,
+            keymap: crate::keys::default_keymap(imaginarium_commands::Platform::current()),
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
@@ -484,6 +494,21 @@ impl BoardCanvas {
         self.armed = Some(screen);
     }
 
+    /// The board's shortcuts, to change them.
+    pub fn keymap_mut(&mut self) -> &mut imaginarium_commands::Keymap {
+        &mut self.keymap
+    }
+
+    /// Asks to edit the one selected node's text (`text.edit`); editing
+    /// starts at the next paint or input. `false` without one such node.
+    pub(crate) fn request_edit(&mut self) -> bool {
+        let [node] = self.selection.get_untracked()[..] else {
+            return false;
+        };
+        self.pending_edit = Some(node);
+        true
+    }
+
     /// Brings the board up to date with the document now (painting and
     /// input do it themselves): pending changes go onto the canvas.
     pub fn update(&mut self, fonts: &mut Fonts) {
@@ -610,6 +635,9 @@ impl BoardCanvas {
     /// current theme, with every pending change applied.
     fn sync(&mut self, fonts: &mut Fonts) {
         self.ensure_items(fonts);
+        if let Some(node) = self.pending_edit.take() {
+            self.start_editing(fonts, node, None);
+        }
         if self.pending.is_empty() {
             return;
         }
@@ -1217,16 +1245,17 @@ impl BoardCanvas {
         else {
             return false;
         };
+        // Shortcuts run the board's commands (the keymap); a command that
+        // can't run now leaves the key to the rest.
+        if let Some(press) = crate::keys::key_press(key, *modifiers)
+            && let Some(command) = self.keymap.command_for_press(press)
+            && commands::execute(self, command.as_str(), &imaginarium_commands::Args::new()).is_ok()
+        {
+            self.sync(cx.fonts());
+            cx.request_paint();
+            return true;
+        }
         match key {
-            Key::Enter if !modifiers.command() => {
-                // Enter edits the text of the one selected text box or shape.
-                let [node] = self.selection.get_untracked()[..] else {
-                    return false;
-                };
-                let started = self.start_editing(cx.fonts(), node, None);
-                cx.request_paint();
-                started
-            }
             Key::Escape => {
                 let had = !self.selection.get_untracked().is_empty() || self.entered.is_some();
                 // Out of an entered group, with the group selected.
@@ -1238,20 +1267,6 @@ impl BoardCanvas {
                 }
                 cx.request_paint();
                 had
-            }
-            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown
-                if !self.selection.with_untracked(Vec::is_empty) =>
-            {
-                let step = if modifiers.shift { 10.0 } else { 1.0 };
-                let (dx, dy) = match key {
-                    Key::ArrowLeft => (-step, 0.0),
-                    Key::ArrowRight => (step, 0.0),
-                    Key::ArrowUp => (0.0, -step),
-                    _ => (0.0, step),
-                };
-                let _ = commands::execute(self, "board.move", &move_args(dx, dy));
-                cx.request_paint();
-                true
             }
             Key::Tab if !modifiers.command() => {
                 let order = self.tab_order();
