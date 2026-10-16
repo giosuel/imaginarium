@@ -25,9 +25,10 @@ const TRACK: f64 = 12.0;
 const MIN_THUMB: f64 = 24.0;
 
 /// A container that scrolls its content vertically: the wheel and touchpad
-/// (the scroll goes on to an outer container at either end), Page Up and
-/// Page Down, a thin scroll bar to drag or click beside, and the focus,
-/// which it keeps in view. Its content is its child, laid out at its own
+/// (the scroll goes on to an outer container at either end), a thin scroll
+/// bar to drag, and the keyboard (Page Up and Down, Home and End: it takes
+/// the focus itself when a click inside lands on nothing focusable). It
+/// keeps the focus in view. Its content is its child, laid out at its own
 /// height.
 pub struct Scroll {
     style: Style,
@@ -155,7 +156,37 @@ impl Widget for Scroll {
     }
 
     fn claims(&self, bounds: Rect, content: Size, point: Point) -> bool {
-        Self::max_offset(bounds, content) > 0.0 && point.x >= bounds.x1 - TRACK
+        // Only the thumb, widened to a comfortable target: the rest of the
+        // right edge belongs to the content.
+        self.thumb(bounds, content).is_some_and(|thumb| {
+            point.x >= bounds.x1 - TRACK && point.y >= thumb.y0 && point.y <= thumb.y1
+        })
+    }
+
+    fn focusable(&self) -> bool {
+        true
+    }
+
+    fn placed(&mut self, bounds: Rect, content: Size) {
+        // Content that shrank, or an offset set past the end: in range
+        // before the children are placed.
+        self.offset = self.offset.clamp(0.0, Self::max_offset(bounds, content));
+    }
+
+    fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+        // The tree only makes it the hover target over its thumb.
+        self.over_bar = hovered;
+        cx.request_paint();
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn capture_lost(&mut self, cx: &mut Cx<'_>) {
+        if self.drag.take().is_some() {
+            cx.request_paint();
+        }
     }
 
     fn paints_over(&self) -> bool {
@@ -163,11 +194,9 @@ impl Widget for Scroll {
     }
 
     fn paint_over(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
-        // Content that shrank since the last scroll: stay in range.
-        let max = Self::max_offset(cx.bounds(), cx.content_size());
-        if self.offset > max {
-            self.offset = max;
-            cx.request_place();
+        if cx.is_focus_visible() {
+            let ring = RoundedRect::from_rect(cx.bounds().inset(-1.0), 6.0);
+            scene.stroke(&ring, 2.0, theme().color(Token::AccentInk));
         }
         if let Some(thumb) = self.thumb(cx.bounds(), cx.content_size()) {
             let strong = self.drag.is_some() || self.over_bar;
@@ -186,33 +215,32 @@ impl Widget for Scroll {
             Input::Scroll {
                 delta, modifiers, ..
             } if !modifiers.command() => self.scroll_to(cx, self.offset - delta.y),
+            // A press on the thumb (the only part it claims) starts a drag.
             Input::PointerButton {
                 primary: true,
                 pressed: true,
                 position,
                 ..
-            } if position.x >= bounds.x1 - TRACK => {
-                match self.thumb(bounds, cx.content_size()) {
-                    Some(thumb) if position.y >= thumb.y0 && position.y <= thumb.y1 => {
-                        self.drag = Some((position.y, self.offset));
-                        cx.request_paint();
-                    }
-                    // Beside the thumb: a page toward the click.
-                    Some(thumb) => {
-                        let page = bounds.height() * 0.9;
-                        let toward = if position.y < thumb.y0 { -page } else { page };
-                        self.scroll_to(cx, self.offset + toward);
-                    }
-                    None => return false,
-                }
+            } if self.thumb(bounds, cx.content_size()).is_some_and(|thumb| {
+                position.x >= bounds.x1 - TRACK
+                    && thumb.contains(Point::new(thumb.center().x, position.y))
+            }) =>
+            {
+                self.drag = Some((position.y, self.offset));
+                cx.request_paint();
                 true
             }
-            Input::PointerButton { pressed: false, .. } if self.drag.is_some() => {
+            // Only the button that started it ends it.
+            Input::PointerButton {
+                primary: true,
+                pressed: false,
+                ..
+            } if self.drag.is_some() => {
                 self.drag = None;
                 cx.request_paint();
                 true
             }
-            Input::PointerMoved(position) => {
+            Input::PointerMoved(position) if self.drag.is_some() => {
                 if let Some((start, from)) = self.drag {
                     let content = cx.content_size();
                     if let Some(thumb) = self.thumb(bounds, content) {
@@ -220,19 +248,8 @@ impl Widget for Scroll {
                         let per_pixel = Self::max_offset(bounds, content) / travel;
                         self.scroll_to(cx, from + (position.y - start) * per_pixel);
                     }
-                    return true;
                 }
-                let over = position.x >= bounds.x1 - TRACK && bounds.contains(*position);
-                if over != self.over_bar {
-                    self.over_bar = over;
-                    cx.request_paint();
-                }
-                false
-            }
-            Input::PointerLeft if self.over_bar => {
-                self.over_bar = false;
-                cx.request_paint();
-                false
+                true
             }
             // Keys that the focused widget inside didn't use.
             Input::Key {
@@ -264,8 +281,20 @@ impl Widget for Scroll {
         self.scroll_to(cx, offset)
     }
 
+    fn access_action(&mut self, cx: &mut Cx<'_>, request: &accesskit::ActionRequest) -> bool {
+        let page = cx.bounds().height() * 0.9;
+        match request.action {
+            accesskit::Action::ScrollDown => self.scroll_to(cx, self.offset + page),
+            accesskit::Action::ScrollUp => self.scroll_to(cx, self.offset - page),
+            _ => false,
+        }
+    }
+
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         let mut node = Node::new(Role::ScrollView);
+        node.set_clips_children();
+        node.add_action(accesskit::Action::ScrollUp);
+        node.add_action(accesskit::Action::ScrollDown);
         if let Some(label) = &self.label {
             node.set_label(label.clone());
         }
@@ -284,6 +313,11 @@ pub type RowBuilder = Box<dyn FnMut(&mut Ui, usize) -> WidgetId>;
 /// rows in view (and a few around them) exist as widgets: the tree builds
 /// them during layout with `build` and removes them when they scroll away,
 /// so 10,000 rows cost what 20 do. Add it with [`Ui::add_virtual_list`].
+///
+/// The count closure is also the list's data dependency: when a signal it
+/// reads changes, every row is built again, so rows show new data even
+/// when the count stays the same. Layout works in `f32`, so rows stay
+/// exact up to about 500,000 rows of 30 px.
 pub struct VirtualList {
     pub(crate) row_height: f64,
     pub(crate) overscan: usize,
@@ -301,8 +335,17 @@ impl VirtualList {
         count: impl Fn() -> usize + 'static,
         build: impl FnMut(&mut Ui, usize) -> WidgetId + 'static,
     ) -> Self {
+        debug_assert!(
+            row_height.is_finite() && row_height > 0.0,
+            "rows need a height"
+        );
         Self {
-            row_height,
+            // A degenerate height would make every row index infinite.
+            row_height: if row_height.is_finite() {
+                row_height.max(1.0)
+            } else {
+                1.0
+            },
             overscan: 4,
             count: Rc::new(count),
             build: Box::new(build),

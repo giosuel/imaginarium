@@ -212,8 +212,9 @@ let results = ui.add_virtual_list(
 ui.scroll_to_row(results, selected); // keep the selection in view
 ```
 
-Rows have one height. The count closure may read signals, and the list
-updates when they change.
+Rows have one height. The count closure is the list's data dependency:
+when a signal it reads changes, the list rebuilds its rows, so read the
+data there (not only its length in a separate signal).
 
 ## Component gallery
 

@@ -149,11 +149,17 @@ placed shifted by `Widget::scroll_offset`, so their boxes, hit testing and
 accessibility stay in window coordinates, and a scroll only places the
 boxes again (`Cx::request_place`; Taffy's cache keeps the layout). It
 takes the wheel and touchpad (not with Ctrl, which zooms) and hands a
-scroll on at either end, takes Page Up and Down and, when nothing inside
-uses them, Home and End; a thin bar over the content (`Widget::claims`
-and `paint_over`) is dragged, or clicked beside for a page. When the focus
+scroll on at either end. It is focusable, so a click on plain content in
+it gives it the keys: Page Up and Down, and Home and End when nothing
+inside uses them. A thin bar is drawn over the content (`paint_over`);
+only the thumb takes the pointer (`Widget::claims`), the rest of the edge
+belongs to the rows, and only the primary button's release (or the tree
+taking the capture away, `Widget::capture_lost`) ends a drag. The offset
+is kept in range as the box is placed (`Widget::placed`). When the focus
 moves, every scroll container around it brings it into view
-(`Widget::reveal`, `Ui::reveal`).
+(`Widget::reveal`, `Ui::reveal`). Screen readers get a `ScrollView` with
+its offset, and the scroll up and down actions. The content size counts
+the children's margins and the container's padding and border.
 
 `VirtualList` (`Ui::add_virtual_list`) is a `Scroll` over rows of one
 height that exist only while in view, plus an overscan: during layout the
@@ -161,7 +167,12 @@ tree builds the rows that came into view with the list's builder and
 removes those that left, behind a spacer as tall as the rows above (rows
 are in flow, not absolutely placed: Taffy's cached list of out-of-flow
 children went stale as rows came and went). The count is a closure, so a
-signal it reads updates the list. Rows are `ListItem`s with their position
+signal it reads updates the list, and rebuilds every row, since rows
+usually read the same data. `scroll_to_row` waits for the list's height.
+A row that holds the focus or a drag when it scrolls away hands them to
+the list. Lists in layers are filled in the same layout as the layer.
+Layout is `f32`: rows stay exact up to about 500,000 rows of 30 px. Rows
+are `ListItem`s with their position
 and the list's full length, so screen readers hear "5 of 10,000".
 `benches/list.rs`: a wheel step on 100,000 rows takes about 0.12 ms, a
 jump far away about 1.1 ms (this VM).
@@ -203,7 +214,6 @@ the tests now feed the updates to `accesskit_consumer`.
 
 ## Not yet
 
-Scroll containers, drag and
-drop, animation, incremental accessibility updates (the whole tree is sent
+Drag and drop, animation, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
 worker pool (PLAN §4.3).

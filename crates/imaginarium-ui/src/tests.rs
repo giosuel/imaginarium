@@ -1141,33 +1141,58 @@ fn the_focus_scrolls_into_view() {
 }
 
 #[test]
-fn the_scroll_bar_pages_and_drags() {
+fn the_scroll_bar_drags_and_leaves_the_rest_of_the_edge_to_the_rows() {
     use crate::scroll::Scroll;
+    /// A full-width row that counts presses.
+    struct Row(Rc<Cell<u32>>);
+    impl Widget for Row {
+        fn style(&self) -> taffy::Style {
+            taffy::Style {
+                size: taffy::Size {
+                    width: taffy::prelude::percent(1.0),
+                    height: length(40.0),
+                },
+                ..taffy::Style::default()
+            }
+        }
+        fn event(&mut self, _cx: &mut Cx<'_>, input: &Input) -> bool {
+            if let Input::PointerButton { pressed: true, .. } = input {
+                self.0.set(self.0.get() + 1);
+                return true;
+            }
+            false
+        }
+    }
     let mut fonts = Fonts::bundled_only();
     let mut ui = Ui::new();
     let clicks = Rc::new(Cell::new(0));
-    let (scroll, _) = scroller(&mut ui, &clicks);
+    let rows: Vec<WidgetId> = (0..10).map(|_| ui.add(Row(clicks.clone()))).collect();
+    let content = ui.add_with_children(Flex::column(), &rows);
+    let scroll = ui.add_with_children(Scroll::new().height(100.0), &[content]);
+    let root = ui.add_with_children(Flex::column().fill(), &[scroll]);
+    ui.set_root(root);
     frame(&mut ui, &mut fonts);
     let view = ui.bounds(scroll).unwrap();
-    // Beside the thumb (it is at the top): a page down.
-    let track = Point::new(view.x1 - 5.0, view.y1 - 5.0);
-    ui.input(&mut fonts, &pointer(track, true, true));
-    ui.input(&mut fonts, &pointer(track, true, false));
-    frame(&mut ui, &mut fonts);
-    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 90.0);
-    assert_eq!(
-        clicks.get(),
-        0,
-        "the bar took the press, not the row under it"
-    );
+    // Below the thumb (it is at the top), the edge belongs to the row.
+    let edge = Point::new(view.x1 - 5.0, ui.bounds(rows[1]).unwrap().center().y);
+    ui.input(&mut fonts, &pointer(edge, true, true));
+    ui.input(&mut fonts, &pointer(edge, true, false));
+    assert_eq!(clicks.get(), 1);
     // Drag the thumb to the bottom.
-    let offset = ui.widget::<Scroll>(scroll).unwrap().offset();
-    let thumb_top = view.y0 + (100.0 - 25.0) * offset / 300.0 + 2.0;
-    let grab = Point::new(view.x1 - 5.0, thumb_top);
+    let grab = Point::new(view.x1 - 5.0, view.y0 + 4.0);
     ui.input(&mut fonts, &pointer(grab, true, true));
     ui.input(
         &mut fonts,
         &Input::PointerMoved(Point::new(grab.x, view.y1 + 200.0)),
+    );
+    // A right-button release doesn't end a left drag.
+    ui.input(
+        &mut fonts,
+        &pointer(Point::new(grab.x, view.y1 + 200.0), false, false),
+    );
+    ui.input(
+        &mut fonts,
+        &Input::PointerMoved(Point::new(grab.x, view.y1 + 210.0)),
     );
     ui.input(
         &mut fonts,
@@ -1175,6 +1200,72 @@ fn the_scroll_bar_pages_and_drags() {
     );
     frame(&mut ui, &mut fonts);
     assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 300.0);
+    assert_eq!(clicks.get(), 1, "the drag clicked nothing");
+}
+
+#[test]
+fn a_drag_ends_when_the_window_loses_the_focus() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (scroll, _) = scroller(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let view = ui.bounds(scroll).unwrap();
+    let grab = Point::new(view.x1 - 5.0, view.y0 + 4.0);
+    ui.input(&mut fonts, &pointer(grab, true, true));
+    ui.input(&mut fonts, &Input::WindowFocus(false));
+    // The button came up in another window; moving over the list scrolls nothing.
+    ui.input(
+        &mut fonts,
+        &Input::PointerMoved(Point::new(grab.x - 40.0, view.y1 - 5.0)),
+    );
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 0.0);
+}
+
+#[test]
+fn page_keys_reach_a_scroll_after_a_click_on_plain_content() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let rows: Vec<WidgetId> = (0..10).map(|_| ui.add(Flex::row().height(40.0))).collect();
+    let content = ui.add_with_children(Flex::column(), &rows);
+    let scroll = ui.add_with_children(Scroll::new().height(100.0), &[content]);
+    let root = ui.add_with_children(Flex::column().fill(), &[scroll]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(rows[0]).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(ui.focused(), Some(scroll));
+    ui.input(&mut fonts, &key(Key::PageDown));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 90.0);
+}
+
+#[test]
+fn padding_at_the_end_can_be_scrolled_to() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let block = ui.add(Flex::row().height(200.0));
+    let content = ui.add_with_children(Flex::column(), &[block]);
+    let scroll = ui.add_with_children(
+        Scroll::new().height(100.0).style(|style| {
+            style.padding.top = length(30.0);
+            style.padding.bottom = length(30.0);
+        }),
+        &[content],
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[scroll]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    ui.input(&mut fonts, &key(Key::End));
+    ui.set_focus(&mut fonts, Some(scroll));
+    ui.input(&mut fonts, &key(Key::End));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 260.0 - 100.0);
 }
 
 #[test]
@@ -1231,4 +1322,120 @@ fn a_virtual_list_builds_only_the_rows_in_view() {
     frame(&mut ui, &mut fonts);
     assert!(ui.widget::<Scroll>(list).unwrap().offset() <= 20.0 * 30.0 - 300.0 + 0.5);
     assert!(ui.stats().widgets <= 4 + 20 * 2);
+}
+
+/// A list of `count` rows whose labels show `data`.
+fn data_list(ui: &mut Ui, data: imaginarium_reactive::Signal<Vec<String>>) -> WidgetId {
+    use crate::scroll::{Scroll, VirtualList};
+    use crate::widgets::Label;
+    ui.add_virtual_list(
+        VirtualList::new(
+            30.0,
+            move || data.with(Vec::len),
+            move |ui, row| {
+                let text = data.with_untracked(|rows| rows[row].clone());
+                ui.add(Label::new(text, TextStyle::new(13.0)))
+            },
+        ),
+        Scroll::new().height(300.0),
+    )
+}
+
+fn label_texts(ui: &mut Ui, fonts: &mut Fonts) -> Vec<String> {
+    let update = check_access(ui, fonts);
+    update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == accesskit::Role::Label)
+        .filter_map(|(_, node)| node.value().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn rows_show_new_data_even_at_the_same_count() {
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let data = signal((0..100).map(|i| format!("old {i}")).collect::<Vec<_>>());
+    let list = data_list(&mut ui, data);
+    let root = ui.add_with_children(Flex::column().fill(), &[list]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    assert!(label_texts(&mut ui, &mut fonts).contains(&"old 0".to_owned()));
+    data.set((0..100).map(|i| format!("new {i}")).collect());
+    frame(&mut ui, &mut fonts);
+    let texts = label_texts(&mut ui, &mut fonts);
+    assert!(texts.contains(&"new 0".to_owned()), "{texts:?}");
+    assert!(!texts.iter().any(|text| text.starts_with("old")));
+}
+
+#[test]
+fn a_list_in_a_layer_fills_on_first_open_and_scrolls_to_its_row() {
+    use crate::layers::LayerOptions;
+    use crate::scroll::Scroll;
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let root = ui.add(Flex::column().fill());
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let data = signal((0..1000).map(|i| format!("row {i}")).collect::<Vec<_>>());
+    let list = data_list(&mut ui, data);
+    let panel = ui.add_with_children(Flex::column().width(300.0), &[list]);
+    // Before its first layout.
+    ui.scroll_to_row(list, 0);
+    ui.open_layer(panel, LayerOptions::modal());
+    frame(&mut ui, &mut fonts);
+    let texts = label_texts(&mut ui, &mut fonts);
+    assert!(
+        texts.len() >= 10,
+        "a screenful, not just the overscan: {}",
+        texts.len()
+    );
+    assert!(texts.contains(&"row 0".to_owned()), "row 0 is in view");
+    assert_eq!(ui.widget::<Scroll>(list).unwrap().offset(), 0.0);
+}
+
+#[test]
+fn a_list_that_shrinks_shows_rows_in_the_same_frame() {
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let data = signal((0..1000).map(|i| format!("row {i}")).collect::<Vec<_>>());
+    let list = data_list(&mut ui, data);
+    let root = ui.add_with_children(Flex::column().fill(), &[list]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    ui.scroll_to_row(list, 900);
+    frame(&mut ui, &mut fonts);
+    data.set((0..20).map(|i| format!("row {i}")).collect());
+    frame(&mut ui, &mut fonts);
+    let texts = label_texts(&mut ui, &mut fonts);
+    assert!(texts.len() >= 10, "{texts:?}");
+}
+
+#[test]
+fn a_focused_row_scrolled_away_leaves_the_focus_with_its_list() {
+    use crate::scroll::{Scroll, VirtualList};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let list = ui.add_virtual_list(
+        VirtualList::new(30.0, || 1000, {
+            let clicks = clicks.clone();
+            move |ui, _row| ui.add(button(&clicks))
+        }),
+        Scroll::new().height(300.0),
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[list]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    ui.focus_next(&mut fonts, true); // the list itself
+    ui.focus_next(&mut fonts, true); // its first row's button
+    let row_button = ui.focused().unwrap();
+    assert_ne!(row_button, list);
+    ui.scroll_to_row(list, 900);
+    frame(&mut ui, &mut fonts);
+    assert!(ui.bounds(row_button).is_none(), "the row is gone");
+    assert_eq!(ui.focused(), Some(list), "keys still reach the list");
 }

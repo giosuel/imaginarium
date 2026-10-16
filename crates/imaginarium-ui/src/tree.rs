@@ -140,6 +140,18 @@ pub trait Widget: Any {
         let _ = (cx, scene);
     }
 
+    /// Its box and content size after a layout, before its children are
+    /// placed (a scroll container keeps its offset in range here).
+    fn placed(&mut self, bounds: Rect, content: Size) {
+        let _ = (bounds, content);
+    }
+
+    /// The tree took the pointer capture away (the window lost the focus,
+    /// a dialog opened): a drag in progress ends.
+    fn capture_lost(&mut self, cx: &mut Cx<'_>) {
+        let _ = cx;
+    }
+
     /// Asked to bring `target` (window coordinates, a descendant's box)
     /// into view, as when the focus moves to it. `true` if it moved.
     fn reveal(&mut self, cx: &mut Cx<'_>, target: Rect) -> bool {
@@ -362,6 +374,11 @@ struct ListState {
     build: Option<crate::scroll::RowBuilder>,
     /// Built rows: index → their slot.
     rows: std::collections::BTreeMap<usize, WidgetId>,
+    /// Something the count closure reads changed: rebuild the rows, whose
+    /// content may come from the same data.
+    stale: std::rc::Rc<std::cell::Cell<bool>>,
+    /// A row to bring into view once the view has a height.
+    pending_row: Option<usize>,
 }
 
 /// An open layer: its content's root and how it behaves.
@@ -666,8 +683,11 @@ impl Ui {
         );
         let id = self.add_with_children(scroll, &[body]);
         let watched = list.count.clone();
+        let stale = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mark = stale.clone();
         self.watch(id, true, move || {
             watched();
+            mark.set(true);
         });
         self.lists.push(ListState {
             scroll: id,
@@ -678,139 +698,226 @@ impl Ui {
             count: list.count,
             build: Some(list.build),
             rows: std::collections::BTreeMap::new(),
+            stale,
+            pending_row: None,
         });
         self.layout_dirty = true;
         id
     }
 
     /// Scrolls the list in `scroll` (from [`Ui::add_virtual_list`]) so its
-    /// row `index` is in view (the palette's selection moving with ↑↓).
+    /// row `index` is in view (the palette's selection moving with ↑↓), at
+    /// the next layout, once the list's height is known.
     pub fn scroll_to_row(&mut self, scroll: WidgetId, index: usize) {
-        let Some(list) = self.lists.iter().find(|list| list.scroll == scroll) else {
-            return;
-        };
-        let row_height = list.row_height;
-        let Some(view) = self.node(scroll).map(|node| node.bounds.height()) else {
-            return;
-        };
-        let Some(widget) = self.widget_mut::<crate::scroll::Scroll>(scroll) else {
-            return;
-        };
-        let (top, bottom) = (index as f64 * row_height, (index + 1) as f64 * row_height);
-        let offset = widget.offset();
-        if top < offset {
-            widget.set_offset(top);
-        } else if bottom > offset + view {
-            widget.set_offset(bottom - view);
+        if let Some(list) = self.lists.iter_mut().find(|list| list.scroll == scroll) {
+            list.pending_row = Some(index);
+            self.layout_dirty = true;
+            request_frame();
+        }
+    }
+
+    fn scroll_widget(&mut self, scroll: WidgetId) -> Option<&mut crate::scroll::Scroll> {
+        self.node_mut(scroll).and_then(|node| {
+            (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::Scroll>()
+        })
+    }
+
+    /// Whether `ancestor` is `id` or one of its ancestors.
+    fn contains(&self, ancestor: WidgetId, id: WidgetId) -> bool {
+        let mut current = Some(id);
+        while let Some(at) = current {
+            if at == ancestor {
+                return true;
+            }
+            current = self.node(at).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// Takes the pointer capture away, telling its holder.
+    fn drop_capture(&mut self, fonts: &mut Fonts) {
+        self.implicit_capture = false;
+        if let Some(held) = self.capture.take() {
+            self.call(fonts, held, |widget, cx| widget.capture_lost(cx));
         }
     }
 
     /// Builds the rows that came into view and removes those far out of it,
     /// in every list. `true` if any row came or went.
-    fn update_lists(&mut self) -> bool {
-        let mut changed = false;
-        for index in 0..self.lists.len() {
-            let (scroll, body, spacer, row_height, overscan) = {
-                let list = &self.lists[index];
+    fn update_lists(&mut self, fonts: &mut Fonts) -> bool {
+        let mut any = false;
+        let scrolls: Vec<WidgetId> = self.lists.iter().map(|list| list.scroll).collect();
+        for scroll in scrolls {
+            any |= self.update_list(fonts, scroll);
+        }
+        any
+    }
+
+    fn list(&self, scroll: WidgetId) -> Option<&ListState> {
+        self.lists.iter().find(|list| list.scroll == scroll)
+    }
+
+    fn list_mut(&mut self, scroll: WidgetId) -> Option<&mut ListState> {
+        self.lists.iter_mut().find(|list| list.scroll == scroll)
+    }
+
+    fn built_rows(&self, scroll: WidgetId) -> Vec<WidgetId> {
+        self.list(scroll)
+            .map(|list| list.rows.values().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// One list's rows. The list is looked up by its scroll id each time:
+    /// its builder gets the tree and may add or remove lists.
+    fn update_list(&mut self, fonts: &mut Fonts, scroll: WidgetId) -> bool {
+        let Some((body, spacer, row_height, overscan, count_of, stale)) =
+            self.list(scroll).map(|list| {
                 (
-                    list.scroll,
                     list.body,
                     list.spacer,
                     list.row_height,
                     list.overscan,
+                    list.count.clone(),
+                    list.stale.clone(),
                 )
-            };
-            let count = imaginarium_reactive::untrack(|| (self.lists[index].count)());
-            let Some(view) = self.node(scroll).map(|node| node.bounds.height()) else {
-                continue;
-            };
-            let offset = self
-                .widget::<crate::scroll::Scroll>(scroll)
-                .map_or(0.0, crate::scroll::Scroll::offset);
-            // Before the first layout the view has no height: build a
-            // screenful's worth of overscan only.
-            let first = ((offset / row_height).floor() as usize).saturating_sub(overscan);
-            let last = (((offset + view) / row_height).ceil() as usize + overscan).min(count);
-            let wanted = first.min(last)..last;
-            // The body's height and the rows' set size follow the count.
-            if let Some(body_widget) = self.node_mut(body).and_then(|node| {
-                (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListBody>()
-            }) && body_widget.count != count
-            {
-                body_widget.count = count;
-                body_widget.height = row_height * count as f64;
-                self.mark(body, true);
-                let slots: Vec<WidgetId> = self.lists[index].rows.values().copied().collect();
-                for slot in slots {
-                    if let Some(row) = self.node_mut(slot).and_then(|node| {
-                        (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::RowSlot>()
-                    }) {
-                        row.count = count;
-                    }
+            })
+        else {
+            return false;
+        };
+        let count = imaginarium_reactive::untrack(|| count_of());
+        let Some(view) = self.node(scroll).map(|node| node.bounds.height()) else {
+            return false;
+        };
+        let mut changed = false;
+        // A row asked for comes into view once the view has a height.
+        if view > 0.0
+            && let Some(row) = self
+                .list_mut(scroll)
+                .and_then(|list| list.pending_row.take())
+            && let Some(widget) = self.scroll_widget(scroll)
+        {
+            let (top, bottom) = (row as f64 * row_height, (row + 1) as f64 * row_height);
+            let offset = widget.offset();
+            if top < offset {
+                widget.set_offset(top);
+            } else if bottom > offset + view {
+                widget.set_offset(bottom - view);
+            }
+        }
+        // In range before the rows are chosen, so a list that shrank keeps
+        // rows in view.
+        let max = (count as f64 * row_height - view).max(0.0);
+        let offset = self.scroll_widget(scroll).map_or(0.0, |widget| {
+            let clamped = widget.offset().min(max);
+            widget.set_offset(clamped);
+            clamped
+        });
+        let first = ((offset / row_height).floor() as usize).saturating_sub(overscan);
+        let end = ((offset + view) / row_height)
+            .ceil()
+            .clamp(0.0, count as f64) as usize;
+        let last = end.saturating_add(overscan).min(count);
+        let wanted = first.min(last)..last;
+        // The body's height and the rows' set size follow the count.
+        if let Some(body_widget) = self.node_mut(body).and_then(|node| {
+            (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListBody>()
+        }) && body_widget.count != count
+        {
+            body_widget.count = count;
+            body_widget.height = row_height * count as f64;
+            self.mark(body, true);
+            for slot in self.built_rows(scroll) {
+                if let Some(row) = self.node_mut(slot).and_then(|node| {
+                    (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::RowSlot>()
+                }) {
+                    row.count = count;
                 }
             }
-            let gone: Vec<usize> = self.lists[index]
-                .rows
-                .keys()
-                .copied()
-                .filter(|row| !wanted.contains(row))
-                .collect();
-            if !gone.is_empty() {
-                let removed: Vec<WidgetId> = gone
+        }
+        // New data: every row is built again from it.
+        let rebuild = stale.replace(false);
+        let gone: Vec<usize> = self
+            .list(scroll)
+            .map(|list| {
+                list.rows
+                    .keys()
+                    .copied()
+                    .filter(|row| rebuild || !wanted.contains(row))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !gone.is_empty() {
+            let removed: Vec<WidgetId> = match self.list_mut(scroll) {
+                Some(list) => gone
                     .iter()
-                    .filter_map(|row| self.lists[index].rows.remove(row))
-                    .collect();
-                // Detached from the body first: removing a subtree assumes
-                // its parent is going too.
-                let kept: Vec<WidgetId> = std::iter::once(spacer)
-                    .chain(self.lists[index].rows.values().copied())
-                    .collect();
-                self.set_children(body, &kept);
-                for slot in removed {
-                    self.remove_subtree(slot);
-                }
-                changed = true;
-            }
-            let missing: Vec<usize> = wanted
-                .filter(|row| !self.lists[index].rows.contains_key(row))
+                    .filter_map(|row| list.rows.remove(row))
+                    .collect(),
+                None => Vec::new(),
+            };
+            // Detached from the body first: removing a subtree assumes its
+            // parent is going too.
+            let kept: Vec<WidgetId> = std::iter::once(spacer)
+                .chain(self.built_rows(scroll))
                 .collect();
-            if !missing.is_empty()
-                && let Some(mut build) = self.lists[index].build.take()
-            {
-                for row in missing {
-                    let content = build(self, row);
-                    let slot = self.add_with_children(
-                        crate::scroll::RowSlot {
-                            index: row,
-                            count,
-                            height: row_height,
-                        },
-                        &[content],
-                    );
-                    // The builder may have changed the lists (it got the
-                    // tree), so look this one up again.
-                    if let Some(list) = self.lists.get_mut(index) {
+            self.set_children(body, &kept);
+            for slot in removed {
+                // A row with the focus or a drag in it hands them to the
+                // list, rather than dropping them where keys can't follow.
+                if self.capture.is_some_and(|held| self.contains(slot, held)) {
+                    self.drop_capture(fonts);
+                }
+                if self.focus.is_some_and(|focus| self.contains(slot, focus)) {
+                    self.set_focus(fonts, Some(scroll));
+                }
+                self.remove_subtree(slot);
+            }
+            changed = true;
+        }
+        let missing: Vec<usize> = self
+            .list(scroll)
+            .map(|list| wanted.filter(|row| !list.rows.contains_key(row)).collect())
+            .unwrap_or_default();
+        if !missing.is_empty()
+            && let Some(mut build) = self.list_mut(scroll).and_then(|list| list.build.take())
+        {
+            for row in missing {
+                let content = build(self, row);
+                let slot = self.add_with_children(
+                    crate::scroll::RowSlot {
+                        index: row,
+                        count,
+                        height: row_height,
+                    },
+                    &[content],
+                );
+                match self.list_mut(scroll) {
+                    Some(list) => {
                         list.rows.insert(row, slot);
                     }
+                    // The builder removed its own list.
+                    None => self.remove_subtree(slot),
                 }
-                if let Some(list) = self.lists.get_mut(index) {
-                    list.build = Some(build);
-                }
-                changed = true;
             }
-            if changed {
-                let first_built = self.lists[index].rows.keys().next().copied().unwrap_or(0);
-                if let Some(space) = self.node_mut(spacer).and_then(|node| {
-                    (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListSpacer>()
-                }) {
-                    space.height = first_built as f64 * row_height;
-                }
-                self.mark(spacer, true);
-                let children: Vec<WidgetId> = std::iter::once(spacer)
-                    .chain(self.lists[index].rows.values().copied())
-                    .collect();
-                self.set_children(body, &children);
+            if let Some(list) = self.list_mut(scroll) {
+                list.build = Some(build);
             }
+            changed = true;
+        }
+        if changed && self.list(scroll).is_some() {
+            let first_built = self
+                .list(scroll)
+                .and_then(|list| list.rows.keys().next().copied())
+                .unwrap_or(0);
+            if let Some(space) = self.node_mut(spacer).and_then(|node| {
+                (&mut *node.widget as &mut dyn Any).downcast_mut::<crate::scroll::ListSpacer>()
+            }) {
+                space.height = first_built as f64 * row_height;
+            }
+            self.mark(spacer, true);
+            let children: Vec<WidgetId> = std::iter::once(spacer)
+                .chain(self.built_rows(scroll))
+                .collect();
+            self.set_children(body, &children);
         }
         changed
     }
@@ -1141,7 +1248,7 @@ impl Ui {
         // show other rows than the last one did, so they look again after
         // placing, at most once more.
         for pass in 0..2 {
-            let changed = self.update_lists();
+            let changed = self.update_lists(fonts);
             if pass == 1 && !changed {
                 break;
             }
@@ -1155,11 +1262,13 @@ impl Ui {
                 self.compute(fonts, root_layout, available);
                 self.place(root, area.origin());
             }
+            // Lists in layers too: they are laid out in every pass.
+            self.layout_layers(fonts, area);
             if self.lists.is_empty() {
                 break;
             }
         }
-        self.layout_layers(fonts, area);
+
         if self.focus.is_none()
             && let Some(back) = self.pending_return.take()
             && self.is_shown(back)
@@ -1178,7 +1287,7 @@ impl Ui {
         if let Some(capture) = self.capture
             && !self.is_shown(capture)
         {
-            self.capture = None;
+            self.drop_capture(fonts);
         }
     }
 
@@ -1323,8 +1432,7 @@ impl Ui {
                 && self.layers[index].options.kind == LayerKind::Modal
             {
                 if self.capture.is_some_and(|id| !self.reachable(id)) {
-                    self.capture = None;
-                    self.implicit_capture = false;
+                    self.drop_capture(fonts);
                 }
                 if let Some(hover) = self.hover
                     && !self.reachable(hover)
@@ -1382,27 +1490,32 @@ impl Ui {
             Size::new(f64::from(layout.size.width), f64::from(layout.size.height)),
         );
         let children = node.children.clone();
-        let offset = node.widget.scroll_offset();
-        // How far the children reach, from their Taffy boxes.
+        // How far the children reach, from their Taffy boxes, with their
+        // margins and this box's padding and border at the far edges.
+        let (pad_right, pad_bottom) = (
+            f64::from(layout.padding.right + layout.border.right),
+            f64::from(layout.padding.bottom + layout.border.bottom),
+        );
         let mut content = Size::ZERO;
         for &child in &children {
             if let Some(child) = self.node(child)
                 && let Ok(child) = self.taffy.layout(child.layout)
             {
-                content.width = content
-                    .width
-                    .max(f64::from(child.location.x + child.size.width));
-                content.height = content
-                    .height
-                    .max(f64::from(child.location.y + child.size.height));
+                let right = child.location.x + child.size.width + child.margin.right;
+                let bottom = child.location.y + child.size.height + child.margin.bottom;
+                content.width = content.width.max(f64::from(right) + pad_right);
+                content.height = content.height.max(f64::from(bottom) + pad_bottom);
             }
         }
+        let mut offset = Vec2::ZERO;
         if let Some(node) = self.node_mut(id) {
             node.content = content;
             if node.bounds != bounds {
                 node.bounds = bounds;
                 node.paint_dirty = true;
             }
+            node.widget.placed(bounds, content);
+            offset = node.widget.scroll_offset();
         }
         for child in children {
             self.place(child, origin - offset);
@@ -1650,10 +1763,7 @@ impl Ui {
                     None => self.bubble(fonts, root, input),
                 };
                 self.buttons_held = 0;
-                if self.implicit_capture {
-                    self.capture = None;
-                    self.implicit_capture = false;
-                }
+                self.drop_capture(fonts);
                 handled
             }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
