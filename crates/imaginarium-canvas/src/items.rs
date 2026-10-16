@@ -164,6 +164,8 @@ pub(crate) struct Items {
     ids: HashMap<NodeId, ItemId>,
     places: HashMap<NodeId, Place>,
     texts: HashMap<NodeId, CachedText>,
+    /// The frames among the items (their names are drawn on top).
+    pub frames: HashSet<NodeId>,
     /// Item ids are handed out once and never reused.
     next_item: u64,
 }
@@ -207,6 +209,11 @@ impl Items {
         items
     }
 
+    /// Whether a node is visible (it, and every ancestor, isn't hidden).
+    pub(crate) fn is_visible(&self, node: NodeId) -> bool {
+        self.places.contains_key(&node)
+    }
+
     /// The place of a node's parent: the board's for root nodes, `None`
     /// when the parent isn't visible.
     fn parent_place(&self, view: &DocumentView, node: NodeId) -> Option<Place> {
@@ -225,6 +232,7 @@ impl Items {
         if let Some(item) = self.by_node.remove(&node) {
             removed.push(item.id);
         }
+        self.frames.remove(&node);
         self.places.remove(&node);
         if deleted {
             if let Some(id) = self.ids.remove(&node) {
@@ -711,6 +719,9 @@ impl Walker<'_> {
             None => 0,
         };
         let id = self.items.item_id(node);
+        if name.is_some() {
+            self.items.frames.insert(node);
+        }
         self.items.by_node.insert(
             node,
             Item {

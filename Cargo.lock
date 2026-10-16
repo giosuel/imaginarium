@@ -2124,6 +2124,7 @@ version = "0.0.1"
 dependencies = [
  "accesskit",
  "imaginarium-model",
+ "imaginarium-reactive",
  "imaginarium-render",
  "imaginarium-text",
  "imaginarium-ui",

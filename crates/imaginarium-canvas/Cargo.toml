@@ -13,14 +13,15 @@ publish.workspace = true
 bench = false
 
 [dependencies]
+accesskit.workspace = true
 imaginarium-model.workspace = true
+imaginarium-reactive.workspace = true
 imaginarium-render.workspace = true
 imaginarium-text.workspace = true
 imaginarium-ui.workspace = true
 taffy.workspace = true
 
 [dev-dependencies]
-accesskit.workspace = true
 proptest.workspace = true
 
 [lints]

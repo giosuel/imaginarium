@@ -25,6 +25,7 @@
 
 mod board;
 pub mod demo;
+mod hit;
 mod items;
 mod paint;
 mod shapes;
@@ -36,5 +37,7 @@ pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_select;
 #[cfg(test)]
 mod tests_updates;
