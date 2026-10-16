@@ -450,20 +450,31 @@ Decided (2026-10-16):
   Docs' and Google Sheets', without extra features in the style of
   Microsoft Office that bloat the product.
 - **Spreadsheets are in scope** (they were a non-goal, §1), with Google
-  Sheets' features. Where they go in the roadmap is open (question 2).
+  Sheets' features, but not scheduled yet: "keep spreadsheets in mind
+  and build the foundation so that it supports documents as well as
+  spreadsheets or anything else". The model, layout and commands stay
+  general enough for any kind of content.
 - **Presentations are wired together on the board.** A presentation is
-  made of the board's own content: steps (frames, documents, sheets,
-  charts, images, any object or area) wired together in an order, with
-  branches. Playing it moves the camera along the wires. Everything is
-  linkable, so anything can be used in a presentation. Animation works
-  with motion paths and with keyframes on any property the user can
-  change (position, color, shape, all of them).
+  made of the board's own content: steps wired together in an order,
+  with branches. Usually a step is an area made for it (a slide, a
+  document, part of the whiteboard, a sheet), but any object or area
+  can be one. Everything is linkable, so anything can be used in a
+  presentation. The wiring is logical only: playing the presentation
+  shows the steps one after another with transitions, the audience
+  doesn't see the rest of the board, and where a step sits on the board
+  doesn't change its transition. Animation works with motion paths and
+  with keyframes on any property the user can change (position, color,
+  shape, all of them). PPTX stays: the export collects the steps, in
+  the order of the wiring, as slides.
+- **The tool bar's place is the user's choice.** The bar can be dragged
+  and snaps to the window's edges; the left edge is the default.
+- **A draw tool as capable as Paint's or Photoshop's:** brushes, an
+  eraser, graphics tablet support (pressure) and the like, on the board.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
-2. **Where spreadsheets go in the roadmap,** and whether presentations
-   keep PPTX and ODP export (M9), which can only approximate a
-   presentation that moves the camera across the board.
+2. **When the draw tool comes.** M11 plans the paint suite with pressure
+   brushes; the draw tool on the board may need to come earlier.
 
 The current progress and the next concrete steps are tracked in
 [`docs/STATUS.md`](STATUS.md).

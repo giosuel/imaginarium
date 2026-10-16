@@ -962,8 +962,9 @@ What M3 builds on:
     palette, menus and the settings, in light and dark, before any UI is
     built. They are HTML pages sent to the owner, not committed; what
     they settle goes into `shell.md`. The owner liked the first set
-    (2026-10-16) and asked for more: documents, sheets and presentations
-    on the board (PLAN §14), also mocked up before they are designed.
+    (2026-10-16) and asked for more: documents, sheets, presentations
+    and the draw tool on the board, and a tool bar that can be moved to
+    any edge (PLAN §14), also mocked up before they are designed.
   - **Where the document lives:** on the UI thread, with opening, saving
     and big pastes on workers, or on a model thread of its own. Measured
     before deciding.
