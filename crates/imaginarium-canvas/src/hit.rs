@@ -69,6 +69,27 @@ fn on_item(item: &Item, point: Point, tolerance: f64) -> bool {
     }
 }
 
+/// Whether `point` (document space) is inside a frame's box, where its
+/// clips let it show.
+fn inside_frame(item: &Item, point: Point) -> bool {
+    item.clips
+        .iter()
+        .all(|clip| clip.rect.contains(clip.world.inverse() * point))
+        && Rect::from_origin_size(Point::ZERO, item.size).contains(item.world.inverse() * point)
+}
+
+/// Whether `node` lies somewhere below `ancestor`.
+pub(crate) fn is_inside(view: &DocumentView, node: NodeId, ancestor: NodeId) -> bool {
+    let mut next = view.node(node).map(|node| node.parent());
+    while let Some(Parent::Node(parent)) = next {
+        if parent == ancestor {
+            return true;
+        }
+        next = view.node(parent).map(|node| node.parent());
+    }
+    false
+}
+
 /// Whether the node or one of its ancestors is locked (schema §5).
 pub(crate) fn locked(view: &DocumentView, node: NodeId) -> bool {
     let mut next = Some(node);
@@ -87,10 +108,9 @@ pub(crate) fn locked(view: &DocumentView, node: NodeId) -> bool {
     false
 }
 
-/// What a click on `node` selects: groups are selected as a whole, the
-/// outermost one not entered (`entered`: the group a double-click went
-/// into, and so its ancestors).
-pub(crate) fn selectable(view: &DocumentView, node: NodeId, entered: Option<NodeId>) -> NodeId {
+/// The groups that are open: the one a double-click went into, and its
+/// ancestors.
+pub(crate) fn open_groups(view: &DocumentView, entered: Option<NodeId>) -> HashSet<NodeId> {
     let mut open: HashSet<NodeId> = HashSet::new();
     let mut next = entered;
     while let Some(id) = next {
@@ -100,6 +120,18 @@ pub(crate) fn selectable(view: &DocumentView, node: NodeId, entered: Option<Node
             _ => None,
         };
     }
+    open
+}
+
+/// What a click on `node` selects: groups are selected as a whole, the
+/// outermost one not entered (`entered`: the group a double-click went
+/// into, and so its ancestors).
+pub(crate) fn selectable(view: &DocumentView, node: NodeId, entered: Option<NodeId>) -> NodeId {
+    selectable_in(view, node, &open_groups(view, entered))
+}
+
+/// [`selectable`] with the open groups worked out once.
+pub(crate) fn selectable_in(view: &DocumentView, node: NodeId, open: &HashSet<NodeId>) -> NodeId {
     let mut chosen = node;
     let mut next = view.node(node).map(|node| node.parent());
     while let Some(Parent::Node(parent)) = next {
@@ -125,12 +157,23 @@ pub(crate) fn hit(
     tolerance: f64,
     entered: Option<NodeId>,
 ) -> Option<NodeId> {
-    front_to_back.iter().find_map(|id| {
-        let node = *items.by_item.get(id)?;
-        let item = items.by_node.get(&node)?;
-        (on_item(item, point, tolerance) && !locked(view, node))
-            .then(|| selectable(view, node, entered))
-    })
+    for id in front_to_back {
+        let Some(&node) = items.by_item.get(id) else {
+            continue;
+        };
+        let Some(item) = items.by_node.get(&node) else {
+            continue;
+        };
+        if on_item(item, point, tolerance) && !locked(view, node) {
+            return Some(selectable(view, node, entered));
+        }
+        // A frame's empty inside hides what is behind it: nothing is hit
+        // there (a marquee starts).
+        if matches!(item.look, Look::Frame { .. }) && inside_frame(item, point) {
+            return None;
+        }
+    }
+    None
 }
 
 /// The box a node covers in document space: its item's box, or for a

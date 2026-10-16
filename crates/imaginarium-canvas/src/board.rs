@@ -34,8 +34,10 @@ const DRAG_THRESHOLD: f64 = 3.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Press {
     /// Pressed at `at` (window space) on a node, which is now selected;
-    /// it becomes a move once the pointer leaves the threshold.
-    Node { at: Point },
+    /// it becomes a move once the pointer leaves the threshold. A click
+    /// that doesn't move on one node of several selected (`narrow`)
+    /// selects just that one at the release.
+    Node { at: Point, narrow: Option<NodeId> },
     /// Dragging a marquee from `start` (document space); `additive` keeps
     /// the selection it started with.
     Marquee {
@@ -119,8 +121,6 @@ pub struct BoardCanvas {
     gesture: Option<Gesture>,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
-    /// The nodes listed for screen readers, by their local access id - 1.
-    access_nodes: Vec<NodeId>,
     /// The board's box in the last layout.
     bounds: Rect,
     /// The dots of the last frame: one path, and the view it was built for
@@ -149,7 +149,6 @@ impl BoardCanvas {
             press: None,
             gesture: None,
             name_rects: Vec::new(),
-            access_nodes: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
         }
@@ -402,7 +401,11 @@ impl BoardCanvas {
         let view = self.document.view();
         let mut chosen: Vec<NodeId> = Vec::new();
         for node in nodes {
-            if view.node(*node).is_some() && !chosen.contains(node) {
+            let visible = self
+                .items
+                .as_ref()
+                .is_none_or(|items| items.is_visible(*node));
+            if view.node(*node).is_some() && visible && !chosen.contains(node) {
                 chosen.push(*node);
             }
         }
@@ -520,10 +523,8 @@ impl BoardCanvas {
         if self.hovered.is_some_and(|node| !still(&node)) {
             self.hovered = None;
         }
-        if self
-            .entered
-            .is_some_and(|node| self.document.view().node(node).is_none())
-        {
+        // A group gone, hidden or under a hidden parent is entered no more.
+        if self.entered.is_some_and(|node| !items.is_visible(node)) {
             self.entered = None;
         }
     }
@@ -833,11 +834,13 @@ impl BoardCanvas {
         let items = self.items.as_ref()?;
         let view = self.document.view();
         // A frame's name, drawn on top, selects the frame.
+        // (Only frames still on the board: the names are from the last
+        // paint, and a change since may have removed one.)
         if let Some((frame, _)) = self
             .name_rects
             .iter()
             .rev()
-            .find(|(_, rect)| rect.contains(screen))
+            .find(|(frame, rect)| rect.contains(screen) && items.frames.contains(frame))
         {
             return (!hit::locked(view, *frame))
                 .then(|| hit::selectable(view, *frame, self.entered));
@@ -869,11 +872,13 @@ impl BoardCanvas {
             return Vec::new();
         };
         let view = self.document.view();
+        let open = hit::open_groups(view, self.entered);
+        let mut seen = std::collections::HashSet::new();
         let mut order: Vec<NodeId> = Vec::new();
         for node in view.walk() {
             if items.by_node.contains_key(&node) && !hit::locked(view, node) {
-                let unit = hit::selectable(view, node, self.entered);
-                if !order.contains(&unit) {
+                let unit = hit::selectable_in(view, node, &open);
+                if seen.insert(unit) {
                     order.push(unit);
                 }
             }
@@ -915,9 +920,22 @@ impl BoardCanvas {
                         self.entered = Some(node);
                         let inner = self.hit_at(*position).unwrap_or(node);
                         self.select(&[inner]);
-                        self.press = Some(Press::Node { at: *position });
+                        self.press = Some(Press::Node {
+                            at: *position,
+                            narrow: None,
+                        });
                     }
                     Some(node) => {
+                        // A click outside the entered group leaves it.
+                        if let Some(group) = self.entered
+                            && node != group
+                            && !hit::is_inside(self.document.view(), node, group)
+                        {
+                            self.entered = None;
+                        }
+                        let narrow =
+                            (!modifiers.shift && selection.len() > 1 && selection.contains(&node))
+                                .then_some(node);
                         if modifiers.shift {
                             if let Some(at) =
                                 selection.iter().position(|selected| *selected == node)
@@ -930,7 +948,10 @@ impl BoardCanvas {
                         } else if !selection.contains(&node) {
                             self.selection.set(vec![node]);
                         }
-                        self.press = Some(Press::Node { at: *position });
+                        self.press = Some(Press::Node {
+                            at: *position,
+                            narrow,
+                        });
                     }
                     None => {
                         // Empty board: out of an entered group, and a marquee.
@@ -960,7 +981,7 @@ impl BoardCanvas {
                     cx.request_paint();
                     return true;
                 }
-                if let Some(Press::Node { at }) = self.press
+                if let Some(Press::Node { at, .. }) = self.press
                     && (*position - at).hypot() >= DRAG_THRESHOLD
                     && !self.starts().is_empty()
                 {
@@ -1001,6 +1022,12 @@ impl BoardCanvas {
             } => {
                 cx.release_pointer();
                 self.end_gesture();
+                if let Some(Press::Node {
+                    narrow: Some(node), ..
+                }) = self.press
+                {
+                    self.select(&[node]);
+                }
                 if let Some(Press::Marquee {
                     start,
                     current,
@@ -1079,14 +1106,24 @@ impl BoardCanvas {
                 let current = self.selection.get_untracked().last().copied();
                 let at = current.and_then(|node| order.iter().position(|unit| *unit == node));
                 let next = match (at, modifiers.shift) {
-                    (Some(at), false) => (at + 1) % order.len(),
-                    (Some(at), true) => (at + order.len() - 1) % order.len(),
-                    (None, false) => 0,
-                    (None, true) => order.len() - 1,
+                    (Some(at), false) => Some(at + 1).filter(|next| *next < order.len()),
+                    (Some(at), true) => at.checked_sub(1),
+                    (None, false) => Some(0),
+                    (None, true) => Some(order.len() - 1),
                 };
-                self.selection.set(vec![order[next]]);
                 cx.request_paint();
-                true
+                match next {
+                    Some(next) => {
+                        self.selection.set(vec![order[next]]);
+                        true
+                    }
+                    // Past the last node (or before the first) the focus
+                    // moves on out of the board, as Tab does everywhere.
+                    None => {
+                        self.selection.set_if_changed(Vec::new());
+                        false
+                    }
+                }
             }
             _ => false,
         }
@@ -1209,6 +1246,9 @@ impl Widget for BoardCanvas {
                 position,
                 modifiers,
             } => {
+                // The names move with the view: none can be clicked until
+                // the next paint places them.
+                self.name_rects.clear();
                 if modifiers.command() {
                     // Ctrl + wheel zooms around the pointer.
                     let factor = (delta.y / 240.0).exp();
@@ -1255,7 +1295,6 @@ impl Widget for BoardCanvas {
         board.set_label("Board");
         board.set_bounds(access_rect(bounds));
         board.set_clips_children();
-        self.access_nodes.clear();
         let Some(items) = &self.items else {
             return Some(board);
         };
@@ -1280,11 +1319,12 @@ impl Widget for BoardCanvas {
             let (Some(item), Some(node)) = (items.by_node.get(&node_id), view.node(node_id)) else {
                 continue;
             };
-            if self.access_nodes.len() as u64 >= ACCESS_LOCAL_IDS {
-                break;
+            // The item's id, which it keeps for its life on the board: a
+            // screen reader's node stays the same as others come and go.
+            if item.id.0 == 0 || item.id.0 > ACCESS_LOCAL_IDS {
+                continue;
             }
-            self.access_nodes.push(node_id);
-            let id = accesskit::NodeId(base + self.access_nodes.len() as u64);
+            let id = accesskit::NodeId(base + item.id.0);
             let role = match node.kind() {
                 NodeKind::Text => Role::Paragraph,
                 NodeKind::Frame => Role::Group,
@@ -1326,7 +1366,12 @@ impl Widget for BoardCanvas {
         if request.action != Action::Focus || local == 0 {
             return false;
         }
-        let Some(node) = self.access_nodes.get(local as usize - 1).copied() else {
+        let Some(node) = self.items.as_ref().and_then(|items| {
+            let node = *items
+                .by_item
+                .get(&imaginarium_render::canvas::ItemId(local))?;
+            items.by_node.contains_key(&node).then_some(node)
+        }) else {
             return false;
         };
         self.select(&[node]);

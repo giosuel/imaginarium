@@ -303,3 +303,133 @@ fn screen_readers_get_the_visible_items_and_follow_the_selection() {
     assert_eq!(focused.1.label(), Some("Interview 5 users"));
     assert!(focused.1.is_selected() == Some(true));
 }
+
+#[test]
+fn a_screen_reader_focusing_an_item_selects_it_and_ids_stay_put() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    let id_of = |board: &mut Harness, label: &str| {
+        let mut tree = AccessTree::default();
+        board.ui.access(&mut board.fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .map(|(id, _)| *id)
+            .unwrap()
+    };
+    let before = id_of(&mut board, "Interview 5 users");
+    // A node added behind it doesn't renumber it.
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .transact(&Actor::User, |txn| {
+            let shape = txn.create_node(Parent::Root, Some(0), &NodeKind::Shape)?;
+            txn.set_geometry(shape, Geometry::new(0.0, 0.0, 50.0, 50.0))
+        })
+        .unwrap();
+    board.frame();
+    assert_eq!(id_of(&mut board, "Interview 5 users"), before);
+    // Focus through the tree, as AccessKit sends it.
+    let request = accesskit::ActionRequest {
+        action: accesskit::Action::Focus,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: before,
+        data: None,
+    };
+    assert!(board.ui.access_action(&mut board.fonts, &request));
+    assert_eq!(board.selection(), vec![interview]);
+}
+
+#[test]
+fn a_frames_inside_hides_what_is_behind_it() {
+    let mut document = Document::new(DocumentKind::Board).unwrap();
+    document
+        .transact(&Actor::User, |txn| {
+            let rect = txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+            txn.set_geometry(rect, Geometry::new(100.0, 100.0, 400.0, 400.0))?;
+            txn.set_style_override(rect, "fill", Value::String("#E0E7FF".into()))?;
+            let frame = txn.create_node(Parent::Root, None, &NodeKind::Frame)?;
+            txn.set_geometry(frame, Geometry::new(150.0, 150.0, 200.0, 200.0))
+        })
+        .unwrap();
+    let mut board = Harness::new(document);
+    board.click((250.0, 250.0));
+    assert!(board.selection().is_empty());
+}
+
+#[test]
+fn a_deleted_frames_name_selects_nothing() {
+    let mut board = sample();
+    let research = board.node("Research");
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .transact(&Actor::User, |txn| txn.delete_node(research))
+        .unwrap();
+    // No paint in between: the names are from before the delete.
+    board.button((250.0, 185.0), true, 1, false);
+    board.button((250.0, 185.0), false, 1, false);
+    assert!(board.selection().is_empty());
+}
+
+#[test]
+fn a_click_outside_an_entered_group_leaves_it() {
+    let mut document = Document::new(DocumentKind::Board).unwrap();
+    let (outside, _) = document
+        .transact(&Actor::User, |txn| {
+            let group = txn.create_node(Parent::Root, None, &NodeKind::Group)?;
+            for index in 0..2 {
+                let id = txn.create_node(Parent::Node(group), None, &NodeKind::Shape)?;
+                txn.set_geometry(
+                    id,
+                    Geometry::new(100.0 + f64::from(index) * 150.0, 100.0, 100.0, 100.0),
+                )?;
+                txn.set_style_override(id, "fill", Value::String("#E0E7FF".into()))?;
+            }
+            let outside = txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+            txn.set_geometry(outside, Geometry::new(600.0, 100.0, 100.0, 100.0))?;
+            txn.set_style_override(outside, "fill", Value::String("#E0E7FF".into()))?;
+            Ok(outside)
+        })
+        .unwrap();
+    let mut board = Harness::new(document);
+    board.double_click((150.0, 150.0));
+    board.click((650.0, 150.0));
+    assert_eq!(board.selection(), vec![outside]);
+    // Esc clears, instead of going back to the group.
+    board.key(Key::Escape, false);
+    assert!(board.selection().is_empty());
+}
+
+#[test]
+fn a_click_on_one_of_several_selected_selects_it_alone() {
+    let mut board = sample();
+    let (interview, scan) = (
+        board.node("Interview 5 users"),
+        board.node("Competitor scan"),
+    );
+    board.click((300.0, 300.0));
+    board.shift_click((600.0, 300.0));
+    assert_eq!(board.selection(), vec![interview, scan]);
+    board.click((600.0, 300.0));
+    assert_eq!(board.selection(), vec![scan]);
+}
+
+#[test]
+fn tab_past_the_last_node_leaves_the_board() {
+    let mut board = sample();
+    let count = board.board().document().view().node_count();
+    // A click on empty board gives it the keys.
+    board.click((20.0, 800.0));
+    for _ in 0..count {
+        board.key(Key::Tab, false);
+    }
+    // Every node once, then out.
+    assert!(!board.selection().is_empty());
+    board.key(Key::Tab, false);
+    assert!(board.selection().is_empty());
+}
