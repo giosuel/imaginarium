@@ -21,6 +21,7 @@ taffy.workspace = true
 
 [dev-dependencies]
 accesskit.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

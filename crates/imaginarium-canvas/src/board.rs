@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use imaginarium_model::{Document, NodeId};
+use imaginarium_model::{Actor, ChangeSet, Document, NodeId, Result, Transaction, UndoScope};
 use imaginarium_render::canvas::{Canvas, CanvasStats, Viewport};
 use imaginarium_render::kurbo::{Affine, Point, Rect, Vec2};
 use imaginarium_render::{Scene, TileWorkers};
@@ -45,6 +45,9 @@ pub struct BoardCanvas {
     owed_at: Option<Instant>,
     /// Frame names laid out, by frame and text.
     names: HashMap<NodeId, (String, TextBlock)>,
+    /// Changes not on the canvas yet (laying out text needs the fonts,
+    /// which painting and input bring).
+    pending: Vec<ChangeSet>,
     stats: CanvasStats,
 }
 
@@ -61,7 +64,105 @@ impl BoardCanvas {
             painted: 0,
             owed_at: None,
             names: HashMap::new(),
+            pending: Vec::new(),
             stats: CanvasStats::default(),
+        }
+    }
+
+    /// Runs `edit` as one transaction of `actor` and puts its changes on
+    /// the board (`Document::transact`). Every edit of a shown document
+    /// goes through here, or its changes through [`BoardCanvas::apply`].
+    pub fn transact<R>(
+        &mut self,
+        actor: &Actor,
+        edit: impl FnOnce(&mut Transaction<'_>) -> Result<R>,
+    ) -> Result<R> {
+        let (result, changes) = self.document.transact(actor, edit)?;
+        self.apply(changes);
+        Ok(result)
+    }
+
+    /// Undoes the last step of `scope`'s stack. `false` if there was none.
+    pub fn undo(&mut self, scope: UndoScope, by: &Actor) -> Result<bool> {
+        let changes = self.document.undo(scope, by)?;
+        let undone = changes.is_some();
+        if let Some(changes) = changes {
+            self.apply(changes);
+        }
+        Ok(undone)
+    }
+
+    /// Redoes the last undone step of `scope`'s stack. `false` if there was
+    /// none.
+    pub fn redo(&mut self, scope: UndoScope, by: &Actor) -> Result<bool> {
+        let changes = self.document.redo(scope, by)?;
+        let redone = changes.is_some();
+        if let Some(changes) = changes {
+            self.apply(changes);
+        }
+        Ok(redone)
+    }
+
+    /// Applies updates from other peers (`Document::apply_remote`).
+    pub fn apply_remote(&mut self, updates: &[&[u8]]) -> Result<()> {
+        let changes = self.document.apply_remote(updates)?;
+        self.apply(changes);
+        Ok(())
+    }
+
+    /// Puts changes the document already contains on the board: only the
+    /// tiles they touch are drawn again. They take effect at the next
+    /// paint or input.
+    pub fn apply(&mut self, changes: ChangeSet) {
+        if !changes.is_empty() {
+            self.pending.push(changes);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_for_tests(&mut self, fonts: &mut Fonts) {
+        self.sync(fonts);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn items_for_tests(&self) -> &Items {
+        self.items.as_ref().expect("synced")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn items_mut_for_tests(&mut self) -> &mut Items {
+        self.items.as_mut().expect("synced")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn document_mut_for_tests(&mut self) -> &mut Document {
+        &mut self.document
+    }
+
+    /// Brings the items up to date with the document: built in the
+    /// current theme, with every pending change applied.
+    fn sync(&mut self, fonts: &mut Fonts) {
+        self.ensure_items(fonts);
+        if self.pending.is_empty() {
+            return;
+        }
+        let colors = BoardColors::of(&theme());
+        let Some(items) = &mut self.items else {
+            return;
+        };
+        for changes in std::mem::take(&mut self.pending) {
+            let update = items.apply(self.document.view(), &changes, fonts, &colors);
+            for id in &update.removed {
+                self.canvas.remove(*id);
+            }
+            for node in &update.upserted {
+                if let Some(item) = items.by_node.get(node) {
+                    self.canvas.upsert(item.id, item.z, item.bounds);
+                }
+            }
+            for node in &changes.deleted {
+                self.names.remove(node);
+            }
         }
     }
 
@@ -154,6 +255,8 @@ impl BoardCanvas {
             self.canvas.invalidate_all();
         }
         self.names.clear();
+        // A build reads the whole view, pending changes included.
+        self.pending.clear();
         self.items = Some(items);
         self.theme = Some(current);
     }
@@ -162,7 +265,7 @@ impl BoardCanvas {
     /// does: the background, the tiles (directly in the first frame) and
     /// the frame names. For the widget, exports and tests.
     pub fn paint_into(&mut self, fonts: &mut Fonts, scene: &mut Scene, bounds: Rect, now: Instant) {
-        self.ensure_items(fonts);
+        self.sync(fonts);
         scene.push_clip(&bounds);
         scene.fill(&bounds, theme().color(Token::BoardBg));
         self.paint_dots(scene, bounds);
@@ -262,6 +365,8 @@ impl Widget for BoardCanvas {
     }
 
     fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        // Input reads the items (hit testing): bring them up to date.
+        self.sync(cx.fonts());
         match input {
             Input::Scroll {
                 delta,

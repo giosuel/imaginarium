@@ -2127,6 +2127,7 @@ dependencies = [
  "imaginarium-render",
  "imaginarium-text",
  "imaginarium-ui",
+ "proptest",
  "taffy",
 ]
 
