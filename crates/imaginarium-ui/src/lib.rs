@@ -30,6 +30,11 @@
 //!   shadow), [`Label`], [`Button`], [`TextInput`]; [`TextField`] is the
 //!   editing core they and canvas items use. [`Clipboard`]: the system
 //!   clipboard.
+//! - **Layers** above the root: popovers and menus (closed by `Esc` or a
+//!   click outside), modal dialogs (all input, Tab kept inside) and
+//!   tooltips (no input), placed next to an anchor and kept in the
+//!   window ([`Ui::open_layer`], [`LayerOptions`]); the focus returns to
+//!   where it was when one closes.
 //! - Accessibility: views describe themselves in an [`AccessTree`]; the
 //!   widget tree does it for its widgets ([`Widget::accessibility`]).
 //! - **Themes:** the interface's colors are [`Token`]s of a [`Theme`]
@@ -39,10 +44,11 @@
 //!   inside effects and memos.
 //!
 //! # Not here yet
-//! Scrolling containers, menus, drag and drop, and animation.
+//! Scrolling containers, drag and drop, and animation.
 
 mod access;
 mod clipboard;
+mod layers;
 #[cfg(test)]
 mod tests;
 mod text_field;
@@ -52,8 +58,9 @@ mod widgets;
 mod window;
 
 pub use clipboard::Clipboard;
+pub use layers::{Align, Anchor, LayerId, LayerKind, LayerOptions, Placement};
 pub use tree::{Cx, TreeStats, Ui, Widget, WidgetId, invalidate};
-pub use widgets::{Button, ButtonColors, Flex, InputColors, Label, TextInput, label};
+pub use widgets::{Button, ButtonColors, Flex, Icon, InputColors, Label, TextInput, label};
 
 pub use access::{AccessTree, ROOT, rect as access_rect};
 pub use text_field::{FieldResponse, TextField};

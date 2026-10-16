@@ -150,7 +150,55 @@ never reaches the widget that takes its slot. `set_children` detaches the
 children it leaves out, and `remove` removes a subtree.
 
 Built in: `Flex` (rows and columns with background, border, radius and
-shadow), `Label` and `label`, `Button`, and `TextInput`.
+shadow), `Label` and `label`, `Button` (styles `ButtonColors::primary`,
+`secondary`, `quiet` and `danger`), `TextInput`, and `Icon` (a line
+icon from SVG path data on Lucide's 24-unit grid).
+
+Labels wrap like text in CSS: in a box that gets too narrow, a label
+breaks lines down to its longest word. `Label::single_line()` keeps one on
+a single line (a status line, which its parent clips).
+
+Focus rings follow the keyboard, like CSS's `:focus-visible`: a click
+focuses a button without a ring, and the next navigating key (not
+Ctrl, Shift or Alt on its own, nor a Ctrl or Alt shortcut) shows it, as
+does a screen reader moving the focus. Widgets ask
+`cx.is_focus_visible()` when they paint; a view that handles a shortcut
+itself calls `ui.note_keyboard()`.
+
+## Layers: popovers, dialogs, tooltips
+
+Anything that floats above the window is a layer. Build its content like
+any widget, without a parent, and open it next to an anchor:
+
+```rust
+use imaginarium_ui::{Anchor, LayerOptions, Placement};
+
+let menu = ui.add_with_children(Flex::column().background(Token::PanelBg), &items);
+let layer = ui.open_layer(menu, LayerOptions::popover(Anchor::Widget(button)));
+// A dialog in the window's center, or a tooltip that takes no input:
+ui.open_layer(dialog, LayerOptions::modal());
+ui.open_layer(tip, LayerOptions::tooltip(Anchor::Widget(tool)).placement(Placement::Right));
+```
+
+The tree does the rest:
+- it places the layer and flips it to the other side when there's no room;
+- it moves the focus into it, and back when it closes;
+- `Esc` and a click outside close a popover, and that click doesn't also
+  reach what's below;
+- a dialog takes all input, and Tab stays inside it.
+
+`ui.close_layer(fonts, layer)` closes a layer, or a widget in it calls
+`cx.close_layer()`. `LayerOptions::on_close` tells the opener, and
+`LayerOptions::focus(widget)` picks where the focus starts (a dialog's
+safe button, not its destructive one).
+
+## Component gallery
+
+`cargo run --release -p imaginarium-ui --example gallery` shows every
+component in its states, in the current theme, with a switch between dark
+and light (`--light` starts light; `--open popover`, `dialog` or `tooltip`
+opens a layer at once, for screenshots). Every new component gets a section
+there before the shell uses it, and its screenshots go into the PR.
 
 ## Themes
 
