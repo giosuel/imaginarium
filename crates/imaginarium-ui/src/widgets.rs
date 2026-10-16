@@ -863,12 +863,20 @@ impl Icon {
     }
 
     /// A vendored Lucide icon by name (`"hand"`, `"trash"`; the list is
-    /// `src/icons/icons.txt`). An unknown name draws nothing, and fails a
-    /// debug build.
+    /// `src/icons/icons.txt`), for names written in the code. An unknown
+    /// name panics in debug builds and tests, so a typo shows at once, and
+    /// draws nothing in a release build. For names that arrive at run time
+    /// (add-ons, settings), use [`Icon::try_named`].
     pub fn named(name: &str, size: f64, paint: impl Into<Paint>) -> Self {
         let paths = crate::icons::icon_paths(name);
         debug_assert!(paths.is_some(), "the icon `{name}` isn't vendored");
         Self::new(paths.unwrap_or(&[]), size, paint)
+    }
+
+    /// The vendored icon `name`, or `None` when there is none.
+    pub fn try_named(name: &str, size: f64, paint: impl Into<Paint>) -> Option<Self> {
+        let paths = crate::icons::icon_paths(name)?;
+        Some(Self::new(paths, size, paint))
     }
 
     /// Names it for screen readers (otherwise it is decoration).

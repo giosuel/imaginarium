@@ -29,14 +29,16 @@ mod tests {
 
     #[test]
     fn every_listed_icon_is_vendored_and_parses() {
-        let listed: Vec<&str> = include_str!("icons.txt")
+        let mut listed: Vec<&str> = include_str!("icons.txt")
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect();
+        listed.sort_unstable();
+        // The same names, each once: run `cargo xtask icons` when not.
         assert_eq!(
-            listed.len(),
-            icon_names().count(),
+            listed,
+            icon_names().collect::<Vec<_>>(),
             "run `cargo xtask icons`"
         );
         for name in listed {

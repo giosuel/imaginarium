@@ -1111,6 +1111,12 @@ What M3 builds on:
   (`docs/design/m2-gate.md`, "Manual checklist"); what it finds is fixed
   in the milestone then under way.
 
+- **Third-party notices don't ship yet.** The licenses of what the app
+  bundles (the Lucide icons' ISC and MIT notices in `LICENSE-lucide`, the
+  bundled fonts, the Rust dependencies) must reach users with the
+  binaries: a notices file in the packages or an About screen, before the
+  first release with the shell.
+
 - **Signatures are verified on open** (since M1.8: every record a document
   with an ACL chain is read from), but that is slow for big shared
   documents: about 70 µs per Ed25519 record on this VM, so ~0.7 s for 10k

@@ -29,10 +29,17 @@ pub(crate) fn run(root: &Path) -> Result<usize, String> {
         .map_err(|err| format!("can't read icons.txt: {err}"))?;
     let names = parse_list(&list)?;
 
-    check_age(LUCIDE_VERSION)?;
+    let integrity = check_release(LUCIDE_VERSION)?;
+    // A fresh folder per run, so a file missing from this release can't be
+    // read from an earlier one.
     let work = root.join("target/xtask-icons");
-    std::fs::create_dir_all(&work)
-        .map_err(|err| format!("can't create {}: {err}", work.display()))?;
+    let unpacked = work.join(format!("lucide-static-{LUCIDE_VERSION}"));
+    if unpacked.exists() {
+        std::fs::remove_dir_all(&unpacked)
+            .map_err(|err| format!("can't remove {}: {err}", unpacked.display()))?;
+    }
+    std::fs::create_dir_all(&unpacked)
+        .map_err(|err| format!("can't create {}: {err}", unpacked.display()))?;
     let tarball = work.join(format!("lucide-static-{LUCIDE_VERSION}.tgz"));
     let url =
         format!("https://registry.npmjs.org/lucide-static/-/lucide-static-{LUCIDE_VERSION}.tgz");
@@ -43,19 +50,21 @@ pub(crate) fn run(root: &Path) -> Result<usize, String> {
             .arg(&url),
         "curl",
     )?;
+    check_integrity(&tarball, &integrity)?;
     run_command(
         Command::new("tar")
             .arg("xzf")
             .arg(&tarball)
             .arg("-C")
-            .arg(&work),
+            .arg(&unpacked),
         "tar",
     )?;
-    let nodes = std::fs::read_to_string(work.join("package/icon-nodes.json"))
+    let package = unpacked.join("package");
+    let nodes = std::fs::read_to_string(package.join("icon-nodes.json"))
         .map_err(|err| format!("the release has no icon-nodes.json: {err}"))?;
     let nodes: Value =
         serde_json::from_str(&nodes).map_err(|err| format!("icon-nodes.json: {err}"))?;
-    let license = std::fs::read_to_string(work.join("package/LICENSE"))
+    let license = std::fs::read_to_string(package.join("LICENSE"))
         .map_err(|err| format!("the release has no LICENSE: {err}"))?;
 
     let source = generate(&names, &nodes)?;
@@ -95,8 +104,9 @@ fn run_command(command: &mut Command, what: &str) -> Result<(), String> {
     }
 }
 
-/// Refuses a release younger than 14 days.
-fn check_age(version: &str) -> Result<(), String> {
+/// Refuses a release younger than 14 days, and returns the tarball's
+/// `sha512-…` integrity from npm.
+fn check_release(version: &str) -> Result<String, String> {
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -114,52 +124,87 @@ fn check_age(version: &str) -> Result<(), String> {
     let published = meta["time"][version]
         .as_str()
         .ok_or_else(|| format!("npm doesn't know lucide-static {version}"))?;
-    let age = days_since(published).ok_or_else(|| format!("can't read the date `{published}`"))?;
-    if age < MIN_AGE_DAYS {
-        return Err(format!(
-            "lucide-static {version} is {age} days old; the rule is {MIN_AGE_DAYS} (MAINTAINERS.md)"
-        ));
-    }
-    Ok(())
-}
-
-/// Whole days from an RFC 3339 date (`2026-10-02T11:32:31.773Z`) to now.
-fn days_since(date: &str) -> Option<i64> {
-    let day = |text: &str| -> Option<i64> {
-        let mut parts = text.get(..10)?.split('-');
-        let (y, m, d) = (
-            parts.next()?.parse::<i64>().ok()?,
-            parts.next()?.parse::<i64>().ok()?,
-            parts.next()?.parse::<i64>().ok()?,
-        );
-        // Days since 1970-01-01 (civil calendar, Howard Hinnant's method).
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some(era * 146_097 + doe - 719_468)
-    };
+    let published = crate::dep_age::parse_rfc3339(published)
+        .ok_or_else(|| format!("can't read the date `{published}`"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64
-        / 86_400;
-    Some(now - day(date)?)
+        .map_err(|err| format!("the clock is before 1970: {err}"))?
+        .as_secs() as i64;
+    if !old_enough(published, now) {
+        let days = (now - published) / 86_400;
+        return Err(format!(
+            "lucide-static {version} is {days} days old; the rule is {MIN_AGE_DAYS} (MAINTAINERS.md)"
+        ));
+    }
+    meta["versions"][version]["dist"]["integrity"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("npm has no integrity for lucide-static {version}"))
+}
+
+/// Whether a release published at `published` (Unix seconds) is at least
+/// 14 full days old at `now`.
+fn old_enough(published: i64, now: i64) -> bool {
+    now - published >= MIN_AGE_DAYS * 86_400
+}
+
+/// Checks the downloaded tarball against npm's `sha512-<base64>`.
+fn check_integrity(tarball: &Path, integrity: &str) -> Result<(), String> {
+    let expected = integrity
+        .strip_prefix("sha512-")
+        .ok_or_else(|| format!("unexpected integrity `{integrity}`"))?;
+    let output = Command::new("sha512sum")
+        .arg(tarball)
+        .output()
+        .map_err(|err| format!("can't run sha512sum: {err}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let hex = text.split_whitespace().next().unwrap_or_default();
+    let digest = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()
+        .filter(|digest| output.status.success() && digest.len() == 64)
+        .ok_or("sha512sum failed")?;
+    if base64(&digest) == expected {
+        Ok(())
+    } else {
+        Err("the downloaded tarball doesn't match npm's sha512".into())
+    }
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let value = chunk.iter().enumerate().fold(0u32, |value, (index, byte)| {
+            value | u32::from(*byte) << (16 - 8 * index)
+        });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                out.push(char::from(
+                    ALPHABET[(value >> (18 - 6 * index) & 63) as usize],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// `lucide.rs`: each listed icon as SVG path strings, sorted by name.
 fn generate(names: &[String], nodes: &Value) -> Result<String, String> {
     let mut out = String::new();
-    let _ = writeln!(out, "// SPDX-License-Identifier: AGPL-3.0-or-later");
+    let _ = writeln!(out, "{}", crate::headers::VENDORED_HEADER);
     let _ = writeln!(
         out,
-        "// The icon data is Lucide's, under the ISC license in LICENSE-lucide."
+        "// The icon data is Lucide's (ISC) and, for the icons from Feather, MIT;\n// both notices are in LICENSE-lucide."
     );
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "//! Generated by `cargo xtask icons` from lucide-static {LUCIDE_VERSION} (ISC, see\n//! `LICENSE-lucide`). Don't edit: change `icons.txt` and run the task again."
+        "//! Generated by `cargo xtask icons` from lucide-static {LUCIDE_VERSION} (ISC and MIT,\n//! see `LICENSE-lucide`). Don't edit: change `icons.txt` and run the task again."
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "/// The Lucide release these come from.");
@@ -237,12 +282,15 @@ fn element_to_path(element: &Value) -> Result<String, String> {
         }
         "rect" => {
             let (x, y, w, h) = (attr("x")?, attr("y")?, attr("width")?, attr("height")?);
-            let rx = attr("rx")?;
-            let ry = if element[1]["ry"].is_null() {
-                rx
-            } else {
-                attr("ry")?
+            // A missing radius takes the other's value (SVG).
+            let radius = |key: &str, other: &str| {
+                if element[1][key].is_null() {
+                    attr(other)
+                } else {
+                    attr(key)
+                }
             };
+            let (rx, ry) = (radius("rx", "ry")?, radius("ry", "rx")?);
             let (rx, ry) = (rx.min(w / 2.0), ry.min(h / 2.0));
             if rx <= 0.0 && ry <= 0.0 {
                 format!("M{} {}H{}V{}H{}Z", n(x), n(y), n(x + w), n(y + h), n(x))
@@ -319,6 +367,12 @@ mod tests {
             element_to_path(&rect).unwrap(),
             "M5 3H19A2 2 0 0 1 21 5V19A2 2 0 0 1 19 21H5A2 2 0 0 1 3 19V5A2 2 0 0 1 5 3Z"
         );
+        // Only `ry` given: `rx` takes its value.
+        let rect = serde_json::json!(["rect", {"x": "3", "y": "3", "width": "18", "height": "18", "ry": "2"}]);
+        assert_eq!(
+            element_to_path(&rect).unwrap(),
+            "M5 3H19A2 2 0 0 1 21 5V19A2 2 0 0 1 19 21H5A2 2 0 0 1 3 19V5A2 2 0 0 1 5 3Z"
+        );
         let line = serde_json::json!(["line", {"x1": "5", "y1": "12", "x2": "19", "y2": "12"}]);
         assert_eq!(element_to_path(&line).unwrap(), "M5 12L19 12");
         let polygon = serde_json::json!(["polygon", {"points": "12 2 22 22 2 22"}]);
@@ -335,8 +389,25 @@ mod tests {
     }
 
     #[test]
-    fn days_are_counted_from_the_epoch() {
-        assert!(days_since("1970-01-02T00:00:00Z").unwrap() > 20_000);
-        assert!(days_since("not a date").is_none());
+    fn a_release_must_be_fourteen_full_days_old() {
+        let published = crate::dep_age::parse_rfc3339("2026-10-02T23:59:00Z").unwrap();
+        let almost = crate::dep_age::parse_rfc3339("2026-10-16T00:01:00Z").unwrap();
+        assert!(!old_enough(published, almost), "13 days and 2 minutes");
+        assert!(old_enough(published, published + 14 * 86_400));
+    }
+
+    #[test]
+    fn the_vendored_icons_come_from_the_pinned_release() {
+        let generated = include_str!("../../crates/imaginarium-ui/src/icons/lucide.rs");
+        let pinned = format!("pub const LUCIDE_VERSION: &str = \"{LUCIDE_VERSION}\";");
+        assert!(generated.contains(&pinned), "run `cargo xtask icons`");
+    }
+
+    #[test]
+    fn base64_matches_the_standard() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
     }
 }
