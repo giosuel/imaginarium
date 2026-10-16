@@ -475,6 +475,14 @@ Decided (2026-10-16):
   Ink comes first, in M4: pen, marker, highlighter, eraser and pen
   pressure, stored as vector strokes. The pixel brushes come with M11's
   paint layers.
+- **Icons:** Lucide (ISC license).
+- **The title bar is the system's:** the window manager draws it, and
+  where it draws none (Hyprland) the window has no bar; where it
+  declines (GNOME), winit draws a plain one. The windows get the app ID
+  `ch.giosuel.Imaginarium`, so window rules can match them.
+- **Extras the mockups added:** copy and paste style, the interface size
+  and the board background settings come in M3; the "Start from"
+  templates come later, with M4's shape libraries.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.

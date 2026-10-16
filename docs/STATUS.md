@@ -965,8 +965,8 @@ What M3 builds on:
     (2026-10-16) and asked for more: documents, sheets, presentations
     and the draw tool on the board, and a tool bar that can be moved to
     any edge (PLAN §14), also mocked up before they are designed.
-    Still open: the title bar and the icon set, and which extras in the
-    mockups beyond M3's plan stay.
+    Then the title bar (the system's), the icons (Lucide) and the extras
+    were settled, and a dark set was asked for (PLAN §14).
   - **Where the document lives:** on the UI thread, with opening, saving
     and big pastes on workers, or on a model thread of its own. Measured
     before deciding.
