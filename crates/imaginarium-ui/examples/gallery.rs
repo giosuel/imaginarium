@@ -196,7 +196,7 @@ fn menu(ui: &mut Ui) -> WidgetId {
 /// Don't save on the left and Cancel and Save on the right. The focus
 /// starts on Save, so Enter doesn't throw the changes away.
 fn dialog(ui: &mut Ui, asks: &Asks) -> (WidgetId, WidgetId) {
-    let icon = ui.add(Icon::new(FILE_PLUS, 20.0, Token::OnWarningSoft));
+    let icon = ui.add(Icon::named("file-plus", 20.0, Token::OnWarningSoft));
     let tile = ui.add_with_children(
         Flex::row()
             .width(40.0)
@@ -273,14 +273,6 @@ fn dialog(ui: &mut Ui, asks: &Asks) -> (WidgetId, WidgetId) {
     );
     (content, save)
 }
-
-/// Lucide's `file-plus` (ISC), until `cargo xtask icons` vendors the set.
-const FILE_PLUS: &[&str] = &[
-    "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
-    "M14 2v4a2 2 0 0 0 2 2h4",
-    "M9 15h6",
-    "M12 12v6",
-];
 
 fn tooltip(ui: &mut Ui) -> WidgetId {
     let text = ui.add(Label::new("Rectangle · R", TextStyle::new(12.0)).color(Token::OnAccent));
@@ -439,12 +431,45 @@ fn main() -> Result<(), UiError> {
         &[rows],
     );
 
+    // Every vendored icon, with its name.
+    let cells: Vec<WidgetId> = imaginarium_ui::icons::icon_names()
+        .map(|name| {
+            let icon = ui.add(Icon::named(name, 20.0, Token::Text).label(name));
+            let text = ui.add(
+                Label::new(name, TextStyle::new(10.5))
+                    .color(Token::TextSubtle)
+                    .single_line(),
+            );
+            ui.add_with_children(
+                Flex::column()
+                    .gap(6.0)
+                    .width(92.0)
+                    .height(56.0)
+                    .style(|style| style.align_items = taffy::AlignItems::CENTER),
+                &[icon, text],
+            )
+        })
+        .collect();
+    let grid = ui.add_with_children(
+        Flex::row()
+            .gap(4.0)
+            .style(|style| style.flex_wrap = taffy::FlexWrap::Wrap),
+        &cells,
+    );
+    let grid = ui.add_with_children(Flex::column().grow(1.0), &[grid]);
+    let icons_title = format!(
+        "Icons · Lucide {}, {} vendored",
+        imaginarium_ui::icons::LUCIDE_VERSION,
+        imaginarium_ui::icons::icon_names().count()
+    );
+    let icons = section(&mut ui, &icons_title, &[grid]);
+
     let page = ui.add_with_children(
         Flex::column()
             .gap(16.0)
             .padding(24.0, 24.0)
             .background(Token::BoardBg),
-        &[header, buttons, inputs, text, layers, scrolling],
+        &[header, buttons, inputs, text, layers, scrolling, icons],
     );
     // The gallery itself scrolls once it is taller than the window.
     let page = ui.add_with_children(

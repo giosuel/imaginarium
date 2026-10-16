@@ -192,6 +192,17 @@ The tree does the rest:
 `LayerOptions::focus(widget)` picks where the focus starts (a dialog's
 safe button, not its destructive one).
 
+## Icons
+
+`Icon::named("trash", 18.0, Token::Text)` draws a vendored Lucide icon:
+line art on a 24-unit grid, stroked at the mockups' weight in the theme's
+color, sharp at any size. The icons the app uses are listed in
+`crates/imaginarium-ui/src/icons/icons.txt`. To add one, add its Lucide
+name there and run `cargo xtask icons`, which regenerates `lucide.rs` from
+the pinned release. A test fails while the list and the file disagree.
+`.label("Delete")` names an icon for screen readers; without one it is
+decoration.
+
 ## Scrolling and long lists
 
 `Scroll::new()` is a scroll container for one child (set its height, or

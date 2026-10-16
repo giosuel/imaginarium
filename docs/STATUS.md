@@ -994,7 +994,8 @@ What M3 builds on:
   - scroll containers with virtualized rows (done 2026-10-16: `Scroll`
     and `VirtualList`, a wheel step on 100,000 rows in 0.12 ms);
   - animation (time-based, and off with reduced motion);
-  - vector icons;
+  - vector icons (done 2026-10-16: `cargo xtask icons` vendors the 98
+    listed Lucide 1.50.0 icons, `Icon::named`);
   - theme tokens as signals, so a theme switches live (done 2026-10-16:
     `Theme`, `Token` and `Paint` in `imaginarium-ui`, dark first, the
     widgets on tokens, a contrast test; the counter example switches

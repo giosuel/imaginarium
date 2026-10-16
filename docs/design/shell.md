@@ -253,10 +253,12 @@ a test checks the token pairs.
 **Lucide** (owner, 2026-10-16; ISC license, allowed in `deny.toml`). We
 vendor the icons we use, not the whole set:
 
-- `cargo xtask icons` reads a pinned Lucide release (two-week rule) and
-  writes the chosen icons as SVG path data into
-  `crates/imaginarium-ui/src/icons/` (circles and rectangles converted to
-  paths), with Lucide's license next to them.
+- `cargo xtask icons` reads a pinned Lucide release (`lucide-static` from
+  npm, 1.50.0; it refuses one younger than 14 days) and writes the icons
+  listed in `crates/imaginarium-ui/src/icons/icons.txt` as SVG path data
+  into `lucide.rs` there (circles, rectangles, lines and polygons
+  converted to paths), with Lucide's license next to them
+  (`LICENSE-lucide`). 98 icons as of M3.1.
 - At startup the path data is parsed once (`kurbo::BezPath::from_svg`) and
   stroked at 1.75 px in the token's color, so icons follow the theme and
   stay sharp at every scale. No new dependency.
