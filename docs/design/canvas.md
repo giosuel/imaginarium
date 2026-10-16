@@ -159,7 +159,7 @@ commands as the palette, the menus and the AI, with arguments:
 | drag the selection | `board.move` (`dx`, `dy`) per pointer move | one step for the drag |
 | resize, rotate | `board.transform` (box per node) per pointer move | one step |
 | draw a shape with a tool | `board.insert_shape` (`preset`, box), then the size per move | one step |
-| type in a text box | `text.insert`, `text.delete` | merged per burst (500 ms, `UndoConfig`) |
+| type in a text box | `text.replace` (`at`, `delete`, `insert`: the changed run) | merged per burst (500 ms, `UndoConfig`) |
 | corner-radius handle | `shape.set_radius` | one step |
 
 - A **gesture** opens an undo group at the press (`begin_undo_group`) and
@@ -199,6 +199,18 @@ puts a `TextField` over the text box at the board's zoom; each edit is a
 transaction (`insert_text`, `delete_text`), so the model is always the
 truth and undo merges typing. The field is the toolkit's (IME, clipboard,
 accessibility), positioned in screen space and scaled with the zoom.
+
+**As built (M3.2).** A double-click on a text box or shape, or Enter
+with one selected, edits its text (a shape's text is its label, which
+it gets when there was none). The field is drawn in the node's box
+space under the camera, so it zooms and turns with the node; pointer
+input is mapped into that space, and a press outside the field ends
+editing and does what it would do otherwise. While editing, the tiles
+draw the node without its text. Each change of the field's text becomes
+one `text.replace` with the run that differs; an undo or a remote
+change of the text shows in the field. Esc ends editing with the node
+still selected. Screen readers get the field as a text input below the
+board, focused while it edits.
 
 ## 8. Clipboard
 
