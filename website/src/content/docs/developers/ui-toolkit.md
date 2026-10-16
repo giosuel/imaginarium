@@ -150,7 +150,13 @@ never reaches the widget that takes its slot. `set_children` detaches the
 children it leaves out, and `remove` removes a subtree.
 
 Built in: `Flex` (rows and columns with background, border, radius and
-shadow), `Label` and `label`, `Button`, and `TextInput`.
+shadow), `Label` and `label`, `Button` (styles `ButtonColors::primary`,
+`secondary`, `quiet` and `danger`), `TextInput`, and `Icon` (a line
+icon from SVG path data on Lucide's 24-unit grid).
+
+Focus rings follow the keyboard, like CSS's `:focus-visible`: a click
+focuses a button without a ring, and the next key press shows it.
+Widgets ask `cx.is_focus_visible()` when they paint.
 
 ## Layers: popovers, dialogs, tooltips
 
@@ -175,7 +181,9 @@ The tree does the rest:
 - a dialog takes all input, and Tab stays inside it.
 
 `ui.close_layer(fonts, layer)` closes a layer, or a widget in it calls
-`cx.close_layer()`. `LayerOptions::on_close` tells the opener.
+`cx.close_layer()`. `LayerOptions::on_close` tells the opener, and
+`LayerOptions::focus(widget)` picks where the focus starts (a dialog's
+safe button, not its destructive one).
 
 ## Component gallery
 

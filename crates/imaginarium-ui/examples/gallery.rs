@@ -19,9 +19,9 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Input, InputColors,
-    Label, LayerId, LayerOptions, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, WidgetId,
-    WindowOptions, set_theme, theme,
+    AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, Input,
+    InputColors, Label, LayerId, LayerOptions, TextInput, Theme, ThemeKind, Token, Ui, UiError,
+    View, WidgetId, WindowOptions, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -65,8 +65,11 @@ impl Gallery {
                     }
                 }
                 Ask::Dialog => {
-                    let content = dialog(&mut self.ui, &self.asks);
-                    self.dialog = Some(self.ui.open_layer(content, LayerOptions::modal()));
+                    let (content, save) = dialog(&mut self.ui, &self.asks);
+                    self.dialog = Some(
+                        self.ui
+                            .open_layer(content, LayerOptions::modal().focus(save)),
+                    );
                 }
                 Ask::Tooltip => match self.tooltip.take() {
                     Some(open) if self.ui.is_layer_open(open) => {
@@ -188,43 +191,96 @@ fn menu(ui: &mut Ui) -> WidgetId {
     )
 }
 
-/// The unsaved-changes dialog from the mockups.
-fn dialog(ui: &mut Ui, asks: &Asks) -> WidgetId {
+/// The unsaved-changes dialog, as the mockups draw it ("Closing a board
+/// with unsaved changes"): an icon tile beside the title and text, then
+/// Don't save on the left and Cancel and Save on the right. The focus
+/// starts on Save, so Enter doesn't throw the changes away.
+fn dialog(ui: &mut Ui, asks: &Asks) -> (WidgetId, WidgetId) {
+    let icon = ui.add(Icon::new(FILE_PLUS, 20.0, Token::OnWarningSoft));
+    let tile = ui.add_with_children(
+        Flex::row()
+            .width(40.0)
+            .height(40.0)
+            .background(Token::WarningSoft)
+            .radius(10.0)
+            .style(|style| {
+                style.justify_content = taffy::JustifyContent::CENTER;
+                style.flex_shrink = 0.0;
+            }),
+        &[icon],
+    );
     let title = ui.add(Label::new(
         "Save changes to “Untitled board” before closing?",
-        TextStyle::new(16.0).weight(600.0),
+        TextStyle::new(17.0).weight(600.0),
     ));
     let text = ui.add(
         Label::new(
             "If you don't save, your changes are lost. Once it's saved, every change is saved on its own.",
-            body(),
+            TextStyle::new(14.0).line_height(1.5),
         )
-        .color(Token::TextMuted),
+        .color(Token::TextSecondary),
     );
-    let discard = ask_button(
-        ui,
-        "Don't save",
-        ButtonColors::quiet(),
-        asks,
-        Ask::CloseDialog,
+    let words = ui.add_with_children(Flex::column().gap(6.0).grow(1.0), &[title, text]);
+    let top = ui.add_with_children(
+        Flex::row()
+            .gap(14.0)
+            .style(|style| style.align_items = taffy::AlignItems::FLEX_START),
+        &[tile, words],
     );
+    let button = |ui: &mut Ui, text: &str, colors: ButtonColors, padding: f64, weight: f32| {
+        let asks = asks.clone();
+        ui.add(
+            Button::new(
+                text,
+                TextStyle::new(14.0).weight(weight),
+                colors,
+                move || {
+                    asks.borrow_mut().push(Ask::CloseDialog);
+                },
+            )
+            .padding(padding, 0.0)
+            .min_height(36.0),
+        )
+    };
+    let discard = button(ui, "Don't save", ButtonColors::danger(), 12.0, 500.0);
     let spacer = ui.add(Flex::row().grow(1.0));
-    let cancel = ask_button(ui, "Cancel", ButtonColors::quiet(), asks, Ask::CloseDialog);
-    let save = ask_button(ui, "Save…", ButtonColors::primary(), asks, Ask::CloseDialog);
-    let buttons = ui.add_with_children(Flex::row().gap(8.0), &[discard, spacer, cancel, save]);
-    ui.add_with_children(
+    let cancel = button(ui, "Cancel", ButtonColors::secondary(), 14.0, 500.0);
+    let save = button(ui, "Save…", ButtonColors::primary(), 16.0, 600.0);
+    let buttons = ui.add_with_children(
+        Flex::row()
+            .gap(8.0)
+            .style(|style| style.margin.top = taffy::prelude::length(6.0)),
+        &[discard, spacer, cancel, save],
+    );
+    let content = ui.add_with_children(
         Flex::column()
-            .gap(12.0)
-            .padding(22.0, 20.0)
-            .width(440.0)
+            .gap(14.0)
+            .width(460.0)
             .background(Token::PanelBg)
             .border(1.0, Token::PanelBorder)
             .radius(16.0)
             .shadow()
-            .role(accesskit::Role::Dialog, "Save changes"),
-        &[title, text, buttons],
-    )
+            .role(accesskit::Role::Dialog, "Save changes")
+            .style(|style| {
+                style.padding = taffy::Rect {
+                    left: taffy::prelude::length(22.0),
+                    right: taffy::prelude::length(22.0),
+                    top: taffy::prelude::length(22.0),
+                    bottom: taffy::prelude::length(18.0),
+                };
+            }),
+        &[top, buttons],
+    );
+    (content, save)
 }
+
+/// Lucide's `file-plus` (ISC), until `cargo xtask icons` vendors the set.
+const FILE_PLUS: &[&str] = &[
+    "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
+    "M14 2v4a2 2 0 0 0 2 2h4",
+    "M9 15h6",
+    "M12 12v6",
+];
 
 fn tooltip(ui: &mut Ui) -> WidgetId {
     let text = ui.add(Label::new("Rectangle · R", TextStyle::new(12.0)).color(Token::OnAccent));
@@ -269,9 +325,27 @@ fn main() -> Result<(), UiError> {
     let header = ui.add_with_children(Flex::row().gap(12.0), &[title, spring, switch]);
 
     // Buttons: hover, press and Tab show their other states.
-    let primary = ui.add(Button::new("Save…", body(), ButtonColors::primary(), || {}));
-    let quiet = ui.add(Button::new("Cancel", body(), ButtonColors::quiet(), || {}));
-    let buttons = section(&mut ui, "Buttons · primary, quiet", &[primary, quiet]);
+    let styles = [
+        ("Save…", ButtonColors::primary()),
+        ("Cancel", ButtonColors::secondary()),
+        ("More", ButtonColors::quiet()),
+        ("Don't save", ButtonColors::danger()),
+    ];
+    let buttons: Vec<WidgetId> = styles
+        .into_iter()
+        .map(|(text, colors)| {
+            ui.add(
+                Button::new(text, body(), colors, || {})
+                    .padding(14.0, 0.0)
+                    .min_height(36.0),
+            )
+        })
+        .collect();
+    let buttons = section(
+        &mut ui,
+        "Buttons · primary, secondary, quiet, danger",
+        &buttons,
+    );
 
     // Inputs.
     let empty = ui.add(TextInput::new(

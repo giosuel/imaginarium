@@ -85,6 +85,10 @@ within it.
   A hidden or detached widget loses the focus (and the capture) at the
   next layout. When the focus moves, the window turns the input method
   off and on, so a composition starts over.
+- **Focus rings follow the keyboard** (CSS's `:focus-visible`): the tree
+  remembers whether the last input was a press or a key, and
+  `Cx::is_focus_visible` is true only for the focused widget after a key.
+  The focused widget repaints when that changes.
 - App-wide shortcuts (Ctrl+K, Ctrl+F) are handled by the view before the
   tree, for now; the command system's keymaps take over in M3. With Ctrl
   or ⌘ held, a non-Latin letter stands for the Latin letter on the same
