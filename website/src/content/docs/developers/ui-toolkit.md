@@ -201,7 +201,9 @@ color, sharp at any size. The icons the app uses are listed in
 name there and run `cargo xtask icons`, which regenerates `lucide.rs` from
 the pinned release. A test fails while the list and the file disagree.
 `.label("Delete")` names an icon for screen readers; without one it is
-decoration.
+decoration. A name that comes from outside the code (an add-on, a setting)
+goes through `Icon::try_named`, which returns `None` for an unknown name;
+`Icon::named` panics on one in debug builds, to catch typos.
 
 ## Scrolling and long lists
 
