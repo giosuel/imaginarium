@@ -551,6 +551,66 @@ impl Items {
         walks: &[(NodeId, Vec<NodeId>)],
         pending: &mut HashSet<NodeId>,
     ) -> bool {
+        // Whole subtrees waiting for keys (created or moved), side by side
+        // under one parent, are keyed together, reading the parent's
+        // children once: a paste of 1,000 shapes read the board's 11,000
+        // twice per shape.
+        let mut by_parent: HashMap<Parent, HashMap<NodeId, usize>> = HashMap::new();
+        for (index, (root, nodes)) in walks.iter().enumerate() {
+            let whole = nodes
+                .iter()
+                .filter(|node| self.by_node.contains_key(node))
+                .all(|node| pending.contains(node));
+            if whole && let Some(node) = view.node(*root) {
+                by_parent
+                    .entry(node.parent())
+                    .or_default()
+                    .insert(*root, index);
+            }
+        }
+        for (parent, roots) in by_parent {
+            let siblings: Vec<NodeId> = view.children(parent).collect();
+            let mut at = 0;
+            while at < siblings.len() {
+                if !roots.contains_key(&siblings[at]) {
+                    at += 1;
+                    continue;
+                }
+                let start = at;
+                while at < siblings.len() && roots.contains_key(&siblings[at]) {
+                    at += 1;
+                }
+                let run: Vec<NodeId> = siblings[start..at]
+                    .iter()
+                    .flat_map(|root| walks[roots[root]].1.iter().copied())
+                    .filter(|node| self.by_node.contains_key(node))
+                    .collect();
+                if run.is_empty() {
+                    continue;
+                }
+                let low = siblings[..start]
+                    .iter()
+                    .rev()
+                    .find_map(|sibling| self.last_key(view, *sibling, pending))
+                    .unwrap_or_else(|| match parent {
+                        Parent::Root => 0,
+                        Parent::Node(parent) => match self.by_node.get(&parent) {
+                            Some(item) if !pending.contains(&parent) => item.z,
+                            _ => self.key_before(view, parent, pending),
+                        },
+                    });
+                let high = siblings[at..]
+                    .iter()
+                    .find_map(|sibling| self.first_key(view, *sibling, pending))
+                    .or_else(|| match parent {
+                        Parent::Root => None,
+                        Parent::Node(parent) => self.key_after(view, parent, pending),
+                    });
+                if !self.spread(&run, low, high, pending) {
+                    return false;
+                }
+            }
+        }
         for (root, nodes) in walks {
             let painting: Vec<NodeId> = nodes
                 .iter()
@@ -571,25 +631,40 @@ impl Items {
                     Some(before) => self.by_node[&painting[before]].z,
                     None => self.key_before(view, *root, pending),
                 };
-                let count = (index - start) as u64;
                 let high = match painting.get(index) {
                     Some(after) => Some(self.by_node[after].z),
                     None => self.key_after(view, *root, pending),
                 };
-                let high = high.unwrap_or_else(|| {
-                    low.saturating_add(count.saturating_add(1).saturating_mul(Z_GAP))
-                });
-                if high <= low || high - low <= count {
+                let run = painting[start..index].to_vec();
+                if !self.spread(&run, low, high, pending) {
                     return false;
                 }
-                let step = (high - low) / (count + 1);
-                for (offset, node) in painting[start..index].iter().enumerate() {
-                    if let Some(item) = self.by_node.get_mut(node) {
-                        item.z = low + step * (offset as u64 + 1);
-                    }
-                    pending.remove(node);
-                }
             }
+        }
+        true
+    }
+
+    /// Gives `run` keys evenly between `low` and `high` (`None`: nothing
+    /// above). `false` when they don't fit.
+    fn spread(
+        &mut self,
+        run: &[NodeId],
+        low: u64,
+        high: Option<u64>,
+        pending: &mut HashSet<NodeId>,
+    ) -> bool {
+        let count = run.len() as u64;
+        let high = high
+            .unwrap_or_else(|| low.saturating_add(count.saturating_add(1).saturating_mul(Z_GAP)));
+        if high <= low || high - low <= count {
+            return false;
+        }
+        let step = (high - low) / (count + 1);
+        for (offset, node) in run.iter().enumerate() {
+            if let Some(item) = self.by_node.get_mut(node) {
+                item.z = low + step * (offset as u64 + 1);
+            }
+            pending.remove(node);
         }
         true
     }
