@@ -609,6 +609,15 @@ impl Canvas {
         self.upsert(id, z, bounds);
     }
 
+    /// Gives an item a new stacking key that keeps its order among the
+    /// others (every item re-keyed in the same order): nothing looks
+    /// different, so nothing is redrawn.
+    pub fn rekey(&mut self, id: ItemId, z: u64) {
+        if let Some(item) = self.items.get_mut(&id) {
+            item.z = z;
+        }
+    }
+
     /// Removes an item; its area is redrawn.
     pub fn remove(&mut self, id: ItemId) {
         if let Some(item) = self.items.remove(&id) {
@@ -650,6 +659,11 @@ impl Canvas {
             }
         }
         Some(tile)
+    }
+
+    /// An item's stacking key.
+    pub fn z(&self, id: ItemId) -> Option<u64> {
+        self.items.get(&id).map(|item| item.z)
     }
 
     /// An item's bounds.
