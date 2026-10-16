@@ -674,28 +674,6 @@ impl Canvas {
             .map(|(id, _)| id)
     }
 
-    /// Every item whose bounds contain `point` (document units), front
-    /// to back: the candidates of an exact hit test.
-    pub fn items_at(&self, point: Point) -> Vec<ItemId> {
-        let cell = (
-            (point.x / CELL).floor() as i32,
-            (point.y / CELL).floor() as i32,
-        );
-        let mut found: Vec<(u64, ItemId)> = self
-            .grid
-            .get(&cell)
-            .into_iter()
-            .flatten()
-            .chain(&self.large)
-            .filter_map(|id| Some((*id, self.items.get(id)?)))
-            .filter(|(_, item)| item.bounds.contains(point))
-            .map(|(id, item)| (item.z, id))
-            .collect();
-        found.sort_unstable_by(|a, b| b.cmp(a));
-        found.dedup();
-        found.into_iter().map(|(_, id)| id).collect()
-    }
-
     /// Every item whose bounds overlap `area` (document units), back to
     /// front: the candidates of a marquee.
     pub fn items_overlapping(&self, area: Rect) -> Vec<ItemId> {
@@ -1388,22 +1366,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn items_at_lists_every_item_under_a_point_front_to_back() {
+    fn items_overlapping_lists_the_items_over_an_area_back_to_front() {
         let mut canvas = Canvas::new();
         canvas.upsert(ItemId(1), 10, Rect::new(0.0, 0.0, 100.0, 100.0));
         canvas.upsert(ItemId(2), 30, Rect::new(50.0, 50.0, 150.0, 150.0));
         canvas.upsert(ItemId(3), 20, Rect::new(-1e6, -1e6, 1e6, 1e6));
         assert_eq!(
-            canvas.items_at(Point::new(60.0, 60.0)),
-            vec![ItemId(2), ItemId(3), ItemId(1)]
-        );
-        assert_eq!(
-            canvas.items_at(Point::new(10.0, 10.0)),
-            vec![ItemId(3), ItemId(1)]
-        );
-        assert_eq!(
             canvas.items_overlapping(Rect::new(90.0, 90.0, 95.0, 95.0)),
             vec![ItemId(1), ItemId(3), ItemId(2)]
+        );
+        assert_eq!(
+            canvas.items_overlapping(Rect::new(5.0, 5.0, 6.0, 6.0)),
+            vec![ItemId(1), ItemId(3)]
         );
     }
     use crate::CpuMode;
