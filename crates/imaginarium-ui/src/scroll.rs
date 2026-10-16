@@ -306,8 +306,19 @@ impl Widget for Scroll {
     fn wake(&mut self, cx: &mut Cx<'_>, _now: std::time::Instant) {
         if let Some(mut glide) = self.glide {
             let offset = glide.value();
-            self.glide = glide.advance().then_some(glide);
-            self.scroll_to(cx, offset);
+            if glide.advance() {
+                self.glide = Some(glide);
+                self.scroll_to(cx, offset);
+            } else {
+                // Exactly on the target, past scroll_to's threshold.
+                self.glide = None;
+                let max = Self::max_offset(cx.bounds(), cx.content_size());
+                let target = offset.clamp(0.0, max);
+                if target != self.offset {
+                    self.offset = target;
+                    cx.request_place();
+                }
+            }
             cx.request_paint();
         }
     }

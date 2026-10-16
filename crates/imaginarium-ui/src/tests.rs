@@ -64,8 +64,21 @@ fn pointer(at: Point, primary: bool, pressed: bool) -> Input {
     }
 }
 
-/// What the shell sends AccessKit, fed to AccessKit's own tree, which
-/// panics on an inconsistent update (as the platform adapters do).
+/// Wakes and draws every frame that comes due up to `until`, as the
+/// window does: the clock is set to each deadline and the wake gets that
+/// same instant. Returns how many frames were drawn.
+fn step_frames(ui: &mut Ui, fonts: &mut Fonts, until: std::time::Instant) -> usize {
+    let mut frames = 0;
+    while let Some(at) = ui.wake_at().filter(|at| *at <= until) {
+        crate::animation::set_clock_for_tests(Some(at));
+        ui.wake(fonts, at);
+        frame(ui, fonts);
+        frames += 1;
+        assert!(frames < 1000, "the animation never settles");
+    }
+    frames
+}
+
 /// Runs every animation to its end and lays out the result.
 fn settle(ui: &mut Ui, fonts: &mut Fonts) {
     let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -75,6 +88,8 @@ fn settle(ui: &mut Ui, fonts: &mut Fonts) {
     crate::animation::set_clock_for_tests(None);
 }
 
+/// What the shell sends AccessKit, fed to AccessKit's own tree, which
+/// panics on an inconsistent update (as the platform adapters do).
 fn check_access(ui: &mut Ui, fonts: &mut Fonts) -> accesskit::TreeUpdate {
     let mut tree = AccessTree::default();
     ui.access(fonts, &mut tree);
@@ -503,11 +518,8 @@ fn layers_and_hovered_buttons_animate_then_come_to_rest() {
     let (content, _, _) = menu(&mut ui, &clicks);
     ui.open_layer(content, LayerOptions::popover(Anchor::Widget(opener)));
     frame(&mut ui, &mut fonts);
-    let end = start + durations::POPOVER;
-    set_clock_for_tests(Some(end));
-    assert!(ui.wake_at().is_some_and(|at| at <= end));
-    ui.wake(&mut fonts, end);
-    frame(&mut ui, &mut fonts);
+    let frames = step_frames(&mut ui, &mut fonts, start + durations::POPOVER);
+    assert!(frames >= 14, "a frame every 8.3 ms: {frames}");
     assert_eq!(ui.wake_at(), None, "at rest, nothing redraws");
     set_clock_for_tests(None);
 }
@@ -1288,10 +1300,11 @@ fn page_keys_reach_a_scroll_after_a_click_on_plain_content() {
     let offset = |ui: &Ui| ui.widget::<Scroll>(scroll).unwrap().offset();
     assert_eq!(offset(&ui), 0.0);
     let halfway = start + crate::animation::durations::SCROLL / 2;
-    crate::animation::set_clock_for_tests(Some(halfway));
-    // The window wakes when the frame it asked for is due.
-    ui.wake(&mut fonts, halfway + crate::animation::FRAME);
-    frame(&mut ui, &mut fonts);
+    let frames = step_frames(&mut ui, &mut fonts, halfway);
+    assert!(
+        frames >= 9,
+        "a frame every 8.3 ms, not one at the end: {frames}"
+    );
     assert!(offset(&ui) > 45.0 && offset(&ui) < 90.0, "{}", offset(&ui));
     // A late wake still lands exactly on the target.
     let late = start + crate::animation::durations::SCROLL * 2;
@@ -1301,6 +1314,45 @@ fn page_keys_reach_a_scroll_after_a_click_on_plain_content() {
     frame(&mut ui, &mut fonts);
     assert_eq!(offset(&ui), 90.0);
     assert_eq!(ui.wake_at(), None, "at rest, nothing redraws");
+    crate::animation::set_clock_for_tests(None);
+}
+
+#[test]
+fn a_virtual_list_glides_all_the_way() {
+    use crate::scroll::{Scroll, VirtualList};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let list = ui.add_virtual_list(
+        VirtualList::new(30.0, || 10_000, |ui, _row| ui.add(Flex::row().fill())),
+        Scroll::new().height(300.0),
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[list]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    ui.set_focus(&mut fonts, Some(list));
+    let start = std::time::Instant::now();
+    crate::animation::set_clock_for_tests(Some(start));
+    ui.input(&mut fonts, &key(Key::PageDown));
+    frame(&mut ui, &mut fonts);
+    let offset = |ui: &Ui| ui.widget::<Scroll>(list).unwrap().offset();
+    // Every layout keeps the list in range, and must not end the glide.
+    step_frames(
+        &mut ui,
+        &mut fonts,
+        start + crate::animation::durations::SCROLL / 2,
+    );
+    assert!(
+        offset(&ui) > 135.0 && offset(&ui) < 270.0,
+        "{}",
+        offset(&ui)
+    );
+    step_frames(
+        &mut ui,
+        &mut fonts,
+        start + std::time::Duration::from_secs(1),
+    );
+    assert_eq!(offset(&ui), 270.0);
+    assert_eq!(ui.wake_at(), None);
     crate::animation::set_clock_for_tests(None);
 }
 

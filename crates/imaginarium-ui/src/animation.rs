@@ -65,9 +65,10 @@ thread_local! {
     static CLOCK: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Whether motion is reduced: every transition then arrives at once. The
-/// app sets it from the setting `ui.reduce_motion` (following the system
-/// by default; `shell.md` §5).
+/// Whether motion is reduced: every transition then shows its target,
+/// including those already moving. The app will set it from the setting
+/// `ui.reduce_motion` (following the system by default; `shell.md` §5) in
+/// M3.7; until then it is off unless code turns it on.
 pub fn reduce_motion() -> bool {
     REDUCE_MOTION.with(Cell::get)
 }
@@ -83,8 +84,8 @@ pub fn now() -> Instant {
     CLOCK.with(Cell::get).unwrap_or_else(Instant::now)
 }
 
-/// Fixes [`now`] for a test (`None`: the real clock again).
-#[doc(hidden)]
+/// Fixes [`now`] on this thread, for tests that step through a
+/// transition (`None`: the real clock again).
 pub fn set_clock_for_tests(time: Option<Instant>) {
     CLOCK.with(|cell| cell.set(time));
 }
@@ -110,18 +111,24 @@ pub struct Transition {
     easing: Easing,
     /// Moving, or arrived without the frame that shows the target yet.
     pending: bool,
+    /// When the next frame is due. Fixed between wakes: the window asks
+    /// for it after reading its clock, so a deadline counted from the
+    /// moment of asking would never be due.
+    next: Instant,
 }
 
 impl Transition {
     /// A value at rest.
     pub fn new(value: f64) -> Self {
+        let time = now();
         Self {
             from: value,
             to: value,
-            start: now(),
+            start: time,
             duration: Duration::ZERO,
             easing: Easing::Linear,
             pending: false,
+            next: time,
         }
     }
 
@@ -142,6 +149,7 @@ impl Transition {
         };
         self.easing = easing;
         self.pending = !self.duration.is_zero();
+        self.next = (time + FRAME).min(time + self.duration);
     }
 
     /// Jumps to `value` at once.
@@ -161,7 +169,7 @@ impl Transition {
 
     /// Its value at `time`.
     pub fn value_at(&self, time: Instant) -> f64 {
-        if self.duration.is_zero() {
+        if self.duration.is_zero() || reduce_motion() {
             return self.to;
         }
         let t =
@@ -175,21 +183,23 @@ impl Transition {
 
     /// Whether it is still moving.
     pub fn is_moving(&self) -> bool {
-        !self.duration.is_zero() && now() < self.start + self.duration
+        !self.duration.is_zero() && !reduce_motion() && now() < self.start + self.duration
     }
 
     /// When to wake for the next frame (`None`: at rest). After it
     /// arrives it still wants one wake, for the frame that shows the target
     /// exactly, however late the last one came.
     pub fn wake_at(&self) -> Option<Instant> {
-        let end = self.start + self.duration;
-        self.pending.then(|| (now() + FRAME).min(end))
+        self.pending.then_some(self.next)
     }
 
     /// Called on each wake: once it has arrived, it stops asking for them.
     /// Returns whether it is still pending (a frame follows).
     pub fn advance(&mut self) -> bool {
-        if !self.is_moving() {
+        if self.is_moving() {
+            let time = now();
+            self.next = (time + FRAME).min(self.start + self.duration);
+        } else {
             self.pending = false;
         }
         self.pending
@@ -226,9 +236,41 @@ mod tests {
         assert_eq!(value.value(), 0.0);
         assert!(!value.is_moving());
         // One more wake draws the target, however late it comes.
-        assert_eq!(value.wake_at(), Some(start + Duration::from_millis(150)));
+        assert!(
+            value
+                .wake_at()
+                .is_some_and(|at| at <= start + Duration::from_millis(200))
+        );
         assert!(!value.advance());
         assert_eq!(value.wake_at(), None, "at rest, nothing redraws");
+        set_clock_for_tests(None);
+    }
+
+    #[test]
+    fn each_frame_is_due_when_the_window_checks() {
+        // The window reads its clock, then asks when to wake: the deadline
+        // must not move with the moment of asking.
+        let start = Instant::now();
+        set_clock_for_tests(Some(start));
+        let mut value = Transition::new(0.0);
+        value.to(1.0, Duration::from_millis(120), Easing::Linear);
+        let mut wakes = 0;
+        let mut time = start;
+        while let Some(at) = value.wake_at() {
+            assert!(
+                at > time || wakes == 0 || at == time,
+                "deadlines move forward"
+            );
+            time = at;
+            set_clock_for_tests(Some(time));
+            value.advance();
+            wakes += 1;
+            assert!(wakes < 100, "never settles");
+        }
+        // 120 ms at 8.3 ms a frame, the last one at the arrival.
+        assert_eq!(wakes, 15);
+        assert_eq!(time, start + Duration::from_millis(120));
+        assert_eq!(value.value(), 1.0);
         set_clock_for_tests(None);
     }
 
@@ -240,6 +282,13 @@ mod tests {
         assert_eq!(value.value(), 1.0);
         assert!(!value.is_moving());
         assert_eq!(value.wake_at(), None);
+        set_reduce_motion(false);
+        // One already moving shows its target once motion is reduced.
+        value.to(0.0, Duration::from_millis(500), Easing::EaseOut);
+        assert!(value.is_moving());
+        set_reduce_motion(true);
+        assert_eq!(value.value(), 0.0);
+        assert!(!value.advance(), "and stops asking for frames");
         set_reduce_motion(false);
     }
 }

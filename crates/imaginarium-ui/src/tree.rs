@@ -818,7 +818,10 @@ impl Ui {
         let max = (count as f64 * row_height - view).max(0.0);
         let offset = self.scroll_widget(scroll).map_or(0.0, |widget| {
             let clamped = widget.offset().min(max);
-            widget.set_offset(clamped);
+            // Only when out of range: setting the offset ends a glide.
+            if clamped != widget.offset() {
+                widget.set_offset(clamped);
+            }
             clamped
         });
         let first = ((offset / row_height).floor() as usize).saturating_sub(overscan);

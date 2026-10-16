@@ -193,7 +193,9 @@ wherever it is, so a change of mind half-way doesn't jump. A widget keeps
 one, reads it when it paints and returns its `wake_at` from
 `Widget::wake_at`; each `Widget::wake` calls `advance` and repaints. While
 it moves it wakes every 8.3 ms (a 60 Hz display presents every other
-wake). After it arrives it still wants one wake, however late the last
+wake). The deadline is fixed when a frame is planned, not counted from
+the moment the window asks: the window reads its clock first, so a
+deadline that moved with the asking would never come due. After it arrives it still wants one wake, however late the last
 one came, so the final frame shows the target exactly; then nothing
 redraws. The durations are `animation::durations`: 100 ms for hover and
 press colors (buttons), 120 ms for popovers and tooltips, 160 ms for
@@ -203,8 +205,10 @@ it). A scroll by keyboard or screen reader glides; the wheel and the
 thumb follow the hand at once and take over from a glide, and bringing
 the focus into view is immediate.
 
-`set_reduce_motion(true)` makes every transition arrive at once; the app
-sets it from `ui.reduce_motion` (`shell.md` §5). Times come from
+`set_reduce_motion(true)` makes every transition show its target at
+once, including those already moving. The app will set it from
+`ui.reduce_motion` (`shell.md` §5) in M3.7; until then only code (the
+gallery's switch) turns it on. Times come from
 `animation::now()`, which tests fix with `set_clock_for_tests` to step
 through a transition.
 
