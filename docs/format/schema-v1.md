@@ -117,7 +117,7 @@ Each node of the `nodes` tree has a meta map with these keys:
 | `frame` | A board frame or artboard. It clips its children. | any |
 | `page` | A page of a document or layout, in reading order | any |
 | `slide` | A slide of a deck, in slide order | any |
-| `shape` | A vector shape. `shape` (string) names the preset: `rect`, `ellipse`, `line`, `triangle`, `diamond`, … Unknown presets render as `rect`. | none |
+| `shape` | A vector shape. `shape` (string) names the preset: `rect`, `ellipse`, `line`, `triangle`, `diamond`, `path` (§5.6), … Unknown presets render as `rect`. | none |
 | `text` | A text box. `t` holds the text. | none |
 | `image` | An image. `a.src` is the blob. | none |
 | `connector` | A connector. `from` and `to` are `NodeId` strings, both optional. The geometry holds the fallback endpoints. | none |
@@ -181,6 +181,22 @@ maps, so only the stored `id` survives undo and redo.
   (by peer, then counter) keeps it. The other is identified by its tree
   id. Every peer derives the same identities, and no repair write is
   needed.
+
+### 5.6 Shapes
+
+Every shape's outline is made from its box (`g`) and its preset
+(ADR-0021). Keys of `shape` nodes, besides `shape`:
+
+| Key | Type | Preset | Meaning |
+|---|---|---|---|
+| `radii` | List of 4 `length` | `rect` | Corner radii: top left, top right, bottom right, bottom left. Absent: the style's `radius` for all four. |
+| `flip` | `string` | `line` | Which corners the line joins: absent from top left to bottom right; `h` mirrored horizontally, `v` vertically, `hv` both. |
+| `d` | `string` | `path` | The outline as SVG path data: commands `M`, `L`, `C`, `Q`, `Z`, absolute coordinates, in the space of `vb`. |
+| `vb` | List of 4 `number` | `path` | `[x, y, w, h]`: the part of `d`'s space that is mapped onto the box, like SVG's `viewBox`. Absent: `[0, 0, w, h]` of the box. |
+
+Moving, resizing or rotating a shape changes only `g`; a path follows its
+box. A reader that doesn't know `path` draws a rectangle in the box (rule
+4), and may move and resize it without harm.
 
 ## 6. Text
 

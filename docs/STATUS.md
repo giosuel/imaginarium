@@ -956,7 +956,9 @@ What M3 builds on:
 - **The toolkit and the tile canvas** (M2; ADR-0007, ADR-0019).
 
 - [ ] **M3.0 Design** (`docs/design/shell.md`, `docs/design/canvas.md`,
-  and an ADR for each significant decision):
+  and an ADR for each significant decision). Drafts written 2026-10-16:
+  `shell.md`, `canvas.md`, ADR-0020 (the document on the UI thread),
+  ADR-0021 (one shape model) and schema §5.6; for the owner to review.
   - **Mockups first** (owner, 2026-10-16): the start window, the board
     window with its tools, the contextual toolbar, the inspector, the
     palette, menus and the settings, in light and dark, before any UI is
@@ -966,7 +968,8 @@ What M3 builds on:
     and the draw tool on the board, and a tool bar that can be moved to
     any edge (PLAN §14), also mocked up before they are designed.
     Then the title bar (the system's), the icons (Lucide) and the extras
-    were settled, and a dark set was asked for (PLAN §14).
+    were settled, and a dark set was made. The owner chose the dark theme
+    to build first (PLAN §14). The mockups are done.
   - **Where the document lives:** on the UI thread, with opening, saving
     and big pastes on workers, or on a model thread of its own. Measured
     before deciding.
@@ -1070,8 +1073,9 @@ What M3 builds on:
   - recent files, and newer files opening read-only;
   - optionally, password-protected files (the crypto exists; it needs the
     prompt).
-- [ ] **M3.7 Themes:** light, dark and high contrast, following the
-  system, reduced motion, and their settings.
+- [ ] **M3.7 Themes:** dark comes first and is what M3.1 to M3.6 build
+  and test (owner, 2026-10-16); then light and high contrast on the same
+  tokens, following the system, reduced motion, and their settings.
 - [ ] **M3.8 From M2:**
   - **the board's opening:** cover the fill, maybe with an animation
     (owner);
