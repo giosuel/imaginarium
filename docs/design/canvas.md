@@ -169,6 +169,23 @@ commands as the palette, the menus and the AI, with arguments:
 - **The command context** (`BoardCx`): the document, the selection, the
   viewport and the actor. Availability checks read the view, so the
   contextual toolbar and the palette can ask every frame cheaply.
+- **As built (M3.2, gestures):** the commands' context is the board
+  itself (`FnCommand<BoardCanvas>`); `commands::board_commands()` lists
+  `board.move` (dx, dy for the selection), `board.set_box` (one node's
+  x, y, w, h and rotation in its parent's space) and `shape.set_radius`,
+  and gestures and keys run them through a `Registry`. A press on a
+  selected node drags it once the pointer travels 3 px; the 8 handles
+  resize (Shift keeps the shape at the corners), the handle 20 px above
+  rotates around the box's center (Shift snaps to 15°), the one inside a
+  rectangle's top left corner sets its radius, and a badge shows the
+  size while resizing. Several nodes share one straight box: they move,
+  scale and turn with it. Arrows nudge by 1 pt, Shift by 10. A gesture
+  is one undo group from press to release, and its pointer moves are
+  applied once a frame, before painting, from the latest position (move
+  by the delta since the last frame; resize and rotate from where the
+  gesture started). Known gap: the model merges undo steps within
+  500 ms, so a gesture that starts right after another edit undoes
+  together with it.
 
 ## 7. Text on the board
 

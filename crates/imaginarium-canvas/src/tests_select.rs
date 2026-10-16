@@ -13,14 +13,14 @@ use crate::BoardCanvas;
 
 const AREA: Rect = Rect::new(0.0, 0.0, 1440.0, 866.0);
 
-struct Harness {
-    ui: Ui,
-    fonts: Fonts,
-    board: WidgetId,
+pub(crate) struct Harness {
+    pub(crate) ui: Ui,
+    pub(crate) fonts: Fonts,
+    pub(crate) board: WidgetId,
 }
 
 impl Harness {
-    fn new(document: Document) -> Self {
+    pub(crate) fn new(document: Document) -> Self {
         let mut ui = Ui::new();
         let board = ui.add(BoardCanvas::new(document));
         let root = ui.add_with_children(Flex::column().fill(), &[board]);
@@ -34,21 +34,21 @@ impl Harness {
         harness
     }
 
-    fn frame(&mut self) {
+    pub(crate) fn frame(&mut self) {
         let mut scene = Scene::new();
         self.ui.layout(&mut self.fonts, AREA);
         self.ui.paint(&mut self.fonts, &mut scene);
     }
 
-    fn board(&self) -> &BoardCanvas {
+    pub(crate) fn board(&self) -> &BoardCanvas {
         self.ui.widget::<BoardCanvas>(self.board).unwrap()
     }
 
-    fn selection(&self) -> Vec<NodeId> {
+    pub(crate) fn selection(&self) -> Vec<NodeId> {
         self.board().selection().get_untracked()
     }
 
-    fn button(&mut self, at: (f64, f64), pressed: bool, clicks: u8, shift: bool) {
+    pub(crate) fn button(&mut self, at: (f64, f64), pressed: bool, clicks: u8, shift: bool) {
         let modifiers = Modifiers {
             shift,
             ..Modifiers::default()
@@ -65,26 +65,26 @@ impl Harness {
         );
     }
 
-    fn click(&mut self, at: (f64, f64)) {
+    pub(crate) fn click(&mut self, at: (f64, f64)) {
         self.button(at, true, 1, false);
         self.button(at, false, 1, false);
         self.frame();
     }
 
-    fn shift_click(&mut self, at: (f64, f64)) {
+    pub(crate) fn shift_click(&mut self, at: (f64, f64)) {
         self.button(at, true, 1, true);
         self.button(at, false, 1, true);
         self.frame();
     }
 
-    fn double_click(&mut self, at: (f64, f64)) {
+    pub(crate) fn double_click(&mut self, at: (f64, f64)) {
         self.click(at);
         self.button(at, true, 2, false);
         self.button(at, false, 2, false);
         self.frame();
     }
 
-    fn drag(&mut self, from: (f64, f64), to: (f64, f64), shift: bool) {
+    pub(crate) fn drag(&mut self, from: (f64, f64), to: (f64, f64), shift: bool) {
         self.button(from, true, 1, shift);
         self.ui
             .input(&mut self.fonts, &Input::PointerMoved(Point::from(to)));
@@ -93,7 +93,7 @@ impl Harness {
         self.frame();
     }
 
-    fn key(&mut self, key: Key, shift: bool) {
+    pub(crate) fn key(&mut self, key: Key, shift: bool) {
         let modifiers = Modifiers {
             shift,
             ..Modifiers::default()
@@ -112,7 +112,7 @@ impl Harness {
     }
 
     /// The node whose text (or name) is `label`.
-    fn node(&self, label: &str) -> NodeId {
+    pub(crate) fn node(&self, label: &str) -> NodeId {
         let view = self.board().document().view();
         view.walk()
             .into_iter()
@@ -127,8 +127,12 @@ impl Harness {
     }
 }
 
-fn sample() -> Harness {
-    Harness::new(crate::demo::launch_plan().unwrap())
+pub(crate) fn sample() -> Harness {
+    let no_merge = imaginarium_model::UndoConfig {
+        merge_interval_ms: 0,
+        max_steps: 1000,
+    };
+    Harness::new(crate::demo::launch_plan_with(no_merge).unwrap())
 }
 
 #[test]
