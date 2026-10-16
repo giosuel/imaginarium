@@ -2123,6 +2123,7 @@ name = "imaginarium-canvas"
 version = "0.0.1"
 dependencies = [
  "accesskit",
+ "imaginarium-commands",
  "imaginarium-model",
  "imaginarium-reactive",
  "imaginarium-render",
