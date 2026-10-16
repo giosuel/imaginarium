@@ -10,11 +10,17 @@ Last updated: 2026-10-15
 
 - **Phase:** **Phase A, M2 (UI prototype gate)**. M0 and M1 are done (tags
   `v0.0.1-m0`, `v0.0.2-m1`).
-- **Next step:** **M2.9 Wrap-up: the owner's last gate run**, with the
-  package "M2.9 final" and the manual checklist (criteria 4 and 5 were
-  never reported), then the tag `v0.0.3-m2`, which the owner pushes.
-  After the run: record it in `docs/design/m2-gate.md` ("M2.9 run"), tick
-  M2.9, and give the owner the tag command.
+- **Next step:** **M2.9 Wrap-up: the manual checklist** (criteria 4 and
+  5, never reported), then tick M2.9 and the tag `v0.0.3-m2`, which the
+  owner pushes. Then M3, starting with its plan.
+  - The measured runs are done (2026-10-15/16, `m2-gate.md`, "M2.9 run"
+    and "M2.9 run 2"): criteria 1, 2, 3 and 6 pass on the iGPU, the dGPU
+    and without vsync. Criterion 1's frame rate is judged over a
+    session's runs (owner, 2026-10-16, PLAN §14): one iGPU run of five
+    failed it alone (a driver cold start), together 0.67 % (pan) and
+    0.42 % (zoom) of intervals over 20 ms.
+  - The cards pan's swapchain waits of the first M2.9 run were a one-off:
+    run 2 found no surface set-ups at all (the report counts them now).
   - M2.8 is done (2026-10-14). The runs are in `m2-gate.md`, the summary
     in the M2.8 item below. The gate is decided: we keep our toolkit
     (owner, 2026-10-13; ADR-0007).

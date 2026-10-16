@@ -238,6 +238,8 @@ struct Gate {
     idle_causes: CauseCounts,
     /// Every frame's interval and parts, for the run's longest gaps.
     gaps: Vec<Gap>,
+    /// What happened to the window's surface, by phase.
+    surface: Vec<(&'static str, SurfaceCounts)>,
 }
 
 /// A frame of any phase: the time since the one before, and its parts.
@@ -251,6 +253,19 @@ struct Gap {
     acquire: Duration,
     encode: Duration,
     submit: Duration,
+    /// The surface was set up again first (part of `acquire`).
+    reconfigured: bool,
+    /// Frames skipped since the one before.
+    skipped_before: u32,
+}
+
+/// What happened to the window's surface in a phase: textures the driver
+/// called suboptimal, set-ups again before a frame, skipped frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SurfaceCounts {
+    suboptimal: u64,
+    reconfigured: u64,
+    skipped: u64,
 }
 
 impl Phase {
@@ -427,6 +442,22 @@ impl Gate {
         self.typed += 1;
     }
 
+    fn count_surface(&mut self, frame: &FrameInfo) {
+        let phase = self.phase.name();
+        let at = self
+            .surface
+            .iter()
+            .position(|(name, _)| *name == phase)
+            .unwrap_or_else(|| {
+                self.surface.push((phase, SurfaceCounts::default()));
+                self.surface.len() - 1
+            });
+        let counts = &mut self.surface[at].1;
+        counts.suboptimal += u64::from(frame.render.suboptimal);
+        counts.reconfigured += u64::from(frame.render.reconfigured);
+        counts.skipped += u64::from(frame.render.skipped_before);
+    }
+
     fn canvas_sample(&self, frame: &FrameInfo, interval: Duration) -> CanvasSample {
         let canvas = self.app.board.borrow().last_canvas.clone();
         CanvasSample {
@@ -570,6 +601,7 @@ impl Gate {
             gpu_times: std::collections::HashMap::new(),
             idle_causes: CauseCounts::default(),
             gaps: Vec::new(),
+            surface: Vec::new(),
         })
     }
 }
@@ -610,8 +642,11 @@ impl View for Gate {
                 acquire: frame.render.acquire,
                 encode: frame.render.encode,
                 submit: frame.render.submit,
+                reconfigured: frame.render.reconfigured,
+                skipped_before: frame.render.skipped_before,
             });
         }
+        self.count_surface(frame);
         self.app.set_frame(frame.paint, frame.render.encode);
         self.app.board.borrow_mut().note_render_time(
             frame.render.textures,
@@ -994,6 +1029,38 @@ fn criterion_2(samples: &[CanvasSample], tiles: bool) -> Option<bool> {
     (tiles && samples.len() >= 2).then(|| samples.iter().skip(1).all(|sample| sample.rendered <= 4))
 }
 
+/// How to open the GPU, from the arguments.
+fn gpu_options(args: &Args) -> GpuOptions {
+    GpuOptions {
+        power: match args.gpu {
+            GpuChoice::Low => Power::Low,
+            GpuChoice::High => Power::High,
+        },
+        adapter: args.adapter.clone(),
+        no_vsync: args.no_vsync,
+        glyph_atlas: !args.no_glyph_atlas,
+        gpu_times: !args.no_gpu_times,
+    }
+}
+
+/// What happened to the window's surface, by phase.
+fn surface_report(surface: &[(&'static str, SurfaceCounts)]) -> serde_json::Value {
+    surface
+        .iter()
+        .map(|(phase, counts)| {
+            (
+                (*phase).to_owned(),
+                serde_json::json!({
+                    "suboptimal": counts.suboptimal,
+                    "reconfigured": counts.reconfigured,
+                    "skipped": counts.skipped,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// The `count` longest intervals in `gaps`, longest first, with the phase
 /// each frame belonged to and its parts.
 fn longest_intervals(gaps: &[Gap], count: usize) -> serde_json::Value {
@@ -1012,6 +1079,8 @@ fn longest_intervals(gaps: &[Gap], count: usize) -> serde_json::Value {
                 "acquire_ms": millis(gap.acquire),
                 "encode_ms": millis(gap.encode),
                 "submit_ms": millis(gap.submit),
+                "reconfigured": gap.reconfigured,
+                "skipped_before": gap.skipped_before,
             })
         })
         .collect()
@@ -1091,16 +1160,7 @@ fn main() -> anyhow::Result<()> {
     let main_started = Instant::now();
     let args = Args::parse();
     eprintln!("imaginarium-gate {BUILD}");
-    let gpu = GpuOptions {
-        power: match args.gpu {
-            GpuChoice::Low => Power::Low,
-            GpuChoice::High => Power::High,
-        },
-        adapter: args.adapter.clone(),
-        no_vsync: args.no_vsync,
-        glyph_atlas: !args.no_glyph_atlas,
-        gpu_times: !args.no_gpu_times,
-    };
+    let gpu = gpu_options(&args);
     // The drivers load while the fonts load and the view is built.
     let gpu_start = GpuStart::spawn(&gpu);
     let options = WindowOptions {
@@ -1276,6 +1336,9 @@ fn main() -> anyhow::Result<()> {
             "shapes": canvas_report(&gate.manual[1], None, &gate.gpu_times),
         },
         "missing_textures": gate.missing_textures,
+        // Textures the driver called suboptimal, set-ups of the surface
+        // before a frame (part of its `acquire`), skipped frames.
+        "surface": surface_report(&gate.surface),
         "shapes": {
             "pan": canvas_report(&gate.shape_samples[0], gate.settled[0], &gate.gpu_times),
             "zoom": canvas_report(&gate.shape_samples[1], gate.settled[1], &gate.gpu_times),
@@ -1557,6 +1620,53 @@ mod tests {
             "0",
         ]);
         assert_eq!(runs(&phases(&mut nothing)), [("start", 1), ("settle", 1)]);
+    }
+
+    #[test]
+    fn surface_set_ups_and_skips_are_counted_by_phase() {
+        let mut gate = scripted(&["--measure", "--pan-frames", "3"]);
+        let frame = |number: u64, render: FrameTiming| FrameInfo {
+            number,
+            paint: ms(1),
+            render,
+            at: ms(16 * number),
+            scale: 1.0,
+            physical_size: (1280, 800),
+            causes: FrameCauses::default(),
+        };
+        gate.presented(&frame(1, FrameTiming::default()));
+        assert_eq!(gate.phase.name(), "cards pan");
+        gate.presented(&frame(
+            2,
+            FrameTiming {
+                suboptimal: true,
+                ..FrameTiming::default()
+            },
+        ));
+        gate.presented(&frame(
+            3,
+            FrameTiming {
+                acquire: ms(40),
+                reconfigured: true,
+                skipped_before: 2,
+                ..FrameTiming::default()
+            },
+        ));
+        assert_eq!(
+            surface_report(&gate.surface),
+            serde_json::json!({
+                "start": {"suboptimal": 0, "reconfigured": 0, "skipped": 0},
+                "cards pan": {"suboptimal": 1, "reconfigured": 1, "skipped": 2},
+            })
+        );
+        // The longest gaps say which frames were set up again.
+        let gaps = longest_intervals(&gate.gaps, 8);
+        assert!(
+            gaps.as_array().unwrap().iter().any(|gap| gap["frame"] == 3
+                && gap["reconfigured"] == true
+                && gap["skipped_before"] == 2),
+            "{gaps}"
+        );
     }
 
     #[test]
