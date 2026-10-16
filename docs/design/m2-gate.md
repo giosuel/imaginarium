@@ -93,9 +93,9 @@ Since M2.9 run 2, the report has the window's surface too:
   surface lost or set up again).
 - `longest_intervals` says for each frame whether the surface was set up
   again first, and how many frames were skipped before it.
-- `--keep-suboptimal` keeps drawing into a suboptimal surface without
-  setting it up again, as before M2.9 (the report's
-  `gpu.keep_suboptimal`).
+- Run 2's build also had `--keep-suboptimal`, which kept drawing into a
+  suboptimal surface without setting it up again. Run 2 found no
+  set-ups, and the flag is gone since.
 
 How criteria 1 and 2 are judged (`shapes.criterion_1_pass`,
 `shapes.criterion_2_pass`; since the M2.9 review):
@@ -107,6 +107,10 @@ How criteria 1 and 2 are judged (`shapes.criterion_1_pass`,
   there), as the swapchain wait (`acquire`) isn't in it either. Without
   vertical sync only the p99 counts. Before M2.9 the pass checked the
   p99 alone, with the present in it.
+- **Over several runs** on one GPU (owner, 2026-10-16; PLAN §14): the
+  frame rate's 1 % counts the intervals of all the session's runs
+  together, and the p99 must pass in each run.
+  `shapes.criterion_1_pass` judges one run on its own.
 - **Criterion 2**: past the frame that lifts the shape, no drag frame
   renders more than 4 tiles. `null` without tiles (`--no-tiles`) or
   without a frame past the lift.
@@ -888,6 +892,7 @@ Times are in ms.
   sets its surface up again after a texture the driver calls
   suboptimal, inside `acquire`. The report couldn't tell; run 2 below
   can. The iGPU run also recorded 6 inputs (the others 1).
+  **Run 2: not the cause**: no set-ups at all, and the 36 was a one-off.
 - No criterion measures the cards pan (criterion 1 is the shapes
   board), but the tag shouldn't ship a regression.
 - The manual checklist: notes still to come.
@@ -910,6 +915,40 @@ What decides it: `surface["cards pan"].reconfigured` and
 waits and `--keep-suboptimal` removes both, the window stops setting the
 surface up again for every suboptimal texture. If there are no set-ups,
 the waits come from somewhere else.
+
+### Results (2026-10-16, "M2.9 run 2 (1586887)")
+
+All four on the iGPU with vsync, fullscreen at 3456×2160 (scale 1.5).
+Times are in ms.
+
+| | a1 | b1, keep | a2 | b2, keep |
+|---|---|---|---|---|
+| Surface: suboptimal / set-ups / skipped, all phases | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| Cards pan: intervals over 20 ms, of 300 | 15 | 8 | 9 | 4 |
+| C1 shapes pan / zoom, p99 (< 16) | 12.8 / 12.1 | 9.4 / 12.4 | 8.2 / 13.1 | 7.6 / 12.7 |
+| C1 intervals over 20 ms: pan / zoom / drag, of 240 | **4** / 1 / 0 | 2 / 1 / 0 | 0 / 1 / 0 | 1 / 1 / 0 |
+| `criterion_1_pass` (one run) | **false** | true | true | true |
+| The Vulkan driver's start | 942 | 230 | 121 | 101 |
+| Cards board covered after | 748 | 458 | 422 | 390 |
+| Building tiles' items, per tile | 0.51 | 0.29 | 0.31 | 0.28 |
+
+- **The set-ups are cleared:** no suboptimal texture, no set-up and no
+  skipped frame in any phase of any run, so `--keep-suboptimal` changed
+  nothing. It is gone again; the counts stay in the report.
+- **The cards pan's 36 was a one-off** (the M2.9 run with 6 inputs):
+  these runs have 4–15, runs 4 and 5 had 8 and 10.
+- **One run failed criterion 1's frame rate on its own:** a1, with 4 of
+  240 intervals over 20 ms in the shapes pan (2 allowed); its p99
+  passes. a1 was the driver's cold start (942 ms) and slower throughout
+  (tiles' items 0.51 ms per tile; the cards covered after 748 ms). Its
+  slow frames waited in the driver (`acquire` 14 ms and `submit` 8.4 ms;
+  7.6 and 4.7 ms), and one upload of 16 tiles took 15.9 ms. b1 and b2
+  had such upload stalls too (31.5 and 15.6 ms): the iGPU's stalls of
+  M2.8, on M3's list.
+- **Over the session's five iGPU runs** (the M2.9 run and these four):
+  the shapes pan 8 of 1,200 intervals over 20 ms (0.67 %), the zoom 5 of
+  1,200 (0.42 %), the drag 0. **Criterion 1 passes on the iGPU,** judged
+  over the session's runs (owner, 2026-10-16).
 
 ## Decision (owner, 2026-10-13)
 
