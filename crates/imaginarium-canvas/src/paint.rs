@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use imaginarium_model::NodeId;
 use imaginarium_render::Scene;
 use imaginarium_render::canvas::{CanvasContent, ItemId};
-use imaginarium_render::kurbo::{Affine, Cap, Join, Point, Rect, RoundedRect, Stroke};
+use imaginarium_render::kurbo::{Affine, Cap, Join, Point, Rect, RoundedRect, Stroke, Vec2};
 
 use crate::items::{Clip, Item, ItemText, Items, Look};
 
@@ -73,7 +73,11 @@ fn clipped(
         None => paint(scene, base),
         Some((clip, rest)) => {
             scene.paint_with(base.inverse() * clip.world, |scene| {
-                scene.push_clip(&clip.rect);
+                if clip.radius > 0.0 {
+                    scene.push_clip(&RoundedRect::from_rect(clip.rect, clip.radius));
+                } else {
+                    scene.push_clip(&clip.rect);
+                }
                 clipped(scene, rest, clip.world, paint);
                 scene.pop();
             });
@@ -101,8 +105,15 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
                 scene.push_opacity(style.opacity);
             }
             if level_scale < BOX_SCALE {
+                // Only the fill (or the line): no outline, no label. The
+                // outline itself, not the box: a turned box reaches past
+                // the bounds.
                 if let Some(color) = style.fill.or(style.stroke) {
-                    scene.fill(&Rect::from_origin_size(Point::ZERO, size), color);
+                    if outline.closed {
+                        scene.fill(&outline.path, color);
+                    } else {
+                        scene.stroke(&outline.path, style.stroke_width.max(1.0), color);
+                    }
                 }
             } else {
                 if outline.closed
@@ -136,6 +147,10 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
             }
         }
         Look::Frame { style } => {
+            let layer = style.opacity < 1.0;
+            if layer {
+                scene.push_opacity(style.opacity);
+            }
             let rect = Rect::from_origin_size(Point::ZERO, size);
             let shape =
                 RoundedRect::from_rect(rect, style.radius.min(size.width.min(size.height) / 2.0));
@@ -146,6 +161,9 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
                 && style.stroke_width > 0.0
             {
                 scene.stroke_with(&shape, &outline_stroke(style.stroke_width), stroke);
+            }
+            if layer {
+                scene.pop();
             }
         }
         Look::Placeholder => {
@@ -158,12 +176,14 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
 
 fn paint_text(text: &ItemText, scene: &mut Scene, level_scale: f64) {
     if f64::from(text.look.size) * level_scale < MIN_TEXT_PIXELS {
+        // Far out, a faint bar where the lines are.
         let laid = text.block.size();
-        let rect = Rect::from_origin_size(
-            text.origin
-                + imaginarium_render::kurbo::Vec2::new((text.extent.width - laid.width) / 2.0, 0.0),
-            laid,
-        );
+        let indent = if text.centered {
+            (text.extent.width - laid.width) / 2.0
+        } else {
+            0.0
+        };
+        let rect = Rect::from_origin_size(text.origin + Vec2::new(indent, 0.0), laid);
         scene.fill(&rect, text.look.color.with_alpha(0.25));
         return;
     }

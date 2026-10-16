@@ -156,7 +156,7 @@ pub struct TextLook {
 
 /// A color property: `None` when absent or unparsable, transparent colors
 /// as `None` too (nothing to paint).
-fn color_prop(view: &DocumentView, node: NodeId, prop: &str) -> Option<Option<Color>> {
+pub(crate) fn color_prop(view: &DocumentView, node: NodeId, prop: &str) -> Option<Option<Color>> {
     let value = view.style_prop(node, prop)?;
     let color = value.as_str().and_then(parse_color)?;
     Some((color.components[3] > 0.0).then_some(color))

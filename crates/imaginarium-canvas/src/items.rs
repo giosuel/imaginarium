@@ -68,12 +68,16 @@ pub(crate) struct Clip {
     pub world: Affine,
     /// The frame's box, in its box space.
     pub rect: Rect,
+    /// Its corner radius: children are clipped to the rounded box.
+    pub radius: f64,
 }
 
 /// Laid-out text in an item, at `origin` in box space.
 #[derive(Clone)]
 pub(crate) struct ItemText {
     pub block: Rc<TextBlock>,
+    /// Lines are centered within `extent` (labels), not at its start.
+    pub centered: bool,
     pub origin: Point,
     /// The area its lines line up in.
     pub extent: Size,
@@ -194,19 +198,33 @@ impl Items {
     }
 
     /// Builds every item of `view`, in z order with `Z_GAP` between keys.
+    #[cfg(test)]
     pub(crate) fn build(view: &DocumentView, fonts: &mut Fonts, colors: &BoardColors) -> Self {
         let mut items = Self::default();
+        items.rebuild(view, fonts, colors);
+        items
+    }
+
+    /// Builds every item again (a new theme), keeping the item ids and the
+    /// text layouts that still fit.
+    pub(crate) fn rebuild(&mut self, view: &DocumentView, fonts: &mut Fonts, colors: &BoardColors) {
+        self.by_node.clear();
+        self.places.clear();
+        self.frames.clear();
+        self.ids.retain(|node, _| view.node(*node).is_some());
+        let ids = &self.ids;
+        self.by_item.retain(|_, node| ids.contains_key(node));
+        self.texts.retain(|node, _| view.node(*node).is_some());
         let mut z = 0;
         let mut walker = Walker {
             view,
             fonts,
             colors,
-            items: &mut items,
+            items: self,
             z: Some(&mut z),
             built: Vec::new(),
         };
         walker.children(Parent::Root, Affine::IDENTITY, &Rc::from([]));
-        items
     }
 
     /// Whether a node is visible (it, and every ancestor, isn't hidden).
@@ -528,10 +546,12 @@ impl Walker<'_> {
             * local_transform(geometry.x, geometry.y, size.width, size.height, geometry.r);
         let mut inner = clips.clone();
         if matches!(node.kind(), NodeKind::Frame) {
+            let style = frame_style(self.view, id, self.colors);
             let mut frames: Vec<Clip> = clips.to_vec();
             frames.push(Clip {
                 world,
                 rect: Rect::from_origin_size(Point::ZERO, size),
+                radius: style.radius.min(size.width.min(size.height) / 2.0),
             });
             inner = Rc::from(frames);
         }
@@ -696,6 +716,7 @@ impl Walker<'_> {
         };
         Some(ItemText {
             block,
+            centered: align == Align::Center,
             origin,
             extent,
             look,
@@ -747,7 +768,10 @@ impl Walker<'_> {
 /// Where an item's text can paint, in document space.
 fn text_bounds(world: Affine, text: &ItemText) -> Rect {
     let rect = Rect::from_origin_size(text.origin, text.extent);
-    world.transform_rect_bbox(rect).inflate(2.0, 2.0)
+    // Glyphs reach past their line boxes (accents, descenders, italics):
+    // a share of the size around it.
+    let reach = (f64::from(text.look.size) * 0.25).max(2.0);
+    world.transform_rect_bbox(rect).inflate(reach, reach)
 }
 
 /// A frame's style: its own, else the theme's frame colors, a 1 pt border
@@ -755,17 +779,14 @@ fn text_bounds(world: Affine, text: &ItemText) -> Rect {
 fn frame_style(view: &DocumentView, node: NodeId, colors: &BoardColors) -> ShapeStyle {
     let own = style::shape_style(view, node, colors.theme);
     let has = |prop: &str| view.style_prop(node, prop).is_some();
+    // A color that doesn't parse counts as absent, as for shapes.
+    let color = |prop: &str, default: Color| match style::color_prop(view, node, prop) {
+        Some(color) => color.map(|color| style::shown(color, colors.theme)),
+        None => Some(default),
+    };
     ShapeStyle {
-        fill: if has("fill") {
-            own.fill
-        } else {
-            Some(colors.frame_bg)
-        },
-        stroke: if has("stroke") {
-            own.stroke
-        } else {
-            Some(colors.frame_border)
-        },
+        fill: color("fill", colors.frame_bg),
+        stroke: color("stroke", colors.frame_border),
         stroke_width: if has("stroke_w") {
             own.stroke_width
         } else {

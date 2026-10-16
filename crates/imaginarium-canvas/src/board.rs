@@ -123,6 +123,9 @@ pub struct BoardCanvas {
     access_nodes: Vec<NodeId>,
     /// The board's box in the last layout.
     bounds: Rect,
+    /// The dots of the last frame: one path, and the view it was built for
+    /// (the box, the first dot, the spacing).
+    dots: Option<((Rect, Point, f64), imaginarium_render::kurbo::BezPath)>,
 }
 
 impl BoardCanvas {
@@ -148,6 +151,7 @@ impl BoardCanvas {
             name_rects: Vec::new(),
             access_nodes: Vec::new(),
             bounds: Rect::ZERO,
+            dots: None,
         }
     }
 
@@ -597,20 +601,22 @@ impl BoardCanvas {
             return;
         }
         let colors = BoardColors::of(&current);
-        let items = Items::build(self.document.view(), fonts, &colors);
-        // Replace the canvas's items: the old ones go, the new ones come.
-        if let Some(old) = &self.items {
-            for item in old.by_node.values() {
-                if !items.by_item.contains_key(&item.id) {
-                    self.canvas.remove(item.id);
-                }
+        // Built again, items keep their ids (and text layouts that fit).
+        let mut items = self.items.take().unwrap_or_default();
+        let before: Vec<imaginarium_render::canvas::ItemId> =
+            items.by_node.values().map(|item| item.id).collect();
+        items.rebuild(self.document.view(), fonts, &colors);
+        for id in before {
+            if !items
+                .by_item
+                .get(&id)
+                .is_some_and(|node| items.by_node.contains_key(node))
+            {
+                self.canvas.remove(id);
             }
         }
         for item in items.by_node.values() {
             self.canvas.upsert(item.id, item.z, item.bounds);
-        }
-        if self.items.is_some() {
-            self.canvas.invalidate_all();
         }
         self.names.clear();
         // A build reads the whole view, pending changes included.
@@ -623,6 +629,18 @@ impl BoardCanvas {
     /// does: the background, the tiles (directly in the first frame) and
     /// the frame names. For the widget, exports and tests.
     pub fn paint_into(&mut self, fonts: &mut Fonts, scene: &mut Scene, bounds: Rect, now: Instant) {
+        // In a new theme every tile is wrong: drop them rather than show
+        // them as stand-ins, and draw the first frame directly.
+        let current = theme();
+        if self.items.is_some()
+            && self
+                .theme
+                .as_ref()
+                .is_some_and(|built| !Rc::ptr_eq(built, &current))
+        {
+            self.canvas.release(scene);
+            self.painted = 0;
+        }
         // A gesture's pointer moves since the last frame become one command.
         self.sync(fonts);
         self.flush_gesture();
@@ -1074,30 +1092,39 @@ impl BoardCanvas {
         }
     }
 
-    fn paint_dots(&self, scene: &mut Scene, bounds: Rect) {
+    fn paint_dots(&mut self, scene: &mut Scene, bounds: Rect) {
+        // At least this far apart on screen, so a screenful stays a few
+        // thousand dots.
         let mut pitch = DOT_PITCH;
-        while pitch * self.zoom < 12.0 {
-            pitch *= 4.0;
+        while pitch * self.zoom < 16.0 {
+            pitch *= 2.0;
         }
-        let color = theme().color(Token::BoardDot);
-        let radius = 1.2;
+        let step = pitch * self.zoom;
         let start = self.origin;
         let first = Point::new(
-            (start.x / pitch).ceil() * pitch,
-            (start.y / pitch).ceil() * pitch,
+            bounds.x0 + ((start.x / pitch).ceil() * pitch - start.x) * self.zoom,
+            bounds.y0 + ((start.y / pitch).ceil() * pitch - start.y) * self.zoom,
         );
-        let step = pitch * self.zoom;
-        let mut y = bounds.y0 + (first.y - start.y) * self.zoom;
-        while y < bounds.y1 {
-            let mut x = bounds.x0 + (first.x - start.x) * self.zoom;
-            while x < bounds.x1 {
-                scene.fill(
-                    &imaginarium_render::kurbo::Circle::new((x, y), radius),
-                    color,
-                );
-                x += step;
+        // One path of every dot, built again only when the view moves.
+        let key = (bounds, first, step);
+        if self.dots.as_ref().is_none_or(|(built, _)| *built != key) {
+            let mut path = imaginarium_render::kurbo::BezPath::new();
+            let mut y = first.y;
+            while y < bounds.y1 {
+                let mut x = first.x;
+                while x < bounds.x1 {
+                    path.extend(imaginarium_render::kurbo::Shape::path_elements(
+                        &imaginarium_render::kurbo::Circle::new((x, y), 1.2),
+                        0.1,
+                    ));
+                    x += step;
+                }
+                y += step;
             }
-            y += step;
+            self.dots = Some((key, path));
+        }
+        if let Some((_, path)) = &self.dots {
+            scene.fill(path, theme().color(Token::BoardDot));
         }
     }
 
@@ -1123,6 +1150,10 @@ impl BoardCanvas {
             let Some(name) = &item.name else {
                 continue;
             };
+            // A frame its parent frame clips away entirely has no name.
+            if item.bounds.width() <= 0.0 || item.bounds.height() <= 0.0 {
+                continue;
+            }
             let corner = camera * (item.world * Point::ZERO);
             if !bounds.inflate(0.0, 40.0).contains(corner)
                 && !item.bounds.overlaps(self.viewport(bounds).visible())

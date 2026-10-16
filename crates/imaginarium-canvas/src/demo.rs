@@ -3,7 +3,8 @@
 //! Sample boards, for the examples, tests and benchmarks.
 
 use imaginarium_model::{
-    Actor, Document, DocumentKind, Geometry, NodeId, NodeKind, Parent, Result, Transaction, UndoConfig, Value,
+    Actor, Document, DocumentKind, Geometry, NodeId, NodeKind, Parent, Result, Transaction,
+    UndoConfig, Value,
 };
 
 /// The board of the mockups ("Launch plan · Q4"): a frame with three

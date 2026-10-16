@@ -309,3 +309,124 @@ fn tiles_paint_what_drawing_directly_paints() {
         .count();
     assert!(differing < 50, "{differing} pixels differ");
 }
+
+#[test]
+fn a_theme_switch_drops_the_old_tiles_instead_of_showing_them() {
+    let mut fonts = Fonts::bundled_only();
+    let mut board = BoardCanvas::new(crate::demo::grid(2_000).unwrap());
+    let bounds = Rect::new(0.0, 0.0, 2000.0, 1422.0);
+    let frame = |board: &mut BoardCanvas, fonts: &mut Fonts| {
+        let mut scene = Scene::new();
+        board.paint_into(fonts, &mut scene, bounds, Instant::now());
+        board.stats().clone()
+    };
+    for _ in 0..40 {
+        if frame(&mut board, &mut fonts).owed == 0 {
+            break;
+        }
+    }
+    set_theme(Theme::light(DEFAULT_ACCENT));
+    // No tile of the dark theme is drawn again, not even as a stand-in.
+    // The first frame after the switch is drawn directly; the next ones
+    // render tiles of the new theme and show nothing old meanwhile.
+    frame(&mut board, &mut fonts);
+    let stats = frame(&mut board, &mut fonts);
+    assert_eq!(stats.reused, 0, "{stats:?}");
+    for _ in 0..3 {
+        let stats = frame(&mut board, &mut fonts);
+        assert_eq!(stats.blank, stats.owed, "nothing stands in: {stats:?}");
+    }
+    set_theme(Theme::dark(DEFAULT_ACCENT));
+}
+
+/// The pixels outside `bounds` (document space) that painting `node`
+/// at `scale` touches.
+fn pixels_outside(document: &Document, node: NodeId, scale: f64) -> usize {
+    let items = build(document);
+    let item = &items.by_node[&node];
+    let (width, height) = (400u16, 400u16);
+    // The item's bounds in the middle of the picture.
+    let center = item.bounds.center();
+    let camera = imaginarium_render::kurbo::Affine::translate((200.0, 200.0))
+        * imaginarium_render::kurbo::Affine::scale(scale)
+        * imaginarium_render::kurbo::Affine::translate(-center.to_vec2());
+    let mut scene = Scene::new();
+    scene.paint_with(camera, |scene| crate::paint::paint(item, scene, scale));
+    let pixmap = CpuRenderer::new(CpuMode::Deterministic).render(
+        &scene,
+        width,
+        height,
+        imaginarium_render::peniko::Color::TRANSPARENT,
+    );
+    let inside = camera.transform_rect_bbox(item.bounds).inflate(1.0, 1.0);
+    let mut outside = 0;
+    for (index, pixel) in pixmap.data().iter().enumerate() {
+        let (x, y) = (
+            (index % usize::from(width)) as f64 + 0.5,
+            (index / usize::from(width)) as f64 + 0.5,
+        );
+        if pixel.a > 0 && !inside.contains(Point::new(x, y)) {
+            outside += 1;
+        }
+    }
+    outside
+}
+
+#[test]
+fn turned_shapes_paint_inside_their_bounds_at_every_scale() {
+    for preset in ["diamond", "ellipse", "triangle", "rect", "line"] {
+        let (document, id) = one_node(NodeKind::Shape, |txn, id| {
+            txn.set_prop(id, "shape", Value::String(preset.into()))
+                .unwrap();
+            txn.set_geometry(
+                id,
+                Geometry {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 120.0,
+                    r: 45.0,
+                },
+            )
+            .unwrap();
+            txn.set_style_override(id, "fill", Value::String("#E0E7FF".into()))
+                .unwrap();
+            txn.insert_text(id, 0, "Label").unwrap();
+        });
+        for scale in [0.1, 0.5, 1.0] {
+            assert_eq!(
+                pixels_outside(&document, id, scale),
+                0,
+                "{preset} at {scale}"
+            );
+        }
+    }
+    let (document, id) = one_node(NodeKind::Text, |txn, id| {
+        txn.insert_text(id, 0, "Ïfjgy ÅÉ").unwrap();
+        txn.set_style_override(id, "size", Value::Number(200.0))
+            .unwrap();
+    });
+    assert_eq!(pixels_outside(&document, id, 0.5), 0, "big text");
+}
+
+#[test]
+fn a_frames_opacity_fades_it() {
+    let (document, id) = one_node(NodeKind::Frame, |txn, id| {
+        txn.set_style_override(id, "fill", Value::String("#FFFFFF".into()))
+            .unwrap();
+        txn.set_style_override(id, "opacity", Value::Number(0.5))
+            .unwrap();
+    });
+    let items = build(&document);
+    let mut scene = Scene::new();
+    crate::paint::paint(&items.by_node[&id], &mut scene, 1.0);
+    let pixmap = CpuRenderer::new(CpuMode::Deterministic).render(
+        &scene,
+        200,
+        100,
+        imaginarium_render::peniko::Color::TRANSPARENT,
+    );
+    // Inside the frame (10, 20, 100 × 50): white at half opacity.
+    let pixel = pixmap.data()[40 * 200 + 50];
+    assert!((i32::from(pixel.a) - 128).abs() <= 1, "{pixel:?}");
+}
