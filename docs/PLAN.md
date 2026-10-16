@@ -353,7 +353,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | M8 | **Collaboration (Hub)** | Hub server, OPAQUE accounts, devices, E2EE sharing, roles, real-time sync and presence, comments, version history, admin UI, Docker |
 | M9 | Presentations | Masters/layouts, themes, presenter view, transitions; PPTX + ODP |
 | M10 | Layout (Publisher) | Fixed pages, linked text frames, master pages, bleed and crop marks |
-| M11 | **Paint + AI image suite** | Raster layers and masks, the draw tool's pixel brushes (pressure, tilt); img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
+| M11 | **Paint + AI image suite** | Raster layers and masks, the draw tool's pixel brushes (pressure, tilt); img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations; Python charts (matplotlib plots on the board, written and edited by the AI) |
 
 ### Phase D: Ecosystem and 1.0
 
@@ -475,7 +475,7 @@ Decided (2026-10-16):
   Ink comes first, in M4: pen, marker, highlighter, eraser and pen
   pressure, stored as vector strokes. The pixel brushes come with M11's
   paint layers.
-- **Icons:** Lucide (ISC license).
+- **Icons:** Lucide (ISC license; MIT for the icons from Feather).
 - **The title bar is the system's:** the window manager draws it, and
   where it draws none (Hyprland) the window has no bar; where it
   declines (GNOME), winit draws a plain one. The windows get the app ID
@@ -483,6 +483,13 @@ Decided (2026-10-16):
 - **Extras the mockups added:** copy and paste style, the interface size
   and the board background settings come in M3; the "Start from"
   templates come later, with M4's shape libraries.
+- **Python charts, later (around M10 or M11):** "we could allow the drawing
+  of graphs with matplotlib in python, and then also have AI be able to
+  write and edit them." A chart object on the board holds a Python script
+  that draws it with matplotlib; the AI writes and edits the script. To
+  design when it comes: where Python runs (bundled or the user's, and
+  sandboxed, since scripts come with shared boards) and how its output
+  becomes vector content. Not started (owner, 2026-10-16).
 - **Dark first:** "I like the dark mode. lets implement this first and
   then light mode later on." M3 builds the dark theme; light and high
   contrast follow, on the same tokens.
@@ -495,6 +502,13 @@ Decided (2026-10-16):
   shows the dark one ("I prefer dark palette colors"). Colors outside the
   palette show as stored; text without a color of its own follows the
   theme.
+
+- **M3.2 overnight, stacked** (2026-10-16): "Yes, feel free to continue
+  with M3.3 if you're done early." The canvas PRs are stacked on the
+  M3.1 ones, so work doesn't wait for merges.
+- **Frame names are drawn on top of the tiles** (2026-10-16, canvas.md
+  §11): they keep the interface's size at every zoom, like the
+  selection.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
