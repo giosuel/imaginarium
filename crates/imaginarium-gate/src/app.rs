@@ -53,10 +53,11 @@ pub(crate) struct App {
 
 fn input_colors() -> InputColors {
     InputColors {
-        background: PAPER,
-        border: CHROME_EDGE,
-        accent: ACCENT,
-        placeholder: INK.with_alpha(0.45),
+        background: PAPER.into(),
+        border: CHROME_EDGE.into(),
+        accent: ACCENT.into(),
+        placeholder: INK.with_alpha(0.45).into(),
+        text: INK.into(),
     }
 }
 
@@ -129,11 +130,11 @@ impl App {
             },
         );
         let button_colors = ButtonColors {
-            background: PAPER,
-            hover: INK.with_alpha(0.08),
-            pressed: INK.with_alpha(0.14),
-            text: INK,
-            focus: ACCENT,
+            background: PAPER.into(),
+            hover: INK.with_alpha(0.08).into(),
+            pressed: INK.with_alpha(0.14).into(),
+            text: INK.into(),
+            focus: ACCENT.into(),
         };
         let commands_button = ui.add(Button::new(
             "Commands  Ctrl+K",

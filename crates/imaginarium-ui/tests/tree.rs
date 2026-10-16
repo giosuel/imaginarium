@@ -23,20 +23,21 @@ const AREA: Rect = Rect::new(0.0, 0.0, 400.0, 300.0);
 
 fn colors() -> ButtonColors {
     ButtonColors {
-        background: Color::WHITE,
-        hover: Color::WHITE,
-        pressed: Color::WHITE,
-        text: Color::BLACK,
-        focus: Color::BLACK,
+        background: Color::WHITE.into(),
+        hover: Color::WHITE.into(),
+        pressed: Color::WHITE.into(),
+        text: Color::BLACK.into(),
+        focus: Color::BLACK.into(),
     }
 }
 
 fn input_colors() -> InputColors {
     InputColors {
-        background: Color::WHITE,
-        border: Color::BLACK,
-        accent: Color::BLACK,
-        placeholder: Color::BLACK,
+        background: Color::WHITE.into(),
+        border: Color::BLACK.into(),
+        accent: Color::BLACK.into(),
+        placeholder: Color::BLACK.into(),
+        text: Color::BLACK.into(),
     }
 }
 

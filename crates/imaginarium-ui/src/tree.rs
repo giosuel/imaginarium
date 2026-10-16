@@ -297,6 +297,8 @@ pub struct Ui {
     restyle: Vec<WidgetId>,
     clipboard: Clipboard,
     stats: TreeStats,
+    /// The theme generation the widgets last painted with.
+    theme_seen: u64,
 }
 
 impl Default for Ui {
@@ -323,6 +325,7 @@ impl Ui {
             restyle: Vec::new(),
             clipboard: Clipboard::default(),
             stats: TreeStats::default(),
+            theme_seen: crate::theme::generation(),
         }
     }
 
@@ -523,6 +526,26 @@ impl Ui {
         let pending = PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
         for (id, layout) in pending {
             self.mark(id, layout);
+        }
+        // A theme switch touches every widget: colors, and the text that
+        // labels shaped in their old color. It is rare, so no finer
+        // tracking.
+        let theme = crate::theme::generation();
+        if theme != self.theme_seen {
+            self.theme_seen = theme;
+            let live: Vec<WidgetId> = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.node.is_some())
+                .map(|(index, slot)| WidgetId {
+                    index: index as u32,
+                    generation: slot.generation,
+                })
+                .collect();
+            for id in live {
+                self.mark(id, true);
+            }
         }
     }
 
