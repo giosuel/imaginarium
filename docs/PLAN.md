@@ -39,8 +39,9 @@ means any modified hosted competitor must publish its changes.
 
 ### Non-goals (for now)
 
-Spreadsheets (the model reserves room for them), a web editor (a WASM web
-*viewer* is possible later), and mobile apps.
+A web editor (a WASM web *viewer* is possible later) and mobile apps.
+Spreadsheets were a non-goal until 2026-10-16; they are in scope now
+(§14).
 
 ---
 
@@ -443,9 +444,26 @@ Decided (2026-10-16):
   Inkscape) will be later, so those fit in without a second model. As in
   a vector tool, a rectangle stays a rectangle with its parameters, and
   the user can convert it to a path. Images and connectors come later.
+- **Documents, sheets and presentations live on the board** like shapes.
+  The board is not only a whiteboard: documents, spreadsheets and
+  presentations are made there too. The features to cover are Google
+  Docs' and Google Sheets', without extra features in the style of
+  Microsoft Office that bloat the product.
+- **Spreadsheets are in scope** (they were a non-goal, §1), with Google
+  Sheets' features. Where they go in the roadmap is open (question 2).
+- **Presentations are wired together on the board.** A presentation is
+  made of the board's own content: steps (frames, documents, sheets,
+  charts, images, any object or area) wired together in an order, with
+  branches. Playing it moves the camera along the wires. Everything is
+  linkable, so anything can be used in a presentation. Animation works
+  with motion paths and with keyframes on any property the user can
+  change (position, color, shape, all of them).
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
+2. **Where spreadsheets go in the roadmap,** and whether presentations
+   keep PPTX and ODP export (M9), which can only approximate a
+   presentation that moves the camera across the board.
 
 The current progress and the next concrete steps are tracked in
 [`docs/STATUS.md`](STATUS.md).
