@@ -1,6 +1,6 @@
 # 0020. The open document lives on the UI thread
 
-- Status: Proposed
+- Status: Accepted (owner, 2026-10-16)
 - Date: 2026-10-16
 
 ## Context

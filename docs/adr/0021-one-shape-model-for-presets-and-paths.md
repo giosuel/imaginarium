@@ -1,8 +1,8 @@
 # 0021. One shape model for presets and paths
 
-- Status: Proposed (the behaviour is the owner's, 2026-10-16: "A rectangle
-  stays a rectangle and it can be converted into a path if the user wants
-  to do so")
+- Status: Accepted (owner, 2026-10-16; the behaviour is theirs: "A
+  rectangle stays a rectangle and it can be converted into a path if the
+  user wants to do so")
 - Date: 2026-10-16
 
 ## Context
