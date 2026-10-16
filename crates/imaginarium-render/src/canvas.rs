@@ -609,6 +609,15 @@ impl Canvas {
         self.upsert(id, z, bounds);
     }
 
+    /// Gives an item a new stacking key that keeps its order among the
+    /// others (every item re-keyed in the same order): nothing looks
+    /// different, so nothing is redrawn.
+    pub fn rekey(&mut self, id: ItemId, z: u64) {
+        if let Some(item) = self.items.get_mut(&id) {
+            item.z = z;
+        }
+    }
+
     /// Removes an item; its area is redrawn.
     pub fn remove(&mut self, id: ItemId) {
         if let Some(item) = self.items.remove(&id) {
@@ -652,6 +661,11 @@ impl Canvas {
         Some(tile)
     }
 
+    /// An item's stacking key.
+    pub fn z(&self, id: ItemId) -> Option<u64> {
+        self.items.get(&id).map(|item| item.z)
+    }
+
     /// An item's bounds.
     pub fn bounds(&self, id: ItemId) -> Option<Rect> {
         self.items.get(&id).map(|item| item.bounds)
@@ -672,6 +686,12 @@ impl Canvas {
             .filter(|(_, item)| item.bounds.contains(point))
             .max_by_key(|(id, item)| (item.z, *id))
             .map(|(id, _)| id)
+    }
+
+    /// Every item whose bounds overlap `area` (document units), back to
+    /// front: the candidates of a marquee.
+    pub fn items_overlapping(&self, area: Rect) -> Vec<ItemId> {
+        self.items_in(area)
     }
 
     /// Marks the tiles over `area` (document units) for re-rendering:
@@ -1358,6 +1378,22 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn items_overlapping_lists_the_items_over_an_area_back_to_front() {
+        let mut canvas = Canvas::new();
+        canvas.upsert(ItemId(1), 10, Rect::new(0.0, 0.0, 100.0, 100.0));
+        canvas.upsert(ItemId(2), 30, Rect::new(50.0, 50.0, 150.0, 150.0));
+        canvas.upsert(ItemId(3), 20, Rect::new(-1e6, -1e6, 1e6, 1e6));
+        assert_eq!(
+            canvas.items_overlapping(Rect::new(90.0, 90.0, 95.0, 95.0)),
+            vec![ItemId(1), ItemId(3), ItemId(2)]
+        );
+        assert_eq!(
+            canvas.items_overlapping(Rect::new(5.0, 5.0, 6.0, 6.0)),
+            vec![ItemId(1), ItemId(3)]
+        );
+    }
     use crate::CpuMode;
     use crate::scene::{Command, TextureWork};
 
