@@ -1,6 +1,6 @@
 # Canvas: the document on the board
 
-Status: **Draft** (M3.0). Crate: `imaginarium-canvas` (new in M3.2), between
+Status: **Implemented** (M3.2; designed in M3.0). Crate: `imaginarium-canvas` (new in M3.2), between
 the model (`imaginarium-model`) and the tile canvas (`imaginarium-render`,
 `rendering.md`). The window around it is `shell.md`.
 
