@@ -341,7 +341,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | # | Milestone | Content |
 |---|---|---|
 | M3 | Shell and canvas | Palette, contextual toolbar, inspector, settings UI, basic shapes, selection/transform, themes, local `.imag` save/load |
-| M4 | Diagramming | Connectors and routing, snapping, groups, alignment, package format, shape libraries, SVG/PNG/PDF export, draw.io import (stretch goal) |
+| M4 | Diagramming | Connectors and routing, snapping, groups, alignment, ink (pen, marker, highlighter, eraser, pen pressure), package format, shape libraries, SVG/PNG/PDF export, draw.io import (stretch goal) |
 | M5 | Text engine | Rich text, IME, bidi, text in shapes, find/replace, spellcheck hook |
 | M6 | **AI foundation** | Capability layer, providers (API + Ollama/llama.cpp + ComfyUI), AI settings UI, assistant with command tools and diff review, text generation, txt2img, ONNX background removal, MCP server |
 
@@ -353,7 +353,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | M8 | **Collaboration (Hub)** | Hub server, OPAQUE accounts, devices, E2EE sharing, roles, real-time sync and presence, comments, version history, admin UI, Docker |
 | M9 | Presentations | Masters/layouts, themes, presenter view, transitions; PPTX + ODP |
 | M10 | Layout (Publisher) | Fixed pages, linked text frames, master pages, bleed and crop marks |
-| M11 | **Paint + AI image suite** | Raster layers and masks, pressure brushes; img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
+| M11 | **Paint + AI image suite** | Raster layers and masks, the draw tool's pixel brushes (pressure, tilt); img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
 
 ### Phase D: Ecosystem and 1.0
 
@@ -437,7 +437,9 @@ Decided (2026-10-16):
   reaches the file on its own, so nobody has to save by hand. It stays a
   desktop application with native open and save dialogs (the dialog
   gives a new board its place). The append-only updates that autosave
-  writes are the same ones collaboration syncs (M8).
+  writes are the same ones collaboration syncs (M8). Closing a board
+  with unsaved changes (an untitled one, say) works as in any other
+  program: Save…, Don't save or Cancel.
 - **Vector shapes (M3):** M3 starts with simple shapes: rectangle (also
   rounded), ellipse, line, triangle, diamond, text and frames. They are
   stored and handled the way complex path-based vector shapes (as in
@@ -470,11 +472,12 @@ Decided (2026-10-16):
   and snaps to the window's edges; the left edge is the default.
 - **A draw tool as capable as Paint's or Photoshop's:** brushes, an
   eraser, graphics tablet support (pressure) and the like, on the board.
+  Ink comes first, in M4: pen, marker, highlighter, eraser and pen
+  pressure, stored as vector strokes. The pixel brushes come with M11's
+  paint layers.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
-2. **When the draw tool comes.** M11 plans the paint suite with pressure
-   brushes; the draw tool on the board may need to come earlier.
 
 The current progress and the next concrete steps are tracked in
 [`docs/STATUS.md`](STATUS.md).

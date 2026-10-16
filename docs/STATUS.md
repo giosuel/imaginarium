@@ -965,6 +965,8 @@ What M3 builds on:
     (2026-10-16) and asked for more: documents, sheets, presentations
     and the draw tool on the board, and a tool bar that can be moved to
     any edge (PLAN §14), also mocked up before they are designed.
+    Still open: the title bar and the icon set, and which extras in the
+    mockups beyond M3's plan stay.
   - **Where the document lives:** on the UI thread, with opening, saving
     and big pastes on workers, or on a model thread of its own. Measured
     before deciding.
@@ -1001,10 +1003,11 @@ What M3 builds on:
     native open and save dialogs (owner, 2026-10-16).
     - Every change is appended (`UPDT`s) on a worker within about a
       second, with crash recovery.
-    - A new board starts untitled and is kept as a draft (autosaved too)
-      until the save dialog gives it a place; from then on, nothing needs
-      saving by hand. What closing an untitled board does is proposed in
-      the mockups.
+    - A new board starts untitled; its changes are kept for crash
+      recovery until the save dialog gives it a place, and from then on
+      nothing needs saving by hand. Closing a board with unsaved changes
+      works as in any other program: Save…, Don't save or Cancel (owner,
+      2026-10-16).
     - Newer files open read-only (`Mode`).
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
@@ -1062,8 +1065,8 @@ What M3 builds on:
   - `Ctrl+,`, and settings in the palette.
 - [ ] **M3.6 Files:**
   - autosave of every change on a worker, and crash recovery;
-  - native open and save dialogs; untitled boards kept as drafts until
-    they are saved; rename, move, save a copy;
+  - native open and save dialogs; closing an unsaved board asks Save…,
+    Don't save or Cancel; rename, move, save a copy;
   - recent files, and newer files opening read-only;
   - optionally, password-protected files (the crypto exists; it needs the
     prompt).
