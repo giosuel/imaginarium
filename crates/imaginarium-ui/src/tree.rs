@@ -392,6 +392,8 @@ struct Layer {
     focus_pending: bool,
     /// Not laid out yet (a dialog ends drags and hover below it then).
     fresh: bool,
+    /// Fades in from 0 to 1 as it opens.
+    appear: crate::animation::Transition,
 }
 
 /// What the last frame cost the tree, for the gate report.
@@ -582,6 +584,12 @@ impl Ui {
         let id = LayerId(self.next_layer);
         self.next_layer += 1;
         let focus_pending = options.focus_first;
+        let mut appear = crate::animation::Transition::new(0.0);
+        let duration = match options.kind {
+            LayerKind::Modal => crate::animation::durations::DIALOG,
+            _ => crate::animation::durations::POPOVER,
+        };
+        appear.to(1.0, duration, crate::animation::Easing::EaseOut);
         self.layers.push(Layer {
             id,
             root: content,
@@ -589,6 +597,7 @@ impl Ui {
             return_focus: self.focus,
             focus_pending,
             fresh: true,
+            appear,
         });
         self.layout_dirty = true;
         request_frame();
@@ -1529,17 +1538,29 @@ impl Ui {
         if let Some(root) = self.root {
             self.paint_node(fonts, root, scene);
         }
-        let layers: Vec<(WidgetId, LayerKind)> = self
+        let layers: Vec<(WidgetId, LayerKind, f64)> = self
             .layers
             .iter()
-            .map(|layer| (layer.root, layer.options.kind))
+            .map(|layer| {
+                let appear = layer.appear.value();
+                (layer.root, layer.options.kind, appear)
+            })
             .collect();
-        for (root, kind) in layers {
+        for (root, kind, appear) in layers {
+            // Layers fade in as they open; the scrim with its dialog.
+            let alpha = appear.clamp(0.0, 1.0) as f32;
             if kind == LayerKind::Modal {
                 let scrim = crate::theme::theme().color(crate::theme::Token::Scrim);
+                let scrim = scrim.with_alpha(scrim.components[3] * alpha);
                 scene.fill(&self.area, scrim);
             }
-            self.paint_node(fonts, root, scene);
+            if alpha < 1.0 {
+                scene.push_opacity(alpha);
+                self.paint_node(fonts, root, scene);
+                scene.pop();
+            } else {
+                self.paint_node(fonts, root, scene);
+            }
         }
     }
 
@@ -1866,16 +1887,28 @@ impl Ui {
             .flatten()
     }
 
-    /// The earliest time a widget wants to be woken.
+    /// The earliest time a widget (or a layer fading in) wants to be woken.
     pub fn wake_at(&self) -> Option<Instant> {
-        self.slots
+        let widgets = self
+            .slots
             .iter()
-            .filter_map(|slot| slot.node.as_ref()?.widget.wake_at())
-            .min()
+            .filter_map(|slot| slot.node.as_ref()?.widget.wake_at());
+        let layers = self
+            .layers
+            .iter()
+            .filter_map(|layer| layer.appear.wake_at());
+        widgets.chain(layers).min()
     }
 
-    /// Wakes the widgets whose time came.
+    /// Wakes the widgets whose time came, and draws the next frame of
+    /// layers fading in.
     pub fn wake(&mut self, fonts: &mut Fonts, now: Instant) {
+        for layer in &mut self.layers {
+            if layer.appear.wake_at().is_some_and(|at| at <= now) {
+                layer.appear.advance();
+                request_frame();
+            }
+        }
         let due: Vec<WidgetId> = self
             .slots
             .iter()

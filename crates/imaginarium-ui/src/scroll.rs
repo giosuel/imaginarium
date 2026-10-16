@@ -37,6 +37,8 @@ pub struct Scroll {
     drag: Option<(f64, f64)>,
     over_bar: bool,
     label: Option<String>,
+    /// A keyboard scroll gliding to its offset.
+    glide: Option<crate::animation::Transition>,
 }
 
 impl Default for Scroll {
@@ -73,6 +75,7 @@ impl Scroll {
             drag: None,
             over_bar: false,
             label: None,
+            glide: None,
         }
     }
 
@@ -106,8 +109,9 @@ impl Scroll {
         self.offset
     }
 
-    /// Scrolls to `offset` (clamped at the next layout).
+    /// Scrolls to `offset` at once (clamped at the next layout).
     pub fn set_offset(&mut self, offset: f64) {
+        self.glide = None;
         self.offset = offset.max(0.0);
     }
 
@@ -123,6 +127,28 @@ impl Scroll {
         }
         self.offset = clamped;
         cx.request_place();
+        true
+    }
+
+    /// Glides to `offset` (clamped): keyboard and screen reader scrolls,
+    /// which jump far; the wheel follows the fingers at once instead.
+    fn glide_to(&mut self, cx: &mut Cx<'_>, offset: f64) -> bool {
+        use crate::animation::{Easing, Transition, durations};
+        let max = Self::max_offset(cx.bounds(), cx.content_size());
+        let base = self.glide.map_or(self.offset, |glide| glide.target());
+        let target = (offset - self.offset + base).clamp(0.0, max);
+        if (target - base).abs() < 0.01 {
+            return false;
+        }
+        let mut glide = Transition::new(self.offset);
+        glide.to(target, durations::SCROLL, Easing::EaseOut);
+        if glide.is_moving() {
+            self.glide = Some(glide);
+            cx.request_paint();
+        } else {
+            self.glide = None;
+            self.scroll_to(cx, target);
+        }
         true
     }
 
@@ -214,7 +240,11 @@ impl Widget for Scroll {
             // Ctrl + wheel zooms, for someone else.
             Input::Scroll {
                 delta, modifiers, ..
-            } if !modifiers.command() => self.scroll_to(cx, self.offset - delta.y),
+            } if !modifiers.command() => {
+                // The fingers take over from a glide, where it is now.
+                self.glide = None;
+                self.scroll_to(cx, self.offset - delta.y)
+            }
             // A press on the thumb (the only part it claims) starts a drag.
             Input::PointerButton {
                 primary: true,
@@ -226,6 +256,7 @@ impl Widget for Scroll {
                     && thumb.contains(Point::new(thumb.center().x, position.y))
             }) =>
             {
+                self.glide = None;
                 self.drag = Some((position.y, self.offset));
                 cx.request_paint();
                 true
@@ -257,10 +288,10 @@ impl Widget for Scroll {
             } => {
                 let page = bounds.height() * 0.9;
                 match key {
-                    Key::PageDown => self.scroll_to(cx, self.offset + page),
-                    Key::PageUp => self.scroll_to(cx, self.offset - page),
-                    Key::Home => self.scroll_to(cx, 0.0),
-                    Key::End => self.scroll_to(cx, f64::MAX),
+                    Key::PageDown => self.glide_to(cx, self.offset + page),
+                    Key::PageUp => self.glide_to(cx, self.offset - page),
+                    Key::Home => self.glide_to(cx, f64::MIN),
+                    Key::End => self.glide_to(cx, f64::MAX),
                     _ => false,
                 }
             }
@@ -268,7 +299,22 @@ impl Widget for Scroll {
         }
     }
 
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        self.glide.and_then(|glide| glide.wake_at())
+    }
+
+    fn wake(&mut self, cx: &mut Cx<'_>, _now: std::time::Instant) {
+        if let Some(mut glide) = self.glide {
+            let offset = glide.value();
+            self.glide = glide.advance().then_some(glide);
+            self.scroll_to(cx, offset);
+            cx.request_paint();
+        }
+    }
+
     fn reveal(&mut self, cx: &mut Cx<'_>, target: Rect) -> bool {
+        // Showing the focus is immediate, and ends a glide.
+        self.glide = None;
         let bounds = cx.bounds();
         let mut offset = self.offset;
         if target.y1 > bounds.y1 {
@@ -284,8 +330,8 @@ impl Widget for Scroll {
     fn access_action(&mut self, cx: &mut Cx<'_>, request: &accesskit::ActionRequest) -> bool {
         let page = cx.bounds().height() * 0.9;
         match request.action {
-            accesskit::Action::ScrollDown => self.scroll_to(cx, self.offset + page),
-            accesskit::Action::ScrollUp => self.scroll_to(cx, self.offset - page),
+            accesskit::Action::ScrollDown => self.glide_to(cx, self.offset + page),
+            accesskit::Action::ScrollUp => self.glide_to(cx, self.offset - page),
             _ => false,
         }
     }

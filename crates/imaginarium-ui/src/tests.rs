@@ -66,6 +66,15 @@ fn pointer(at: Point, primary: bool, pressed: bool) -> Input {
 
 /// What the shell sends AccessKit, fed to AccessKit's own tree, which
 /// panics on an inconsistent update (as the platform adapters do).
+/// Runs every animation to its end and lays out the result.
+fn settle(ui: &mut Ui, fonts: &mut Fonts) {
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    crate::animation::set_clock_for_tests(Some(later));
+    ui.wake(fonts, later);
+    frame(ui, fonts);
+    crate::animation::set_clock_for_tests(None);
+}
+
 fn check_access(ui: &mut Ui, fonts: &mut Fonts) -> accesskit::TreeUpdate {
     let mut tree = AccessTree::default();
     ui.access(fonts, &mut tree);
@@ -469,6 +478,38 @@ fn menu(ui: &mut Ui, clicks: &Rc<Cell<u32>>) -> (WidgetId, WidgetId, WidgetId) {
     let second = ui.add(button(clicks));
     let content = ui.add_with_children(Flex::column().padding(4.0, 4.0), &[first, second]);
     (content, first, second)
+}
+
+#[test]
+fn layers_and_hovered_buttons_animate_then_come_to_rest() {
+    use crate::animation::{durations, set_clock_for_tests};
+    use crate::layers::{Anchor, LayerOptions};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, below) = window_with_buttons(&mut ui, &clicks);
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.wake_at(), None, "nothing moves at first");
+    // A hover fades the button's color in.
+    let at = ui.bounds(below).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(at));
+    assert!(
+        ui.wake_at()
+            .is_some_and(|at| at <= start + durations::HOVER)
+    );
+    // A menu fades in, and wakes once more when it arrives.
+    let (content, _, _) = menu(&mut ui, &clicks);
+    ui.open_layer(content, LayerOptions::popover(Anchor::Widget(opener)));
+    frame(&mut ui, &mut fonts);
+    let end = start + durations::POPOVER;
+    set_clock_for_tests(Some(end));
+    assert!(ui.wake_at().is_some_and(|at| at <= end));
+    ui.wake(&mut fonts, end);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.wake_at(), None, "at rest, nothing redraws");
+    set_clock_for_tests(None);
 }
 
 #[test]
@@ -1239,9 +1280,49 @@ fn page_keys_reach_a_scroll_after_a_click_on_plain_content() {
     ui.input(&mut fonts, &pointer(at, true, true));
     ui.input(&mut fonts, &pointer(at, true, false));
     assert_eq!(ui.focused(), Some(scroll));
+    // The page glides there over the scroll duration.
+    let start = std::time::Instant::now();
+    crate::animation::set_clock_for_tests(Some(start));
     ui.input(&mut fonts, &key(Key::PageDown));
     frame(&mut ui, &mut fonts);
-    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 90.0);
+    let offset = |ui: &Ui| ui.widget::<Scroll>(scroll).unwrap().offset();
+    assert_eq!(offset(&ui), 0.0);
+    let halfway = start + crate::animation::durations::SCROLL / 2;
+    crate::animation::set_clock_for_tests(Some(halfway));
+    // The window wakes when the frame it asked for is due.
+    ui.wake(&mut fonts, halfway + crate::animation::FRAME);
+    frame(&mut ui, &mut fonts);
+    assert!(offset(&ui) > 45.0 && offset(&ui) < 90.0, "{}", offset(&ui));
+    // A late wake still lands exactly on the target.
+    let late = start + crate::animation::durations::SCROLL * 2;
+    crate::animation::set_clock_for_tests(Some(late));
+    assert!(ui.wake_at().is_some(), "the arrival still wants its frame");
+    ui.wake(&mut fonts, late);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(offset(&ui), 90.0);
+    assert_eq!(ui.wake_at(), None, "at rest, nothing redraws");
+    crate::animation::set_clock_for_tests(None);
+}
+
+#[test]
+fn page_keys_jump_with_reduced_motion() {
+    use crate::scroll::Scroll;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let rows: Vec<WidgetId> = (0..10).map(|_| ui.add(Flex::row().height(40.0))).collect();
+    let content = ui.add_with_children(Flex::column(), &rows);
+    let scroll = ui.add_with_children(Scroll::new().height(100.0), &[content]);
+    let root = ui.add_with_children(Flex::column().fill(), &[scroll]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    ui.set_focus(&mut fonts, Some(scroll));
+    crate::animation::set_reduce_motion(true);
+    ui.input(&mut fonts, &key(Key::PageDown));
+    ui.input(&mut fonts, &key(Key::PageDown));
+    crate::animation::set_reduce_motion(false);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 180.0);
+    assert_eq!(ui.wake_at(), None);
 }
 
 #[test]
@@ -1264,7 +1345,7 @@ fn padding_at_the_end_can_be_scrolled_to() {
     ui.input(&mut fonts, &key(Key::End));
     ui.set_focus(&mut fonts, Some(scroll));
     ui.input(&mut fonts, &key(Key::End));
-    frame(&mut ui, &mut fonts);
+    settle(&mut ui, &mut fonts);
     assert_eq!(ui.widget::<Scroll>(scroll).unwrap().offset(), 260.0 - 100.0);
 }
 
