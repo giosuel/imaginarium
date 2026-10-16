@@ -9,7 +9,7 @@ use imaginarium_model::{NodeId, NodeKind};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Affine, Point, Rect};
 use imaginarium_text::{Align, Fonts, TextStyle};
-use imaginarium_ui::{Cx, Input, TextField, theme};
+use imaginarium_ui::{Cx, Input, Key, TextField, theme};
 
 use super::{BoardCanvas, Press};
 use crate::commands::{self, replace_args};
@@ -29,6 +29,25 @@ pub(super) struct Editing {
     pub(super) field: TextField,
     /// A shape's label (centered), not a text box.
     label: bool,
+    /// The model's text when the field last matched it: the field's
+    /// changes are the difference from it, put onto the model's text now
+    /// (a collaborator may have typed during a composition).
+    synced: String,
+}
+
+/// The one run that differs between `from` and `to`: where it starts, how
+/// many characters of `from` it replaces, and with what.
+fn difference(from: &[char], to: &[char]) -> (usize, usize, String) {
+    let prefix = from.iter().zip(to).take_while(|(a, b)| a == b).count();
+    let suffix = from[prefix..]
+        .iter()
+        .rev()
+        .zip(to[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let delete = from.len() - prefix - suffix;
+    let insert = to[prefix..to.len() - suffix].iter().collect();
+    (prefix, delete, insert)
 }
 
 /// The text of a node as the field shows it: without the final newline.
@@ -101,7 +120,12 @@ impl BoardCanvas {
         field.focus();
         let end = text.len();
         field.editor().select_bytes(fonts, end, end);
-        self.editing = Some(Editing { node, field, label });
+        self.editing = Some(Editing {
+            node,
+            field,
+            label,
+            synced: text,
+        });
         self.select(&[node]);
         // The tiles show the node without its text meanwhile.
         if let Some(item) = self
@@ -174,7 +198,9 @@ impl BoardCanvas {
             } else {
                 size.height / 2.0
             };
-            let top = (middle - height / 2.0).max(0.0);
+            let top = (middle - height / 2.0)
+                .max(0.0)
+                .min((size.height - height).max(0.0));
             Rect::new(LABEL_PADDING, top, LABEL_PADDING + width, top + height)
         } else {
             let width = size.width.max(8.0);
@@ -190,31 +216,44 @@ impl BoardCanvas {
 
     /// Puts the field's text into the model: the changed run, as one
     /// `text.replace`.
-    fn commit_field(&mut self) {
+    fn commit_field(&mut self, fonts: &mut Fonts) {
         let Some(editing) = &self.editing else {
             return;
         };
         let node = editing.node;
-        let new: Vec<char> = editing.field.text().chars().collect();
-        let old: Vec<char> = shown_text(self, node).chars().collect();
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        let delete = old.len() - prefix - suffix;
-        let insert: String = new[prefix..new.len() - suffix].iter().collect();
+        let base: Vec<char> = editing.synced.chars().collect();
+        let field: Vec<char> = editing.field.text().chars().collect();
+        let (mut at, mut delete, insert) = difference(&base, &field);
         if delete == 0 && insert.is_empty() {
             return;
+        }
+        // Onto the model's text now: a change made meanwhile (an undo, a
+        // collaborator) shifts ours, and where both touch, ours goes after.
+        let model: Vec<char> = shown_text(self, node).chars().collect();
+        if model != base {
+            let (their_at, their_delete, their_insert) = difference(&base, &model);
+            let their_end = their_at + their_delete;
+            let grown = their_insert.chars().count();
+            if at >= their_end {
+                at = at - their_delete + grown;
+            } else if at + delete > their_at {
+                at = their_at + grown;
+                delete = 0;
+            }
         }
         // Refused (the node went meanwhile): the field keeps its text.
         let _ = commands::execute(
             self,
             "text.replace",
-            &replace_args(node, prefix, delete, &insert),
+            &replace_args(node, at, delete, &insert),
         );
+        let text = shown_text(self, node);
+        if let Some(editing) = &mut self.editing {
+            if editing.field.text() != text && !editing.field.editor().is_composing() {
+                editing.field.editor().set_text(fonts, &text);
+            }
+            editing.synced = text;
+        }
     }
 
     /// Input while editing: the field's, or `None` for the board's (a
@@ -261,7 +300,14 @@ impl BoardCanvas {
             Input::PointerMoved(_) | Input::PointerButton { .. }
                 if self.press == Some(Press::Field) =>
             {
-                if matches!(input, Input::PointerButton { pressed: false, .. }) {
+                if matches!(
+                    input,
+                    Input::PointerButton {
+                        primary: true,
+                        pressed: false,
+                        ..
+                    }
+                ) {
                     self.press = None;
                     cx.release_pointer();
                 }
@@ -278,7 +324,7 @@ impl BoardCanvas {
             _ => return None,
         };
         if response.changed {
-            self.commit_field();
+            self.commit_field(cx.fonts());
         }
         if response.blurred {
             self.stop_editing(cx.fonts());
@@ -286,9 +332,22 @@ impl BoardCanvas {
         if response.repaint || response.changed || response.blurred {
             cx.request_paint();
         }
-        // Keys stay with the field while it edits (arrows move the caret,
-        // not the shape).
-        Some(response.handled || matches!(input, Input::Key { .. }))
+        // Keys the field didn't take go on (Tab moves the focus out),
+        // except the caret's and deleting's: they never move or delete a
+        // shape while text is edited.
+        let caret = matches!(
+            input,
+            Input::Key {
+                key: Key::ArrowLeft
+                    | Key::ArrowRight
+                    | Key::ArrowUp
+                    | Key::ArrowDown
+                    | Key::Delete
+                    | Key::Backspace,
+                ..
+            }
+        );
+        Some(response.handled || caret)
     }
 
     /// The field, on top of the tiles at the node's place.
@@ -327,10 +386,15 @@ impl BoardCanvas {
         }
         let text = shown_text(self, node);
         if let Some(editing) = &mut self.editing
-            && editing.field.text() != text
+            && editing.synced != text
             && !editing.field.editor().is_composing()
         {
-            editing.field.editor().set_text(fonts, &text);
+            // The field holds no change of its own (each is committed at
+            // once), so it simply shows the new text.
+            if editing.field.text() != text {
+                editing.field.editor().set_text(fonts, &text);
+            }
+            editing.synced = text;
         }
     }
 
@@ -375,7 +439,7 @@ impl BoardCanvas {
             .field
             .access_action(cx.fonts(), request, base + FIELD_ACCESS);
         if response.changed {
-            self.commit_field();
+            self.commit_field(cx.fonts());
         }
         cx.request_paint();
         Some(response.handled)

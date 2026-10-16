@@ -252,7 +252,8 @@ pub static REPLACE_TEXT: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
             })?;
         let at = usize::try_from(args.int("at").unwrap_or(0)).unwrap_or(0);
         let delete = usize::try_from(args.int("delete").unwrap_or(0)).unwrap_or(0);
-        let insert = args.str("insert").unwrap_or("").to_owned();
+        // Line breaks are \n, as the editor writes them.
+        let insert = args.str("insert").unwrap_or("").replace("\r\n", "\n").replace('\r', "\n");
         if delete == 0 && insert.is_empty() {
             return Ok(Outcome::Unchanged);
         }
@@ -274,7 +275,15 @@ pub static REPLACE_TEXT: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
                     txn.delete_text(node, at, if whole { len } else { delete })?;
                 }
                 if !insert.is_empty() {
-                    txn.insert_text(node, at, &insert)?;
+                    // Into an empty text, a final line break is the text's
+                    // own and a typed one needs another (schema §6): the
+                    // model adds the final one only when it is missing.
+                    let len = txn.text_len(node)?;
+                    if len == 0 && insert.ends_with('\n') {
+                        txn.insert_text(node, at, &format!("{insert}\n"))?;
+                    } else {
+                        txn.insert_text(node, at, &insert)?;
+                    }
                 }
                 Ok(())
             })

@@ -42,10 +42,10 @@ enum Press {
     /// that doesn't move on one node of several selected (`narrow`)
     /// selects just that one at the release.
     Node { at: Point, narrow: Option<NodeId> },
-    /// Dragging a marquee from `start` (document space); `additive` keeps
-    /// the selection it started with.
     /// Pressed in the text field being edited: it has the pointer.
     Field,
+    /// Dragging a marquee from `start` (document space); `additive` keeps
+    /// the selection it started with.
     Marquee {
         start: Point,
         current: Point,
@@ -1441,6 +1441,14 @@ impl Widget for BoardCanvas {
     fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
         self.owed_at = None;
         cx.request_paint();
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, focused: bool) {
+        // Clicking elsewhere (a panel, a search box) ends editing.
+        if !focused && self.editing.is_some() {
+            self.stop_editing(cx.fonts());
+            cx.request_paint();
+        }
     }
 
     fn capture_lost(&mut self, cx: &mut Cx<'_>) {

@@ -180,3 +180,68 @@ fn frames_and_groups_have_no_text_to_edit() {
     board.key(Key::Enter, false);
     assert!(!editing(&board, research));
 }
+
+fn input(board: &mut Harness, input: Input) {
+    board.ui.input(&mut board.fonts, &input);
+    board.frame();
+}
+
+#[test]
+fn line_breaks_typed_into_an_empty_text_are_kept() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    board.double_click((300.0, 300.0));
+    for _ in 0.."Interview 5 users".len() {
+        board.key(Key::Backspace, false);
+    }
+    assert_eq!(text_of(&board, interview), "");
+    board.key(Key::Enter, false);
+    type_text(&mut board, "x");
+    assert_eq!(text_of(&board, interview), "\nx\n");
+    for _ in 0..2 {
+        board.key(Key::Backspace, false);
+    }
+    assert_eq!(text_of(&board, interview), "");
+    input(&mut board, Input::Paste("a\n".into()));
+    type_text(&mut board, "b");
+    assert_eq!(text_of(&board, interview), "a\nb\n");
+}
+
+#[test]
+fn a_change_made_during_a_composition_is_kept() {
+    use imaginarium_ui::Ime;
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    board.double_click((300.0, 300.0));
+    input(
+        &mut board,
+        Input::Ime(Ime::Preedit {
+            text: "か".into(),
+            cursor: None,
+        }),
+    );
+    // Meanwhile the assistant puts a word in front.
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .transact(&Actor::Ai("session".into()), |txn| {
+            txn.insert_text(interview, 0, "Z ")
+        })
+        .unwrap();
+    board.frame();
+    input(&mut board, Input::Ime(Ime::Commit("仮".into())));
+    assert_eq!(text_of(&board, interview), "Z Interview 5 users仮\n");
+}
+
+#[test]
+fn losing_the_focus_ends_editing() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    board.double_click((300.0, 300.0));
+    assert!(editing(&board, interview));
+    board.ui.set_focus(&mut board.fonts, None);
+    board.frame();
+    assert!(!editing(&board, interview));
+}
