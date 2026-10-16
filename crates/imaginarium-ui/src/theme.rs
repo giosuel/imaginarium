@@ -54,11 +54,13 @@ pub enum Token {
     Warning,
     /// Tooltips' background (their text is [`Token::OnAccent`]).
     TooltipBg,
+    /// Dims the window behind a dialog.
+    Scrim,
 }
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 19] = [
+    pub const ALL: [Token; 20] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -78,6 +80,7 @@ impl Token {
         Token::Danger,
         Token::Warning,
         Token::TooltipBg,
+        Token::Scrim,
     ];
 }
 
@@ -157,6 +160,7 @@ impl Theme {
                 (Token::Danger, rgb(0xf87171)),
                 (Token::Warning, rgb(0xf5a524)),
                 (Token::TooltipBg, rgb(0x3f3f46)),
+                (Token::Scrim, Color::BLACK.with_alpha(0.5)),
             ],
             // Black on black needs more weight than the light theme's.
             [layer(14.0, 0.10), layer(6.0, 0.14), layer(2.0, 0.24)],
@@ -191,6 +195,7 @@ impl Theme {
                 (Token::Danger, rgb(0xb91c1c)),
                 (Token::Warning, rgb(0xb45309)),
                 (Token::TooltipBg, rgb(0x18181b)),
+                (Token::Scrim, rgb(0x18181b).with_alpha(0.22)),
             ],
             [layer(12.0, 0.03), layer(6.0, 0.05), layer(2.0, 0.08)],
         )

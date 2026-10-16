@@ -432,3 +432,234 @@ fn inputs_and_buttons_follow_the_theme() {
     );
     set_theme(dark);
 }
+
+fn key(key: Key) -> Input {
+    Input::Key {
+        key,
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::default(),
+    }
+}
+
+/// A frame's worth of tree work.
+fn frame(ui: &mut Ui, fonts: &mut Fonts) {
+    let mut scene = imaginarium_render::Scene::new();
+    ui.layout(fonts, AREA);
+    ui.paint(fonts, &mut scene);
+}
+
+/// A window with an opener button at the top left and a second button
+/// further down, for layers to open over.
+fn window_with_buttons(ui: &mut Ui, clicks: &Rc<Cell<u32>>) -> (WidgetId, WidgetId) {
+    let opener = ui.add(button(clicks));
+    let below = ui.add(button(clicks));
+    let root = ui.add_with_children(
+        Flex::column().fill().gap(100.0).padding(10.0, 10.0),
+        &[opener, below],
+    );
+    ui.set_root(root);
+    (opener, below)
+}
+
+fn menu(ui: &mut Ui, clicks: &Rc<Cell<u32>>) -> (WidgetId, WidgetId, WidgetId) {
+    let first = ui.add(button(clicks));
+    let second = ui.add(button(clicks));
+    let content = ui.add_with_children(Flex::column().padding(4.0, 4.0), &[first, second]);
+    (content, first, second)
+}
+
+#[test]
+fn a_popover_takes_the_focus_and_esc_gives_it_back() {
+    use crate::layers::{Anchor, LayerOptions};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, _) = window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    ui.set_focus(&mut fonts, Some(opener));
+    let closed = Rc::new(Cell::new(0));
+    let (content, first, _) = menu(&mut ui, &clicks);
+    let layer = ui.open_layer(
+        content,
+        LayerOptions::popover(Anchor::Widget(opener)).on_close({
+            let closed = closed.clone();
+            move || closed.set(closed.get() + 1)
+        }),
+    );
+    frame(&mut ui, &mut fonts);
+    assert_eq!(
+        ui.focused(),
+        Some(first),
+        "the menu's first item has the focus"
+    );
+    let (anchor, menu_box) = (ui.bounds(opener).unwrap(), ui.bounds(content).unwrap());
+    assert_eq!(menu_box.y0, anchor.y1 + 8.0, "opens below its anchor");
+    assert_eq!(menu_box.x0, anchor.x0);
+
+    // Tab stays in the menu.
+    ui.input(&mut fonts, &key(Key::Tab));
+    ui.input(&mut fonts, &key(Key::Tab));
+    assert_eq!(ui.focused(), Some(first));
+
+    assert!(ui.input(&mut fonts, &key(Key::Escape)));
+    assert!(!ui.is_layer_open(layer));
+    assert_eq!(
+        ui.focused(),
+        Some(opener),
+        "the focus is back on the opener"
+    );
+    assert_eq!(closed.get(), 1);
+    assert!(ui.bounds(first).is_none(), "its widgets are gone");
+}
+
+#[test]
+fn a_click_outside_a_popover_closes_it_without_clicking_below() {
+    use crate::layers::{Anchor, LayerOptions};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, below) = window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let (content, first, _) = menu(&mut ui, &clicks);
+    let layer = ui.open_layer(content, LayerOptions::popover(Anchor::Widget(opener)));
+    frame(&mut ui, &mut fonts);
+
+    // A click inside runs the item and keeps the menu.
+    let item = ui.bounds(first).unwrap().center();
+    ui.input(&mut fonts, &pointer(item, true, true));
+    ui.input(&mut fonts, &pointer(item, true, false));
+    assert_eq!(clicks.get(), 1);
+    assert!(ui.is_layer_open(layer));
+
+    // A click on the button below only closes the menu (unless the menu
+    // happens to cover it).
+    let target = ui.bounds(below).unwrap().center();
+    assert!(!ui.bounds(content).unwrap().contains(target));
+    ui.input(&mut fonts, &pointer(target, true, true));
+    ui.input(&mut fonts, &pointer(target, true, false));
+    assert!(!ui.is_layer_open(layer));
+    assert_eq!(clicks.get(), 1, "the press was used up by closing");
+
+    // The next click reaches it.
+    frame(&mut ui, &mut fonts);
+    ui.input(&mut fonts, &pointer(target, true, true));
+    ui.input(&mut fonts, &pointer(target, true, false));
+    assert_eq!(clicks.get(), 2);
+}
+
+#[test]
+fn a_modal_takes_all_input() {
+    use crate::layers::LayerOptions;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, _) = window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let dialog_clicks = Rc::new(Cell::new(0));
+    let (content, first, second) = menu(&mut ui, &dialog_clicks);
+    let layer = ui.open_layer(content, LayerOptions::modal());
+    frame(&mut ui, &mut fonts);
+    let dialog = ui.bounds(content).unwrap();
+    assert!((dialog.center() - AREA.center()).hypot() < 1.0, "centered");
+
+    // Clicks outside it reach nothing and don't close it.
+    let target = ui.bounds(opener).unwrap().center();
+    assert!(!dialog.contains(target));
+    ui.input(&mut fonts, &pointer(target, true, true));
+    ui.input(&mut fonts, &pointer(target, true, false));
+    assert_eq!(clicks.get(), 0);
+    assert!(ui.is_layer_open(layer));
+
+    // Tab cycles inside it; Enter reaches its focused button.
+    assert_eq!(ui.focused(), Some(first));
+    ui.input(&mut fonts, &key(Key::Tab));
+    assert_eq!(ui.focused(), Some(second));
+    ui.input(&mut fonts, &key(Key::Tab));
+    assert_eq!(ui.focused(), Some(first));
+    ui.input(&mut fonts, &key(Key::Enter));
+    assert_eq!(dialog_clicks.get(), 1);
+
+    ui.input(&mut fonts, &key(Key::Escape));
+    assert!(!ui.is_layer_open(layer));
+}
+
+#[test]
+fn a_layer_closes_with_its_anchor_and_a_widget_can_close_its_layer() {
+    use crate::layers::{Anchor, LayerOptions};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, _) = window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let (content, _, _) = menu(&mut ui, &clicks);
+    let layer = ui.open_layer(content, LayerOptions::popover(Anchor::Widget(opener)));
+    frame(&mut ui, &mut fonts);
+    ui.remove(opener);
+    frame(&mut ui, &mut fonts);
+    assert!(!ui.is_layer_open(layer), "its anchor went away");
+
+    /// Closes its layer when pressed, like a menu item that ran.
+    struct Closer;
+    impl Widget for Closer {
+        fn style(&self) -> taffy::Style {
+            taffy::Style {
+                size: taffy::Size {
+                    width: length(80.0),
+                    height: length(30.0),
+                },
+                ..taffy::Style::default()
+            }
+        }
+        fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+            if let Input::PointerButton { pressed: false, .. } = input {
+                cx.close_layer();
+                return true;
+            }
+            false
+        }
+    }
+    let closer = ui.add(Closer);
+    let content = ui.add_with_children(Flex::column(), &[closer]);
+    let layer = ui.open_layer(
+        content,
+        LayerOptions::popover(Anchor::Point(Point::new(50.0, 50.0))),
+    );
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(closer).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert!(!ui.is_layer_open(layer));
+}
+
+#[test]
+fn tooltips_take_no_input_and_layers_are_painted_and_read_aloud() {
+    use crate::layers::{Anchor, LayerOptions};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (opener, _) = window_with_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let tip = ui.add(
+        Flex::row()
+            .width(120.0)
+            .height(40.0)
+            .background(Token::TooltipBg)
+            .role(accesskit::Role::Tooltip, "Go · Enter"),
+    );
+    ui.open_layer(tip, LayerOptions::tooltip(Anchor::Widget(opener)));
+    frame(&mut ui, &mut fonts);
+    // A click on the tooltip goes through to the button under it, if any.
+    let opener_box = ui.bounds(opener).unwrap();
+    ui.input(&mut fonts, &pointer(opener_box.center(), true, true));
+    ui.input(&mut fonts, &pointer(opener_box.center(), true, false));
+    assert_eq!(clicks.get(), 1);
+    assert_eq!(ui.stats().widgets, 4);
+    let update = check_access(&mut ui, &mut fonts);
+    let tooltip_node = NodeId(tip.access_base());
+    assert!(
+        update.nodes.iter().any(|(id, _)| *id == tooltip_node),
+        "the tooltip is in the tree"
+    );
+}
