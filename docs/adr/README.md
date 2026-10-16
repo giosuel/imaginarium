@@ -27,3 +27,4 @@ Template: `0000-template.md`. Statuses: Proposed, Accepted, Superseded by NNNN.
 | 0017 | Dev build profile: optimized deps, unoptimized build-time crates | Accepted |
 | 0018 | Recipient-key documents need a trusted ACL owner      | Accepted |
 | 0019 | Canvas tiles render on CPU worker threads             | Accepted |
+| 0020 | The open document lives on the UI thread              | Proposed |
