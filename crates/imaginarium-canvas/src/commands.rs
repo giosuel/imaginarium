@@ -184,9 +184,106 @@ pub static SET_RADIUS: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
     ],
 });
 
+/// `text.replace`: replaces characters of a node's text.
+pub static REPLACE_TEXT: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "text.replace",
+    CommandMeta::new(
+        "Replace text",
+        "Replace `delete` characters at position `at` of a text box's or shape's text with `insert` (plain text; positions count Unicode characters from 0).",
+    )
+    .category("Text")
+    .synonyms(&["type", "insert text", "delete text", "edit text"])
+    .icon("type"),
+    |board, args| {
+        let node = args
+            .str("node")
+            .and_then(NodeId::parse)
+            .ok_or_else(|| CommandError::InvalidArgs {
+                id: "text.replace",
+                reason: "`node` is not a node id".into(),
+            })?;
+        let at = usize::try_from(args.int("at").unwrap_or(0)).unwrap_or(0);
+        let delete = usize::try_from(args.int("delete").unwrap_or(0)).unwrap_or(0);
+        let insert = args.str("insert").unwrap_or("").to_owned();
+        if delete == 0 && insert.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| {
+                let len = txn.text_len(node)?;
+                // The text without its final newline (schema §6).
+                let shown = len.saturating_sub(1);
+                if at + delete > shown {
+                    return Err(ModelError::OutOfRange {
+                        what: "text range end",
+                        value: at + delete,
+                        len: shown,
+                    });
+                }
+                if delete > 0 {
+                    // All of it: the final newline goes too.
+                    let whole = at == 0 && delete == shown && insert.is_empty();
+                    txn.delete_text(node, at, if whole { len } else { delete })?;
+                }
+                if !insert.is_empty() {
+                    txn.insert_text(node, at, &insert)?;
+                }
+                Ok(())
+            })
+            .map_err(failed("text.replace"))?;
+        Ok(Outcome::Done)
+    },
+)
+.args(ArgsSchema {
+    args: &[
+        ArgSpec {
+            name: "node",
+            description: "The text box or shape.",
+            kind: ArgKind::Ref { target: "node" },
+            required: true,
+        },
+        ArgSpec {
+            name: "at",
+            description: "Where the replaced characters start, counted from 0.",
+            kind: ArgKind::Int {
+                min: Some(0),
+                max: Some(1 << 40),
+            },
+            required: true,
+        },
+        ArgSpec {
+            name: "delete",
+            description: "How many characters to remove there.",
+            kind: ArgKind::Int {
+                min: Some(0),
+                max: Some(1 << 40),
+            },
+            required: false,
+        },
+        ArgSpec {
+            name: "insert",
+            description: "The text to put there.",
+            kind: ArgKind::String {
+                max_len: Some(1 << 20),
+            },
+            required: false,
+        },
+    ],
+});
+
 /// Every command of the board, for the shell's registry and palette.
-pub fn board_commands() -> [&'static FnCommand<BoardCanvas>; 3] {
-    [&MOVE, &SET_BOX, &SET_RADIUS]
+pub fn board_commands() -> [&'static FnCommand<BoardCanvas>; 4] {
+    [&MOVE, &SET_BOX, &SET_RADIUS, &REPLACE_TEXT]
+}
+
+/// Arguments of `text.replace`.
+pub(crate) fn replace_args(node: NodeId, at: usize, delete: usize, insert: &str) -> Args {
+    let int = |value: usize| ArgValue::Int(i64::try_from(value).unwrap_or(i64::MAX));
+    Args::new()
+        .with("node", ArgValue::String(node.to_string()))
+        .with("at", int(at))
+        .with("delete", int(delete))
+        .with("insert", ArgValue::String(insert.to_owned()))
 }
 
 /// Arguments of `shape.set_radius`.

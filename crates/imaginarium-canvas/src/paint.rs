@@ -26,6 +26,9 @@ pub(crate) struct ItemPainter<'a> {
     pub by_item: &'a HashMap<ItemId, NodeId>,
     /// Drawn live, not in the tiles.
     pub lifted: &'a [NodeId],
+    /// The node whose text is being edited: its text is the field's,
+    /// drawn on top.
+    pub editing: Option<NodeId>,
 }
 
 impl<'a> ItemPainter<'a> {
@@ -34,6 +37,7 @@ impl<'a> ItemPainter<'a> {
             items: &items.by_node,
             by_item: &items.by_item,
             lifted,
+            editing: None,
         }
     }
 }
@@ -47,16 +51,23 @@ impl CanvasContent for ItemPainter<'_> {
             return;
         }
         if let Some(item) = self.items.get(node) {
-            paint(item, scene, level_scale);
+            paint_with_text(item, scene, level_scale, self.editing != Some(*node));
         }
     }
 }
 
 /// Paints one item in document space, inside its frames' clips.
+#[cfg(test)]
 pub(crate) fn paint(item: &Item, scene: &mut Scene, level_scale: f64) {
+    paint_with_text(item, scene, level_scale, true);
+}
+
+/// [`paint`], leaving its text out unless `text` (an edited text is the
+/// field's).
+pub(crate) fn paint_with_text(item: &Item, scene: &mut Scene, level_scale: f64, text: bool) {
     clipped(scene, &item.clips, Affine::IDENTITY, &mut |scene, base| {
         scene.paint_with(base.inverse() * item.world, |scene| {
-            paint_look(item, scene, level_scale);
+            paint_look(item, scene, level_scale, text);
         });
     });
 }
@@ -92,7 +103,7 @@ fn outline_stroke(width: f64) -> Stroke {
 }
 
 /// Paints the item in its box space.
-fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
+fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64, show_text: bool) {
     let size = item.size;
     match &item.look {
         Look::Shape {
@@ -126,7 +137,7 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
                 {
                     scene.stroke_with(&outline.path, &outline_stroke(style.stroke_width), stroke);
                 }
-                if let Some(label) = label {
+                if let Some(label) = label.as_ref().filter(|_| show_text) {
                     paint_text(label, scene, level_scale);
                 }
             }
@@ -139,7 +150,7 @@ fn paint_look(item: &Item, scene: &mut Scene, level_scale: f64) {
             if layer {
                 scene.push_opacity(*opacity);
             }
-            if let Some(text) = text {
+            if let Some(text) = text.as_ref().filter(|_| show_text) {
                 paint_text(text, scene, level_scale);
             }
             if layer {
