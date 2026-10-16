@@ -150,7 +150,79 @@ never reaches the widget that takes its slot. `set_children` detaches the
 children it leaves out, and `remove` removes a subtree.
 
 Built in: `Flex` (rows and columns with background, border, radius and
-shadow), `Label` and `label`, `Button`, and `TextInput`.
+shadow), `Label` and `label`, `Button` (styles `ButtonColors::primary`,
+`secondary`, `quiet` and `danger`), `TextInput`, and `Icon` (a line
+icon from SVG path data on Lucide's 24-unit grid).
+
+Labels wrap like text in CSS: in a box that gets too narrow, a label
+breaks lines down to its longest word. `Label::single_line()` keeps one on
+a single line (a status line, which its parent clips).
+
+Focus rings follow the keyboard, like CSS's `:focus-visible`: a click
+focuses a button without a ring, and the next navigating key (not
+Ctrl, Shift or Alt on its own, nor a Ctrl or Alt shortcut) shows it, as
+does a screen reader moving the focus. Widgets ask
+`cx.is_focus_visible()` when they paint; a view that handles a shortcut
+itself calls `ui.note_keyboard()`.
+
+## Layers: popovers, dialogs, tooltips
+
+Anything that floats above the window is a layer. Build its content like
+any widget, without a parent, and open it next to an anchor:
+
+```rust
+use imaginarium_ui::{Anchor, LayerOptions, Placement};
+
+let menu = ui.add_with_children(Flex::column().background(Token::PanelBg), &items);
+let layer = ui.open_layer(menu, LayerOptions::popover(Anchor::Widget(button)));
+// A dialog in the window's center, or a tooltip that takes no input:
+ui.open_layer(dialog, LayerOptions::modal());
+ui.open_layer(tip, LayerOptions::tooltip(Anchor::Widget(tool)).placement(Placement::Right));
+```
+
+The tree does the rest:
+- it places the layer and flips it to the other side when there's no room;
+- it moves the focus into it, and back when it closes;
+- `Esc` and a click outside close a popover, and that click doesn't also
+  reach what's below;
+- a dialog takes all input, and Tab stays inside it.
+
+`ui.close_layer(fonts, layer)` closes a layer, or a widget in it calls
+`cx.close_layer()`. `LayerOptions::on_close` tells the opener, and
+`LayerOptions::focus(widget)` picks where the focus starts (a dialog's
+safe button, not its destructive one).
+
+## Scrolling and long lists
+
+`Scroll::new()` is a scroll container for one child (set its height, or
+let it grow). It handles the wheel, the touchpad, Page Up/Down and its
+scroll bar, and keeps the focused widget in view. For long lists, let the
+tree build only the rows in view:
+
+```rust
+use imaginarium_ui::{Scroll, VirtualList};
+
+let results = ui.add_virtual_list(
+    VirtualList::new(32.0, move || matches.get().len(), move |ui, row| {
+        ui.add(Label::new(matches.with_untracked(|m| m[row].title.clone()), style))
+    })
+    .label("Results"),
+    Scroll::new().grow(1.0),
+);
+ui.scroll_to_row(results, selected); // keep the selection in view
+```
+
+Rows have one height. The count closure is the list's data dependency:
+when a signal it reads changes, the list rebuilds its rows, so read the
+data there (not only its length in a separate signal).
+
+## Component gallery
+
+`cargo run --release -p imaginarium-ui --example gallery` shows every
+component in its states, in the current theme, with a switch between dark
+and light (`--light` starts light; `--open popover`, `dialog` or `tooltip`
+opens a layer at once, for screenshots). Every new component gets a section
+there before the shell uses it, and its screenshots go into the PR.
 
 ## Themes
 
@@ -234,9 +306,11 @@ Screen readers (Orca, NVDA, VoiceOver) get an accessibility tree through
 - A widget describes itself in `Widget::accessibility` by returning a
   `Node` with a role, label, bounds and actions. A widget that returns
   `None` is transparent: its children belong to its parent's node.
-- Node ids come from `WidgetId::access_base()`. A widget can add nodes of
-  its own below that id (text runs, canvas items, list options) and list
-  them with `Cx::add_access_child`.
+- Node ids come from `WidgetId::access_base()`, which carries the
+  widget's generation, so a late request about a removed widget is
+  refused. A widget can add up to `ACCESS_LOCAL_IDS` nodes of its own
+  below that id (text runs, canvas items, list options) and list them
+  with `Cx::add_access_child`.
 - After every frame, while a screen reader listens, the window sends the
   whole tree with its focus. A focus on a node that isn't in the tree
   falls back to the window, as AccessKit requires.

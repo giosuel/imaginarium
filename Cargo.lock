@@ -2287,6 +2287,7 @@ dependencies = [
  "accesskit_consumer",
  "accesskit_winit",
  "arboard",
+ "criterion",
  "imaginarium-reactive",
  "imaginarium-render",
  "imaginarium-text",

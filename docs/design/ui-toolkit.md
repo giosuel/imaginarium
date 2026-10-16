@@ -85,6 +85,10 @@ within it.
   A hidden or detached widget loses the focus (and the capture) at the
   next layout. When the focus moves, the window turns the input method
   off and on, so a composition starts over.
+- **Focus rings follow the keyboard** (CSS's `:focus-visible`): the tree
+  remembers whether the last input was a press or a key, and
+  `Cx::is_focus_visible` is true only for the focused widget after a key.
+  The focused widget repaints when that changes.
 - App-wide shortcuts (Ctrl+K, Ctrl+F) are handled by the view before the
   tree, for now; the command system's keymaps take over in M3. With Ctrl
   or ⌘ held, a non-Latin letter stands for the Latin letter on the same
@@ -101,6 +105,77 @@ for derived data: the palette's results are a memo over the query signal,
 computed once per keystroke when the list reads it. Per-frame data that
 must not cause frames (the status line's timings) is read from plain
 cells and refreshed with `Ui::refresh` during a frame.
+
+## Layers
+
+Popovers and menus, modal dialogs and tooltips are **layers**: extra roots
+above the window's root, in a stack (`layers.rs`, `Ui::open_layer`;
+`shell.md` §6). A layer's content is laid out at its own size (Taffy with
+max-content space), then placed next to its anchor: a widget (followed as
+it moves; the layer closes when it goes), a rectangle, a point or the
+window's center. It opens on the asked side, flips when only the other
+side fits, and stays 8 px inside the window; a layer wider than the
+window is laid out again at the window's width, so its text wraps (a
+taller one needs a scroll container).
+
+- **Input:** hit testing goes from the top layer down. Tooltips are
+  passed through; nothing below a modal is reached, and a click beside a
+  dialog does nothing, not even unfocus. A press outside the top popovers
+  closes them and is used up by that, so it doesn't also click what lies
+  below. `Esc`, when the focused widget doesn't use it, closes the top
+  dismissable layer. While a dialog is open, only it and the layers above
+  it take input: keys, the input method and pastes go to it even before
+  the focus has moved in (or when it has nothing to focus), a drag and
+  the hover below it end when it opens, and a screen reader's requests
+  for widgets behind it are refused.
+- **Focus:** a popover or dialog takes the focus (its first focusable
+  widget) after its first layout, and gives it back to whatever had it
+  when it opened. Tab cycles inside the top dialog, or inside the layer
+  the focus is in.
+- **Closing:** `Ui::close_layer`, or `Cx::close_layer` from a widget in
+  it (a menu item that ran), closes it and the layers opened after it
+  (submenus), removes their widgets and runs their `on_close`.
+- **Painting and accessibility:** layers paint after the root, a dialog
+  over a scrim (`Token::Scrim`); their nodes are top-level nodes of the
+  window, after the root's, and what a dialog covers is left out.
+- **Re-entrancy:** a widget that closes its layer from `focus_changed`
+  (losing the focus) closes it after the focus change is done, so the
+  focus never detours.
+
+## Scrolling
+
+`Scroll` (`scroll.rs`) moves its content by an offset: its children are
+placed shifted by `Widget::scroll_offset`, so their boxes, hit testing and
+accessibility stay in window coordinates, and a scroll only places the
+boxes again (`Cx::request_place`; Taffy's cache keeps the layout). It
+takes the wheel and touchpad (not with Ctrl, which zooms) and hands a
+scroll on at either end. It is focusable, so a click on plain content in
+it gives it the keys: Page Up and Down, and Home and End when nothing
+inside uses them. A thin bar is drawn over the content (`paint_over`);
+only the thumb takes the pointer (`Widget::claims`), the rest of the edge
+belongs to the rows, and only the primary button's release (or the tree
+taking the capture away, `Widget::capture_lost`) ends a drag. The offset
+is kept in range as the box is placed (`Widget::placed`). When the focus
+moves, every scroll container around it brings it into view
+(`Widget::reveal`, `Ui::reveal`). Screen readers get a `ScrollView` with
+its offset, and the scroll up and down actions. The content size counts
+the children's margins and the container's padding and border.
+
+`VirtualList` (`Ui::add_virtual_list`) is a `Scroll` over rows of one
+height that exist only while in view, plus an overscan: during layout the
+tree builds the rows that came into view with the list's builder and
+removes those that left, behind a spacer as tall as the rows above (rows
+are in flow, not absolutely placed: Taffy's cached list of out-of-flow
+children went stale as rows came and went). The count is a closure, so a
+signal it reads updates the list, and rebuilds every row, since rows
+usually read the same data. `scroll_to_row` waits for the list's height.
+A row that holds the focus or a drag when it scrolls away hands them to
+the list. Lists in layers are filled in the same layout as the layer.
+Layout is `f32`: rows stay exact up to about 500,000 rows of 30 px. Rows
+are `ListItem`s with their position
+and the list's full length, so screen readers hear "5 of 10,000".
+`benches/list.rs`: a wheel step on 100,000 rows takes about 0.12 ms, a
+jump far away about 1.1 ms (this VM).
 
 ## Themes
 
@@ -119,8 +194,11 @@ offered accent.
 
 AccessKit through `accesskit_winit`. The tree builds one node per widget
 that returns one (`Widget::accessibility`); widgets without a node are
-transparent. Node ids are the widget's `access_base()` (index + 1 in the
-upper 32 bits), and a widget may add nodes of its own below it (text runs,
+transparent. Node ids are the widget's `access_base()`: its slot + 1 in
+the top 24 bits, the low 16 bits of its generation below that, so a late
+request about a removed widget doesn't reach the widget that took its
+slot. A widget may add `ACCESS_LOCAL_IDS` (2²⁴ − 1) nodes of its own below
+it (text runs,
 canvas items, list options). Bounds are logical pixels; the window node
 carries the scale factor. Requests from the screen reader go back to the
 widget owning the node; Focus is handled by the tree (only for a live,
@@ -136,10 +214,6 @@ the tests now feed the updates to `accesskit_consumer`.
 
 ## Not yet
 
-Scroll containers, menus and popovers with their own layers, drag and
-drop, animation, incremental accessibility updates (the whole tree is sent
+Drag and drop, animation, incremental accessibility updates (the whole tree is sent
 after each frame), and moving text layout of off-screen content to the
-worker pool (PLAN §4.3). Access ids carry a widget's slot, not its
-generation: a late screen reader request about a removed widget can reach
-the widget that took its slot (Focus is checked; the other actions
-aren't yet).
+worker pool (PLAN §4.3).
