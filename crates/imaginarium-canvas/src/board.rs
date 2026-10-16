@@ -405,6 +405,29 @@ impl BoardCanvas {
         self.begin_gesture(gesture);
     }
 
+    /// Brings the board up to date with the document now (painting and
+    /// input do it themselves): pending changes go onto the canvas.
+    pub fn update(&mut self, fonts: &mut Fonts) {
+        self.sync(fonts);
+    }
+
+    /// Runs one of the board's commands (`commands::board_commands`) on
+    /// it, with the registry's availability and argument checks.
+    pub fn execute(
+        &mut self,
+        id: &str,
+        args: &imaginarium_commands::Args,
+    ) -> std::result::Result<imaginarium_commands::Outcome, imaginarium_commands::CommandError>
+    {
+        commands::execute(self, id, args)
+    }
+
+    /// The node a click at `screen` (window space, in the board's box from
+    /// the last layout or paint) would select.
+    pub fn node_at(&self, screen: Point) -> Option<NodeId> {
+        self.hit_at(screen)
+    }
+
     /// Selects `nodes` (those that exist and are visible).
     pub fn select(&mut self, nodes: &[NodeId]) {
         let view = self.document.view();

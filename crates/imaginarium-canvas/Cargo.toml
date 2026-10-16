@@ -23,7 +23,12 @@ imaginarium-ui.workspace = true
 taffy.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "board"
+harness = false
 
 [lints]
 workspace = true

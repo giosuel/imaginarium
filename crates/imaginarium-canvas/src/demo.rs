@@ -114,6 +114,11 @@ pub fn launch_plan_with(undo: UndoConfig) -> Result<Document> {
 
 /// A board of `count` shapes in a grid, of every preset, for benchmarks.
 pub fn grid(count: usize) -> Result<Document> {
+    grid_with(count, false)
+}
+
+/// [`grid`], each shape with a short label (`labels`).
+pub fn grid_with(count: usize, labels: bool) -> Result<Document> {
     let mut document = Document::new(DocumentKind::Board)?;
     let presets = ["rect", "ellipse", "triangle", "diamond", "rect"];
     let fills = [
@@ -129,7 +134,7 @@ pub fn grid(count: usize) -> Result<Document> {
                 presets[index % presets.len()],
                 (column as f64 * 64.0, row as f64 * 64.0, 48.0, 48.0),
                 fills[index % fills.len()],
-                "",
+                if labels { "Task" } else { "" },
             )?;
             if index % presets.len() == 4 {
                 txn.set_style_override(id, "radius", Value::Number(8.0))?;
