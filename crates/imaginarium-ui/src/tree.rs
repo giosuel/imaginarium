@@ -169,7 +169,9 @@ pub trait Widget: Any {
     }
 
     /// A screen reader's request aimed at one of its nodes. `true` if it
-    /// did something. (Focus is handled by the tree.)
+    /// did something. (Focus is handled by the tree, which gives the widget
+    /// the keyboard focus; a focus on one of the widget's own nodes then
+    /// comes here too, so a board can select the item.)
     fn access_action(&mut self, cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
         let _ = (cx, request);
         false
@@ -2034,6 +2036,11 @@ impl Ui {
             // A screen reader moves the focus the way the keyboard does.
             self.set_keyboard(true);
             self.set_focus(fonts, Some(id));
+            // Focus on one of the widget's own nodes (an item on a board)
+            // is the widget's to follow too.
+            if request.target_node.0 != id.access_base() {
+                self.call(fonts, id, |widget, cx| widget.access_action(cx, request));
+            }
             return true;
         }
         self.call(fonts, id, |widget, cx| widget.access_action(cx, request))
