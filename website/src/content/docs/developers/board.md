@@ -52,15 +52,28 @@ bounds are drawn again, nothing else.
 Gestures and keys run commands, the same ones the palette and the AI
 will: `commands::board_commands()` lists them for a registry.
 
-| Command | Does |
-|---|---|
-| `board.move` | moves the selection by `dx`, `dy` points |
-| `board.set_box` | places one node: `x`, `y`, `w`, `h`, `rotation`, a line's `flip` |
-| `shape.set_radius` | rounds a rectangle's corners |
-| `text.replace` | replaces `delete` characters at `at` with `insert` |
+| Command | Does | Shortcut |
+|---|---|---|
+| `board.move` | moves the selection by `dx`, `dy` points | |
+| `board.nudge_left` … `_down`, `…_far` | moves it 1 pt (far: 10) | arrows, Shift+arrows |
+| `board.set_box` | places one node: `x`, `y`, `w`, `h`, `rotation`, a line's `flip` | |
+| `shape.set_radius` | rounds a rectangle's corners | |
+| `text.replace` | replaces `delete` characters at `at` with `insert` | |
+| `text.edit` | edits the selected node's text | Enter |
+| `edit.undo`, `edit.redo` | | Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y |
+| `board.delete`, `board.duplicate` | | Delete or Backspace, Ctrl+D |
+| `board.select_all` | | Ctrl+A |
+| `board.bring_to_front`, `board.send_to_back` | | Ctrl+], Ctrl+[ |
+| `board.bring_forward`, `board.send_backward` | | Ctrl+Alt+], Ctrl+Alt+[ |
+| `board.group`, `board.ungroup` | | Ctrl+G, Ctrl+Shift+G |
+| `board.lock`, `board.unlock` | | Ctrl+Shift+L |
+| `view.zoom_in`, `zoom_out`, `zoom_100` | | Ctrl+=, Ctrl+-, Ctrl+0 |
+| `view.zoom_to_fit`, `zoom_to_selection` | | Ctrl+1, Ctrl+2 |
 
-`board.execute(id, &args)` runs one on the board with the registry's
-checks. Locked nodes are refused.
+(Ctrl is ⌘ on macOS.) `board.execute(id, &args)` runs one on the board
+with the registry's checks; locked nodes are refused. The shortcuts are
+a `Keymap` of `imaginarium-commands` (`keys::DEFAULT_SHORTCUTS`,
+`board.keymap_mut()`).
 
 ## The selection
 

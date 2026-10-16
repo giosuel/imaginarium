@@ -192,6 +192,17 @@ commands as the palette, the menus and the AI, with arguments:
   500 ms, so a gesture that starts right after another edit undoes
   together with it.
 
+**As built (M3.3, the board's commands):** delete, duplicate (16 pt
+down and right, above the original, with its subtree as plain data:
+`NodeCopy`), select all (the units a click could select), order (front,
+back, one step either way, within the parent), group (two or more
+siblings, into a group where the topmost was, everything staying in
+place) and ungroup (the children take the group's place, turned by it),
+lock and unlock, undo and redo, zoom (in, out, 100 %, fit, the
+selection) and nudging, each a command without arguments. The board's
+keys go through a `Keymap` (`keys.rs`, the shortcuts of the context
+menu's mockup); Esc and Tab stay the board's own navigation.
+
 ## 7. Text on the board
 
 M3 edits plain text in place (rich text is M5): a double-click or Enter
