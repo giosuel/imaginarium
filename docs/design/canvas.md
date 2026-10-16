@@ -33,6 +33,9 @@ transaction.
 - **Display lists** (`rendering.md` §3), per kind:
   - `shape`: the outline from `shape_path(node)` (ADR-0021) in box space,
     filled and stroked with the effective style, under the world transform;
+    its text (`t`), if any, is its label: wrapped in the box less 8 pt on
+    each side, centered (a triangle's at its centroid), 15 pt medium, as
+    in the mockups;
   - `text`: the text laid out in its box (`TextBlock`, plain in M3, rich in
     M5), cached per node and laid out again only when the text, the box
     width or the style changes;
@@ -68,6 +71,20 @@ updates only what it names:
 
 `Canvas::upsert` and `remove` invalidate the old and new bounds, so a
 remote change or an undo repaints only its tiles.
+
+**As built (M3.2).** `BoardCanvas::transact`, `undo`, `redo` and
+`apply_remote` queue the `ChangeSet`; the next paint or input applies it
+(laying out text needs the fonts, which they bring), so several changes
+between frames cost one pass. Every visible node keeps its place (its
+world transform and the clips of its children), groups included, so a
+subtree is built again on its own under its parent. Created and moved
+subtrees get keys between their neighbours in the walk, and when a gap
+is too small every item is re-keyed. Text layouts are cached by text,
+look and width, so moving a shape doesn't lay its label out again.
+Nodes using a changed style are found by scanning the visible nodes'
+style references, inheriting styles included. A property test checks
+that any sequence of edits, undos and redos leaves the items a fresh
+build makes.
 
 **Opening** reads the nodes in bulk and builds every item before the first
 frame. The M1 note (339 ms for 10,000 nodes, mostly Loro import and
@@ -179,7 +196,7 @@ Added to `imaginarium-canvas`'s benches (criterion, the conventions in
 - hit testing at 10,000 nodes;
 - a 1,000-node paste.
 
-## 11. Open questions
+## 11. Decided questions
 
-1. Whether frames' names belong in tiles or on top of them (they keep
-   their screen size at every zoom). Probably on top, like the selection.
+1. **Frame names are drawn on top of the tiles** (owner, 2026-10-16), at
+   the interface's size at every zoom, like the selection.

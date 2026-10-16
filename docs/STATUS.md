@@ -11,10 +11,15 @@ Last updated: 2026-10-16
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.1 Toolkit additions**, the next piece: layers for
-  popovers and menus (outside clicks, Esc, focus return), then scroll
-  containers, icons and animation. Theme tokens are done (#38). M3.2 (the
-  canvas crate) can start alongside, in another crate.
+- **Next step:** **M3.2 `imaginarium-canvas`** (the document on the
+  tile canvas), then M3.3 and M3.4. M3.1 is done (2026-10-16): layers,
+  scrolling and virtual lists, icons, animation, theme tokens and access
+  ids, each in the gallery; its PRs are stacked on
+  https://github.com/giosuel/imaginarium/pull/40.
+  - **The component gallery** (owner, 2026-10-16): every component in its
+    states, dark and light, before the shell uses it
+    (`crates/imaginarium-ui/examples/gallery.rs`). New components get a
+    section there, and their screenshots go to the owner.
   - M3.0 is done: the mockups (owner's design canvas, not committed),
     `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
     §5.6 (#37).
@@ -982,16 +987,25 @@ What M3 builds on:
     - Newer files open read-only (`Mode`).
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
-- [ ] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
-  - layers for popovers and menus: outside clicks, Esc, focus return;
-  - scroll containers with virtualized rows;
-  - animation (time-based, and off with reduced motion);
-  - vector icons;
+- [x] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
+  - layers for popovers and menus: outside clicks, Esc, focus return
+    (done 2026-10-16: popovers, modal dialogs and tooltips, placed by
+    anchor with flipping, focus in and back, Tab kept inside; the gallery
+    example shows them);
+  - scroll containers with virtualized rows (done 2026-10-16: `Scroll`
+    and `VirtualList`, a wheel step on 100,000 rows in 0.12 ms);
+  - animation (time-based, and off with reduced motion; done
+    2026-10-16: `Transition`, buttons fade between states, layers fade
+    in, keyboard scrolls glide; reduced motion is a switch until M3.7
+    reads `ui.reduce_motion`);
+  - vector icons (done 2026-10-16: `cargo xtask icons` vendors the 98
+    listed Lucide 1.50.0 icons, `Icon::named`);
   - theme tokens as signals, so a theme switches live (done 2026-10-16:
     `Theme`, `Token` and `Paint` in `imaginarium-ui`, dark first, the
     widgets on tokens, a contrast test; the counter example switches
     themes live);
-  - access ids with generations (from M2.9).
+  - access ids with generations (from M2.9; done 2026-10-16: a late
+    screen reader request about a removed widget is refused).
 - [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
   - **Painting:**
     - shapes: rectangle (also rounded), ellipse, line, triangle and
@@ -1028,6 +1042,9 @@ What M3 builds on:
   - the contextual toolbar, built from the commands available for the
     selection;
   - the inspector (`Ctrl+I`: geometry and style);
+  - the context menu as in its mockup: items with an icon, a label and
+    the shortcut, separators, Delete in the danger color, built from the
+    commands (the gallery's menu is a stand-in that shows the layer);
   - the start window, like Blender's splash: new boards, recent files,
     open;
   - one window per document;
@@ -1100,6 +1117,12 @@ What M3 builds on:
   the desktop integration. The owner runs it later
   (`docs/design/m2-gate.md`, "Manual checklist"); what it finds is fixed
   in the milestone then under way.
+
+- **Third-party notices don't ship yet.** The licenses of what the app
+  bundles (the Lucide icons' ISC and MIT notices in `LICENSE-lucide`, the
+  bundled fonts, the Rust dependencies) must reach users with the
+  binaries: a notices file in the packages or an About screen, before the
+  first release with the shell.
 
 - **Signatures are verified on open** (since M1.8: every record a document
   with an ACL chain is read from), but that is slow for big shared
