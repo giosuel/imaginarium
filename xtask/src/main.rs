@@ -28,6 +28,7 @@
 mod dep_age;
 mod dev_profile;
 mod headers;
+mod icons;
 mod layers;
 mod metadata;
 mod tracked;
@@ -75,6 +76,11 @@ const TASKS: &[Task] = &[
         name: "dep-age",
         about: "Check that every locked crate version is at least 14 days old (needs network)",
         run: dep_age_task,
+    },
+    Task {
+        name: "icons",
+        about: "Vendor the Lucide icons listed in crates/imaginarium-ui/src/icons/icons.txt (needs network)",
+        run: icons_task,
     },
     Task {
         name: "help",
@@ -215,6 +221,30 @@ fn check_layers(_args: &[String]) -> ExitCode {
     }
     eprintln!("See docs/PLAN.md §4.1 for the layer map.");
     ExitCode::from(FAILED)
+}
+
+/// `cargo xtask icons`
+fn icons_task(_args: &[String]) -> ExitCode {
+    let root = match metadata::load() {
+        Ok(metadata) => metadata.workspace_root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(FAILED);
+        }
+    };
+    match icons::run(&root) {
+        Ok(count) => {
+            println!(
+                "icons: wrote {count} Lucide {} icons to crates/imaginarium-ui/src/icons/lucide.rs",
+                icons::LUCIDE_VERSION
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("icons: {err}");
+            ExitCode::from(FAILED)
+        }
+    }
 }
 
 /// `cargo xtask check-headers`
