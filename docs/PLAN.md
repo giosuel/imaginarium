@@ -39,8 +39,9 @@ means any modified hosted competitor must publish its changes.
 
 ### Non-goals (for now)
 
-Spreadsheets (the model reserves room for them), a web editor (a WASM web
-*viewer* is possible later), and mobile apps.
+A web editor (a WASM web *viewer* is possible later) and mobile apps.
+Spreadsheets were a non-goal until 2026-10-16; they are in scope now
+(§14).
 
 ---
 
@@ -340,7 +341,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | # | Milestone | Content |
 |---|---|---|
 | M3 | Shell and canvas | Palette, contextual toolbar, inspector, settings UI, basic shapes, selection/transform, themes, local `.imag` save/load |
-| M4 | Diagramming | Connectors and routing, snapping, groups, alignment, package format, shape libraries, SVG/PNG/PDF export, draw.io import (stretch goal) |
+| M4 | Diagramming | Connectors and routing, snapping, groups, alignment, ink (pen, marker, highlighter, eraser, pen pressure), package format, shape libraries, SVG/PNG/PDF export, draw.io import (stretch goal) |
 | M5 | Text engine | Rich text, IME, bidi, text in shapes, find/replace, spellcheck hook |
 | M6 | **AI foundation** | Capability layer, providers (API + Ollama/llama.cpp + ComfyUI), AI settings UI, assistant with command tools and diff review, text generation, txt2img, ONNX background removal, MCP server |
 
@@ -352,7 +353,7 @@ Each milestone ends with a tagged, usable build **and its docs**.
 | M8 | **Collaboration (Hub)** | Hub server, OPAQUE accounts, devices, E2EE sharing, roles, real-time sync and presence, comments, version history, admin UI, Docker |
 | M9 | Presentations | Masters/layouts, themes, presenter view, transitions; PPTX + ODP |
 | M10 | Layout (Publisher) | Fixed pages, linked text frames, master pages, bleed and crop marks |
-| M11 | **Paint + AI image suite** | Raster layers and masks, pressure brushes; img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
+| M11 | **Paint + AI image suite** | Raster layers and masks, the draw tool's pixel brushes (pressure, tilt); img2img, references, sketch-to-image, inpaint/outpaint, segmentation, style, upscaling, variations |
 
 ### Phase D: Ecosystem and 1.0
 
@@ -425,6 +426,63 @@ Decided (2026-10-16):
   the shapes pan); together: 0.67 % for the pan, 0.42 % for the zoom.
   Can be revisited if the stalls show up in use (M3 has them on its
   list).
+- **The look (M3):** clean, modern and simple, in the style and feel of
+  Excalidraw's interface: light chrome in floating panels. Its layout and
+  the placement of its toolbars and controls aren't followed, and shapes
+  are crisp, not hand-drawn. The aim is a highly capable, feature-rich
+  multi-editor that stays simple to use.
+- **Windows (M3):** one window per document. The program opens with a
+  start window, like Blender's splash: new boards, recent files, open.
+- **Saving (M3):** the save mechanics are like Google Docs': every change
+  reaches the file on its own, so nobody has to save by hand. It stays a
+  desktop application with native open and save dialogs (the dialog
+  gives a new board its place). The append-only updates that autosave
+  writes are the same ones collaboration syncs (M8). Closing a board
+  with unsaved changes (an untitled one, say) works as in any other
+  program: Save…, Don't save or Cancel.
+- **Vector shapes (M3):** M3 starts with simple shapes: rectangle (also
+  rounded), ellipse, line, triangle, diamond, text and frames. They are
+  stored and handled the way complex path-based vector shapes (as in
+  Inkscape) will be later, so those fit in without a second model. As in
+  a vector tool, a rectangle stays a rectangle with its parameters, and
+  the user can convert it to a path. Images and connectors come later.
+- **Documents, sheets and presentations live on the board** like shapes.
+  The board is not only a whiteboard: documents, spreadsheets and
+  presentations are made there too. The features to cover are Google
+  Docs' and Google Sheets', without extra features in the style of
+  Microsoft Office that bloat the product.
+- **Spreadsheets are in scope** (they were a non-goal, §1), with Google
+  Sheets' features, but not scheduled yet: "keep spreadsheets in mind
+  and build the foundation so that it supports documents as well as
+  spreadsheets or anything else". The model, layout and commands stay
+  general enough for any kind of content.
+- **Presentations are wired together on the board.** A presentation is
+  made of the board's own content: steps wired together in an order,
+  with branches. Usually a step is an area made for it (a slide, a
+  document, part of the whiteboard, a sheet), but any object or area
+  can be one. Everything is linkable, so anything can be used in a
+  presentation. The wiring is logical only: playing the presentation
+  shows the steps one after another with transitions, the audience
+  doesn't see the rest of the board, and where a step sits on the board
+  doesn't change its transition. Animation works with motion paths and
+  with keyframes on any property the user can change (position, color,
+  shape, all of them). PPTX stays: the export collects the steps, in
+  the order of the wiring, as slides.
+- **The tool bar's place is the user's choice.** The bar can be dragged
+  and snaps to the window's edges; the left edge is the default.
+- **A draw tool as capable as Paint's or Photoshop's:** brushes, an
+  eraser, graphics tablet support (pressure) and the like, on the board.
+  Ink comes first, in M4: pen, marker, highlighter, eraser and pen
+  pressure, stored as vector strokes. The pixel brushes come with M11's
+  paint layers.
+- **Icons:** Lucide (ISC license).
+- **The title bar is the system's:** the window manager draws it, and
+  where it draws none (Hyprland) the window has no bar; where it
+  declines (GNOME), winit draws a plain one. The windows get the app ID
+  `ch.giosuel.Imaginarium`, so window rules can match them.
+- **Extras the mockups added:** copy and paste style, the interface size
+  and the board background settings come in M3; the "Start from"
+  templates come later, with M4's shape libraries.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.

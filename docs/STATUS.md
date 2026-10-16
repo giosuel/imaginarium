@@ -4,7 +4,7 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 ## Current position
 
@@ -12,7 +12,9 @@ Last updated: 2026-10-15
   `v0.0.1-m0`, `v0.0.2-m1`).
 - **Next step:** **M2.9 Wrap-up: the manual checklist** (criteria 4 and
   5, never reported), then tick M2.9 and the tag `v0.0.3-m2`, which the
-  owner pushes. Then M3, starting with its plan.
+  owner pushes. Then **M3.0** (the plan is in the M3 section below, with
+  the owner's answers of 2026-10-16). It starts with mockups, which are
+  under way: the owner reviews them before any UI is built.
   - The measured runs are done (2026-10-15/16, `m2-gate.md`, "M2.9 run"
     and "M2.9 run 2"): criteria 1, 2, 3 and 6 pass on the iGPU, the dGPU
     and without vsync. Criterion 1's frame rate is judged over a
@@ -926,9 +928,193 @@ wasm-friendly where that is free: no `SystemTime::now()` or threads in core
 paths, pure-Rust dependencies when the choice is otherwise equal. A web
 viewer is in PLAN §12 "Later".
 
+## M3: Shell and canvas (checklist)
+
+The first usable editor: a board that opens, edits and saves `.imag`
+files. PLAN §12 lists the palette, the contextual toolbar, the inspector,
+the settings UI, basic shapes, selection and transform, themes, and local
+saving and loading. M3 builds the product crates `imaginarium-canvas`
+(the document on the M2 tile canvas) and `imaginarium-shell` (the window
+around it), and `imaginarium-app` starts them. The gate app stays as a
+benchmark until the app can measure the same (M3.9).
+
+Effort: **xhigh** for the toolkit additions (M3.1) and the core of the
+canvas (M3.2: nodes to items, the editing path), **high** for the rest.
+One branch and PR per step (or smaller), a review after each, and
+screenshots of every visible step (Xvfb, lavapipe).
+
+What M3 builds on:
+- **The model** (M1): `Document::transact` (the one way to change a
+  document), `DocumentView` (`imbl`, readable on any thread), `ChangeSet`
+  and undo per actor. Edits are cheap enough for the UI thread: a drag
+  step on a 10,000-node board costs 29 µs, a keystroke in 300 pages
+  59 µs (M1 benchmarks).
+- **The registries** (M0): commands with keymaps and the palette's
+  search, settings with UI metadata.
+- **`.imag` files** (M1): opening and saving whole files; no incremental
+  saving yet.
+- **The toolkit and the tile canvas** (M2; ADR-0007, ADR-0019).
+
+- [ ] **M3.0 Design** (`docs/design/shell.md`, `docs/design/canvas.md`,
+  and an ADR for each significant decision):
+  - **Mockups first** (owner, 2026-10-16): the start window, the board
+    window with its tools, the contextual toolbar, the inspector, the
+    palette, menus and the settings, in light and dark, before any UI is
+    built. They are HTML pages sent to the owner, not committed; what
+    they settle goes into `shell.md`. The owner liked the first set
+    (2026-10-16) and asked for more: documents, sheets, presentations
+    and the draw tool on the board, and a tool bar that can be moved to
+    any edge (PLAN §14), also mocked up before they are designed.
+    Then the title bar (the system's), the icons (Lucide) and the extras
+    were settled, and a dark set was asked for (PLAN §14).
+  - **Where the document lives:** on the UI thread, with opening, saving
+    and big pastes on workers, or on a model thread of its own. Measured
+    before deciding.
+  - **The editing path:**
+    - every edit is a command (invariant 2);
+    - a drag or a burst of typing is one undo step;
+    - text editing on the canvas turns into transactions.
+  - **Nodes to canvas items:**
+    - each kind and style is painted (schema §5, §8);
+    - a `ChangeSet` becomes `upsert`, `remove` and `invalidate` calls;
+    - hit testing;
+    - the clipboard format for nodes.
+  - **Vector shapes** (ADR): one model for simple shapes now and
+    path-based shapes later.
+    - As in SVG and Inkscape, a rectangle keeps its parameters (size,
+      corner radius) and a path its path data, both `shape` nodes with the
+      same styles and transform.
+    - Every shape becomes a path for painting, hit testing, bounds and
+      export, so paths add a kind of data, not a second pipeline.
+    - "Convert to path" turns a rectangle into an editable path when the
+      user asks, as in a vector tool (owner, 2026-10-16).
+    - How path data is stored in the CRDT is designed now, and built when
+      paths come.
+  - **The window:**
+    - the look: Excalidraw's clean, floating style, not its layout;
+    - the pill and the tools in it, the contextual toolbar, the inspector,
+      the palette and menus, with their layers and the focus between them;
+    - the start window.
+  - **Themes and icons:**
+    - themes as tokens: light, dark, high contrast, following the system,
+      reduced motion;
+    - the icon set and its license.
+  - **Saving:** the mechanics of Google Docs in a desktop application with
+    native open and save dialogs (owner, 2026-10-16).
+    - Every change is appended (`UPDT`s) on a worker within about a
+      second, with crash recovery.
+    - A new board starts untitled; its changes are kept for crash
+      recovery until the save dialog gives it a place, and from then on
+      nothing needs saving by hand. Closing a board with unsaved changes
+      works as in any other program: Save…, Don't save or Cancel (owner,
+      2026-10-16).
+    - Newer files open read-only (`Mode`).
+  - **Dependency research** for new crates (file dialogs through the
+    desktop portal on Linux, icons), with the two-week rule.
+- [ ] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
+  - layers for popovers and menus: outside clicks, Esc, focus return;
+  - scroll containers with virtualized rows;
+  - animation (time-based, and off with reduced motion);
+  - vector icons;
+  - theme tokens as signals, so a theme switches live;
+  - access ids with generations (from M2.9).
+- [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
+  - **Painting:**
+    - shapes: rectangle (also rounded), ellipse, line, triangle and
+      diamond, each as a path (M3.0's vector model), with fill, stroke,
+      radius and opacity from styles;
+    - text boxes;
+    - frames, which clip their children.
+  - **Updates from `ChangeSet`s:** a remote change or an undo repaints only
+    its tiles.
+  - **Selection and transform:**
+    - selection in signals, hit testing and a marquee;
+    - handles to move, resize and rotate, and nudging;
+    - each gesture is one undo step, through commands.
+  - **Text editing in place**: plain text in M3 (rich text is M5), through
+    transactions.
+  - **Benchmarks:**
+    - a 10,000-node board from the model: opening, the first frame, drag
+      latency, `ChangeSet` to tiles;
+    - opening such a board took 339 ms in M1; read the nodes in bulk.
+- [ ] **M3.3 Commands and keymaps:**
+  - **Board commands:**
+    - insert each shape and text;
+    - delete, duplicate, copy, cut and paste nodes;
+    - order (front, back), group and ungroup, select all, nudge;
+    - undo and redo;
+    - zoom in, out, to fit and to 100 %.
+  - **File commands.**
+  - **Shortcuts** come from the keymaps of `imaginarium-commands`, replacing
+    the gate's hard-coded ones.
+  - **The command context:** the document, the selection and the view.
+- [ ] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`):
+  - the pill (mode, zoom; share and AI as placeholders);
+  - the palette on the real registry, with commands and settings;
+  - the contextual toolbar, built from the commands available for the
+    selection;
+  - the inspector (`Ctrl+I`: geometry and style);
+  - the start window, like Blender's splash: new boards, recent files,
+    open;
+  - one window per document;
+  - the app's startup: settings, commands, fonts and the GPU in parallel,
+    under 400 ms to an interactive empty board (PLAN §10).
+- [ ] **M3.5 Settings UI**, generated from the registry:
+  - search, scopes and every kind of setting;
+  - changes apply at once;
+  - `Ctrl+,`, and settings in the palette.
+- [ ] **M3.6 Files:**
+  - autosave of every change on a worker, and crash recovery;
+  - native open and save dialogs; closing an unsaved board asks Save…,
+    Don't save or Cancel; rename, move, save a copy;
+  - recent files, and newer files opening read-only;
+  - optionally, password-protected files (the crypto exists; it needs the
+    prompt).
+- [ ] **M3.7 Themes:** light, dark and high contrast, following the
+  system, reduced motion, and their settings.
+- [ ] **M3.8 From M2:**
+  - **the board's opening:** cover the fill, maybe with an animation
+    (owner);
+  - the cards' text layout off the UI thread;
+  - **the iGPU:** its slow frames and upload stalls;
+  - **tiles:**
+    - a window-wide memory budget for tile pages;
+    - rendering the next zoom level ahead, if needed;
+    - a shape shown twice as a drag starts, if seen.
+- [ ] **M3.9 Measure and wrap up:**
+  - **the app's measurements:**
+    - the frame HUD (`F12`);
+    - a scripted run like the gate's, folded in from `imaginarium-gate`;
+  - the owner's run on the laptop;
+  - the review of all M3 code;
+  - **docs:** user docs on the website (getting started, the palette,
+    shortcuts, files) and developer docs;
+  - the tag `v0.0.4-m3`, with a Linux package.
+
+**Order:**
+1. M3.0 first.
+2. M3.1 and M3.2 side by side (different crates).
+3. Then M3.3 and M3.4.
+4. M3.5 to M3.7 in any order.
+5. M3.8 where it fits, and M3.9 last.
+
+**The owner's answers** (2026-10-16, PLAN §14):
+1. **The look:** clean, modern and simple, in the style and feel of
+   Excalidraw's interface (not its layout); a highly capable,
+   feature-rich multi-editor that stays simple to use.
+2. **Windows:** one per document, and a start window like Blender's
+   splash.
+3. **Saving:** the save mechanics of Google Docs (nobody saves by hand),
+   with native open and save dialogs.
+4. **Shapes:** the simple ones first, stored and handled the way
+   path-based vector shapes (as in Inkscape) will be later. A rectangle
+   stays a rectangle and can be converted to a path. Images and
+   connectors come later.
+
 ## Open questions (owner)
 
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
+
 ## Known issues and notes
 
 - **Signatures are verified on open** (since M1.8: every record a document
