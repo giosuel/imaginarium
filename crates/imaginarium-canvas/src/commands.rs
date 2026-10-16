@@ -42,6 +42,13 @@ fn failed(id: &'static str) -> impl Fn(ModelError) -> CommandError {
     }
 }
 
+fn locked(id: &'static str) -> CommandError {
+    CommandError::InvalidArgs {
+        id,
+        reason: "the node is locked".into(),
+    }
+}
+
 fn has_selection(board: &BoardCanvas) -> Availability {
     if board.selection().with_untracked(Vec::is_empty) {
         Availability::Disabled("Select something first")
@@ -113,11 +120,27 @@ pub static SET_BOX: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
             h: args.float("h").unwrap_or(current.h),
             r: args.float("rotation").unwrap_or(current.r),
         };
-        if geometry == current {
+        if crate::hit::locked(board.document().view(), node) {
+            return Err(locked("board.set_box"));
+        }
+        let flip = args.str("flip").map(|flip| match flip {
+            "none" => Value::Null,
+            other => Value::String(other.into()),
+        });
+        let flip_changes = flip.as_ref().is_some_and(|flip| {
+            board.document().view().node(node).and_then(|node| node.prop("flip")).unwrap_or(&Value::Null) != flip
+        });
+        if geometry == current && !flip_changes {
             return Ok(Outcome::Unchanged);
         }
         board
-            .transact(&Actor::User, |txn| txn.set_geometry(node, geometry))
+            .transact(&Actor::User, |txn| {
+                txn.set_geometry(node, geometry)?;
+                if let Some(flip) = flip.filter(|_| flip_changes) {
+                    txn.set_prop(node, "flip", flip)?;
+                }
+                Ok(())
+            })
             .map_err(failed("board.set_box"))?;
         Ok(Outcome::Done)
     },
@@ -135,6 +158,14 @@ pub static SET_BOX: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
         float("w", "Width in points.", 0.0, LIMIT, false),
         float("h", "Height in points.", 0.0, LIMIT, false),
         float("rotation", "Clockwise rotation in degrees around the box's center.", -3600.0, 3600.0, false),
+        ArgSpec {
+            name: "flip",
+            description: "For a line: which corners it joins (none: top left to bottom right; h: mirrored horizontally; v: vertically; hv: both).",
+            kind: ArgKind::Enum {
+                variants: &["none", "h", "v", "hv"],
+            },
+            required: false,
+        },
     ],
 });
 
@@ -156,7 +187,24 @@ pub static SET_RADIUS: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
                 id: "shape.set_radius",
                 reason: "`node` is not a node id".into(),
             })?;
-        let radius = args.float("radius").unwrap_or(0.0);
+        let view = board.document().view();
+        let shape = view.node(node).filter(|shape| {
+            matches!(shape.kind(), imaginarium_model::NodeKind::Shape)
+                && shape.prop("shape").and_then(Value::as_str).is_none_or(|preset| preset == "rect")
+        });
+        let Some(shape) = shape else {
+            return Err(CommandError::InvalidArgs {
+                id: "shape.set_radius",
+                reason: "only a rectangle has a corner radius".into(),
+            });
+        };
+        if crate::hit::locked(view, node) {
+            return Err(locked("shape.set_radius"));
+        }
+        // Up to half the shorter side, as the description says.
+        let size = shape.geometry().unwrap_or_default();
+        let limit = (size.w.min(size.h) / 2.0).max(0.0);
+        let radius = args.float("radius").unwrap_or(0.0).min(limit);
         let current = board
             .document()
             .view()
@@ -305,18 +353,20 @@ pub(crate) fn execute(
     id: &str,
     args: &Args,
 ) -> Result<Outcome, CommandError> {
-    REGISTRY.with(|registry| {
-        let mut registry = registry.borrow_mut();
-        let registry = registry.get_or_insert_with(|| {
-            let mut registry = Registry::new();
-            for command in board_commands() {
-                // Ids are literals above: they are valid and unique (tested).
-                let _ = registry.register(command);
-            }
-            registry
-        });
-        registry.execute(board, id, args)
-    })
+    // Taken out of the cell while a command runs, so a command that runs
+    // another one (an AI action, a composite) doesn't find it borrowed.
+    let registry = REGISTRY.with(|registry| registry.borrow_mut().take());
+    let registry = registry.unwrap_or_else(|| {
+        let mut registry = Registry::new();
+        for command in board_commands() {
+            // Ids are literals above: they are valid and unique (tested).
+            let _ = registry.register(command);
+        }
+        registry
+    });
+    let result = registry.execute(board, id, args);
+    REGISTRY.with(|cell| *cell.borrow_mut() = Some(registry));
+    result
 }
 
 /// Arguments of `board.move`.
@@ -326,10 +376,16 @@ pub(crate) fn move_args(dx: f64, dy: f64) -> Args {
         .with("dy", ArgValue::Float(dy))
 }
 
-/// Arguments of `board.set_box`.
-pub(crate) fn box_args(node: NodeId, geometry: Geometry) -> Args {
-    Args::new()
-        .with("node", ArgValue::String(node.to_string()))
+/// Arguments of `board.set_box`; `flip` a line's new one.
+pub(crate) fn box_args(node: NodeId, geometry: Geometry, flip: Option<&str>) -> Args {
+    let args = match flip {
+        Some(flip) => Args::new().with(
+            "flip",
+            ArgValue::String(if flip.is_empty() { "none" } else { flip }.into()),
+        ),
+        None => Args::new(),
+    };
+    args.with("node", ArgValue::String(node.to_string()))
         .with("x", ArgValue::Float(geometry.x))
         .with("y", ArgValue::Float(geometry.y))
         .with("w", ArgValue::Float(geometry.w.max(0.0)))

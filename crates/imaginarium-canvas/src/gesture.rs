@@ -55,12 +55,34 @@ impl SelectionBox {
 }
 
 /// A selected node as a gesture started: its box, and its parent's space.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Start {
     pub node: NodeId,
     pub geometry: Geometry,
     /// The parent's box space to document space.
     pub parent: Affine,
+    /// A line's `flip` (`""` for none); `None` for other nodes.
+    pub flip: Option<&'static str>,
+    /// A group's descendants and their boxes, which scale with it.
+    pub children: Vec<(NodeId, Geometry)>,
+}
+
+/// A node's new box from a gesture, and a line's new `flip`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Placed {
+    pub node: NodeId,
+    pub geometry: Geometry,
+    pub flip: Option<&'static str>,
+}
+
+/// A line's `flip` with its horizontal and vertical halves toggled.
+fn toggled(flip: &str, h: bool, v: bool) -> &'static str {
+    match (flip.contains('h') != h, flip.contains('v') != v) {
+        (false, false) => "",
+        (true, false) => "h",
+        (false, true) => "v",
+        (true, true) => "hv",
+    }
 }
 
 impl Start {
@@ -125,9 +147,70 @@ pub(crate) fn handles(
     out
 }
 
+/// The handles to show and take presses on: all of [`handles`] on a box
+/// big enough on screen; on a narrow one no edge handles across it (they
+/// would sit on top of each other and of the node), on a tiny one only the
+/// bottom right corner, no radius handle under 40 px; and a line's two
+/// ends only (`line`: its `flip`).
+pub(crate) fn handles_shown(
+    selection: &SelectionBox,
+    camera: Affine,
+    radius: Option<f64>,
+    line: Option<&str>,
+) -> Vec<(Handle, Point)> {
+    let screen = camera * selection.world;
+    let width = (screen * Point::new(selection.size.width, 0.0) - screen * Point::ZERO).hypot();
+    let height = (screen * Point::new(0.0, selection.size.height) - screen * Point::ZERO).hypot();
+    let room = 3.0 * HANDLE_REACH;
+    let radius = radius.filter(|_| width.min(height) >= 40.0);
+    let all = handles(selection, camera, radius);
+    if let Some(flip) = line {
+        let side = |flipped: bool| if flipped { Side::End } else { Side::Start };
+        let other = |side: Side| {
+            if side == Side::Start {
+                Side::End
+            } else {
+                Side::Start
+            }
+        };
+        let start = (side(flip.contains('h')), side(flip.contains('v')));
+        let end = (other(start.0), other(start.1));
+        return all
+            .into_iter()
+            .filter(|(handle, _)| matches!(handle, Handle::Resize { x, y } if (*x, *y) == start || (*x, *y) == end))
+            .collect();
+    }
+    if width < 2.0 * HANDLE_REACH || height < 2.0 * HANDLE_REACH {
+        return all
+            .into_iter()
+            .filter(|(handle, _)| {
+                matches!(
+                    handle,
+                    Handle::Resize {
+                        x: Side::End,
+                        y: Side::End
+                    } | Handle::Rotate
+                )
+            })
+            .collect();
+    }
+    all.into_iter()
+        .filter(|(handle, _)| match handle {
+            Handle::Resize {
+                x: Side::Middle, ..
+            } => width >= room,
+            Handle::Resize {
+                y: Side::Middle, ..
+            } => height >= room,
+            _ => true,
+        })
+        .collect()
+}
+
 /// The box after dragging `handle` to `pointer` (document space): the
 /// opposite side stays; `keep_aspect` scales corners evenly. Returns the
-/// new rectangle in the starting box's space.
+/// new rectangle in the starting box's space, inverted (x1 < x0, y1 < y0)
+/// where the handle crossed the opposite side.
 pub(crate) fn resized(
     selection: &SelectionBox,
     handle: (Side, Side),
@@ -156,37 +239,92 @@ pub(crate) fn resized(
             y1 = y0 + nh * sign(y0, y1);
         }
     }
-    Rect::new(x0, y0, x1, y1).abs()
+    Rect::new(x0, y0, x1, y1)
 }
 
 /// Each node's box after its selection box became `to` (in the starting
-/// box's space): positions and sizes scale with it, rotations stay.
-pub(crate) fn resize_all(
-    selection: &SelectionBox,
-    starts: &[Start],
-    to: Rect,
-) -> Vec<(NodeId, Geometry)> {
+/// box's space, inverted where it flipped): positions and sizes scale with
+/// it, rotations stay, lines mirror their `flip`, and a group's
+/// descendants scale with the group.
+pub(crate) fn resize_all(selection: &SelectionBox, starts: &[Start], to: Rect) -> Vec<Placed> {
     let (w, h) = (selection.size.width, selection.size.height);
-    let sx = if w > 0.0 { to.width() / w } else { 1.0 };
-    let sy = if h > 0.0 { to.height() / h } else { 1.0 };
-    let map = Affine::translate(to.origin().to_vec2()) * Affine::scale_non_uniform(sx, sy);
+    // A box with no width (or height), a flat line, can't scale along it:
+    // it takes the dragged extent there.
+    let (flat_w, flat_h) = (w <= 0.0, h <= 0.0);
+    let sx = if flat_w { 1.0 } else { (to.x1 - to.x0) / w };
+    let sy = if flat_h { 1.0 } else { (to.y1 - to.y0) / h };
+    let scale = Affine::translate((to.x0, to.y0)) * Affine::scale_non_uniform(sx, sy);
+    let map = |point: Point| {
+        let scaled = scale * point;
+        Point::new(
+            if flat_w {
+                (to.x0 + to.x1) / 2.0
+            } else {
+                scaled.x
+            },
+            if flat_h {
+                (to.y0 + to.y1) / 2.0
+            } else {
+                scaled.y
+            },
+        )
+    };
     let inverse = selection.world.inverse();
-    starts
-        .iter()
-        .map(|start| {
+    let mirror_h = if flat_w { to.x1 < to.x0 } else { sx < 0.0 };
+    let mirror_v = if flat_h { to.y1 < to.y0 } else { sy < 0.0 };
+    let (sx, sy) = (sx.abs(), sy.abs());
+    let mut placed = Vec::new();
+    for start in starts {
+        {
             let g = start.geometry;
             let center_doc = start.world() * Point::new(g.w.max(0.0) / 2.0, g.h.max(0.0) / 2.0);
-            let center = selection.world * (map * (inverse * center_doc));
+            let center = selection.world * map(inverse * center_doc);
             // The node's axes in the selection box: a turned node in a
             // straight box scales by the box's scale along its own axes.
             let angle = (g.r - selection_rotation(selection, start)).to_radians();
             let (sin, cos) = angle.sin_cos();
             let scale_w = ((sx * cos).powi(2) + (sy * sin).powi(2)).sqrt();
             let scale_h = ((sx * sin).powi(2) + (sy * cos).powi(2)).sqrt();
-            let size = Size::new((g.w * scale_w).max(0.0), (g.h * scale_h).max(0.0));
-            (start.node, start.placed(center, size, g.r))
-        })
-        .collect()
+            let mut size = Size::new((g.w * scale_w).max(0.0), (g.h * scale_h).max(0.0));
+            if flat_w {
+                size.width = to.width().abs();
+            }
+            if flat_h {
+                size.height = to.height().abs();
+            }
+            placed.push(Placed {
+                node: start.node,
+                geometry: start.placed(center, size, g.r),
+                flip: start
+                    .flip
+                    .map(|flip| toggled(flip, mirror_h, mirror_v))
+                    .filter(|flip| Some(*flip) != start.flip),
+            });
+            // A group's children are in its space: they scale as it did.
+            let (fw, fh) = (
+                if g.w > 0.0 { size.width / g.w } else { 1.0 },
+                if g.h > 0.0 { size.height / g.h } else { 1.0 },
+            );
+            for (child, c) in &start.children {
+                let center = Point::new((c.x + c.w / 2.0) * fw, (c.y + c.h / 2.0) * fh);
+                let (sin, cos) = c.r.to_radians().sin_cos();
+                let cw = c.w * ((fw * cos).powi(2) + (fh * sin).powi(2)).sqrt();
+                let ch = c.h * ((fw * sin).powi(2) + (fh * cos).powi(2)).sqrt();
+                placed.push(Placed {
+                    node: *child,
+                    geometry: Geometry {
+                        x: center.x - cw / 2.0,
+                        y: center.y - ch / 2.0,
+                        w: cw,
+                        h: ch,
+                        r: c.r,
+                    },
+                    flip: None,
+                });
+            }
+        }
+    }
+    placed
 }
 
 /// The rotation of the selection box relative to a node's parent, in
@@ -199,7 +337,7 @@ fn selection_rotation(selection: &SelectionBox, start: &Start) -> f64 {
 
 /// Each node's box after turning the selection by `degrees` around
 /// `center` (document space).
-pub(crate) fn rotate_all(starts: &[Start], center: Point, degrees: f64) -> Vec<(NodeId, Geometry)> {
+pub(crate) fn rotate_all(starts: &[Start], center: Point, degrees: f64) -> Vec<Placed> {
     let turn = Affine::rotate_about(degrees.to_radians(), center);
     starts
         .iter()
@@ -208,7 +346,11 @@ pub(crate) fn rotate_all(starts: &[Start], center: Point, degrees: f64) -> Vec<(
             let size = Size::new(g.w.max(0.0), g.h.max(0.0));
             let center_doc = start.world() * Point::new(size.width / 2.0, size.height / 2.0);
             let rotation = normalize_degrees(g.r + degrees);
-            (start.node, start.placed(turn * center_doc, size, rotation))
+            Placed {
+                node: start.node,
+                geometry: start.placed(turn * center_doc, size, rotation),
+                flip: None,
+            }
         })
         .collect()
 }
@@ -255,6 +397,8 @@ mod tests {
             node: NodeId::Stored(1),
             geometry,
             parent: Affine::IDENTITY,
+            flip: None,
+            children: Vec::new(),
         }
     }
 
@@ -282,7 +426,7 @@ mod tests {
             Point::new(50.0, 0.0),
             false,
         );
-        assert_eq!(rect, Rect::new(-50.0, 0.0, 0.0, 100.0));
+        assert_eq!(rect, Rect::new(0.0, 0.0, -50.0, 100.0));
         // Shift keeps the shape.
         let rect = resized(
             &selection,
@@ -314,12 +458,18 @@ mod tests {
             selection.world * Point::new(150.0, 80.0),
             false,
         );
-        let [(_, placed)] = resize_all(&selection, &[node], rect)[..] else {
+        let placed = resize_all(&selection, &[node], rect);
+        let [
+            Placed {
+                geometry: placed, ..
+            },
+        ] = &placed[..]
+        else {
             panic!("one node")
         };
         assert!((placed.w - 150.0).abs() < 1e-9 && (placed.h - 80.0).abs() < 1e-9);
         assert_eq!(placed.r, 30.0);
-        let moved = start(placed).world() * Point::ZERO;
+        let moved = start(*placed).world() * Point::ZERO;
         assert!((moved - anchor).hypot() < 1e-9, "{moved:?} vs {anchor:?}");
     }
 
@@ -328,13 +478,43 @@ mod tests {
         let a = start(Geometry::new(0.0, 0.0, 100.0, 100.0));
         let b = start(Geometry::new(200.0, 0.0, 100.0, 100.0));
         let selection = straight(0.0, 0.0, 300.0, 100.0);
-        let placed = resize_all(&selection, &[a, b], Rect::new(0.0, 0.0, 600.0, 100.0));
-        assert_eq!(placed[0].1, Geometry::new(0.0, 0.0, 200.0, 100.0));
-        assert_eq!(placed[1].1, Geometry::new(400.0, 0.0, 200.0, 100.0));
+        let placed = resize_all(
+            &selection,
+            &[a.clone(), b.clone()],
+            Rect::new(0.0, 0.0, 600.0, 100.0),
+        );
+        assert_eq!(placed[0].geometry, Geometry::new(0.0, 0.0, 200.0, 100.0));
+        assert_eq!(placed[1].geometry, Geometry::new(400.0, 0.0, 200.0, 100.0));
         let turned = rotate_all(&[a, b], selection.center(), 180.0);
-        assert!((turned[0].1.x - 200.0).abs() < 1e-9 && (turned[0].1.y).abs() < 1e-9);
-        assert_eq!(turned[0].1.r, 180.0);
-        assert!((turned[1].1.x).abs() < 1e-9);
+        assert!((turned[0].geometry.x - 200.0).abs() < 1e-9 && (turned[0].geometry.y).abs() < 1e-9);
+        assert_eq!(turned[0].geometry.r, 180.0);
+        assert!((turned[1].geometry.x).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_line_dragged_past_its_anchor_flips() {
+        let mut line = start(Geometry::new(0.0, 0.0, 100.0, 50.0));
+        line.flip = Some("");
+        let selection = straight(0.0, 0.0, 100.0, 50.0);
+        // The end at the bottom right goes past the start, to the left.
+        let rect = resized(
+            &selection,
+            (Side::End, Side::End),
+            Point::new(-40.0, 50.0),
+            false,
+        );
+        let placed = resize_all(&selection, &[line], rect);
+        assert_eq!(placed[0].geometry, Geometry::new(-40.0, 0.0, 40.0, 50.0));
+        assert_eq!(placed[0].flip, Some("h"));
+    }
+
+    #[test]
+    fn a_groups_children_scale_with_it() {
+        let mut group = start(Geometry::new(0.0, 0.0, 200.0, 100.0));
+        group.children = vec![(NodeId::Stored(2), Geometry::new(100.0, 0.0, 100.0, 100.0))];
+        let selection = straight(0.0, 0.0, 200.0, 100.0);
+        let placed = resize_all(&selection, &[group], Rect::new(0.0, 0.0, 400.0, 100.0));
+        assert_eq!(placed[1].geometry, Geometry::new(200.0, 0.0, 200.0, 100.0));
     }
 
     #[test]

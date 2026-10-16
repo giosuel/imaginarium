@@ -64,6 +64,9 @@ enum Gesture {
         selection: SelectionBox,
         starts: Vec<Start>,
         pointer: Point,
+        /// The handle's center less where it was pressed: the box follows
+        /// the handle, not the pointer's own position.
+        grab: Vec2,
         keep_aspect: bool,
     },
     Rotate {
@@ -77,6 +80,7 @@ enum Gesture {
         node: NodeId,
         selection: SelectionBox,
         pointer: Point,
+        grab: Vec2,
     },
 }
 
@@ -125,6 +129,11 @@ pub struct BoardCanvas {
     entered: Option<NodeId>,
     press: Option<Press>,
     gesture: Option<Gesture>,
+    /// A handle's press (window space) that hasn't travelled the drag
+    /// threshold yet: until it does, the gesture changes nothing.
+    armed: Option<Point>,
+    /// The gesture opened an undo group (closed at its end).
+    grouped: bool,
     /// The text being edited in place.
     editing: Option<Editing>,
     /// Where frame names were drawn (window space), front last.
@@ -156,6 +165,8 @@ impl BoardCanvas {
             entered: None,
             press: None,
             gesture: None,
+            armed: None,
+            grouped: false,
             editing: None,
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
@@ -192,11 +203,45 @@ impl BoardCanvas {
                 true
             })
             .filter_map(|node| {
-                let geometry = view.node(*node)?.geometry().unwrap_or_default();
+                let view_node = view.node(*node)?;
+                let geometry = view_node.geometry().unwrap_or_default();
+                let line = matches!(view_node.kind(), NodeKind::Shape)
+                    && view_node
+                        .prop("shape")
+                        .and_then(imaginarium_model::Value::as_str)
+                        == Some("line");
+                let flip = line.then(|| {
+                    match view_node
+                        .prop("flip")
+                        .and_then(imaginarium_model::Value::as_str)
+                    {
+                        Some("h") => "h",
+                        Some("v") => "v",
+                        Some("hv") => "hv",
+                        _ => "",
+                    }
+                });
+                // A group's descendants scale with it.
+                let mut children = Vec::new();
+                if matches!(view_node.kind(), NodeKind::Group) {
+                    let mut stack: Vec<NodeId> = view
+                        .children(imaginarium_model::Parent::Node(*node))
+                        .collect();
+                    while let Some(child) = stack.pop() {
+                        if let Some(child_node) = view.node(child) {
+                            children.push((child, child_node.geometry().unwrap_or_default()));
+                            if matches!(child_node.kind(), NodeKind::Group) {
+                                stack.extend(view.children(imaginarium_model::Parent::Node(child)));
+                            }
+                        }
+                    }
+                }
                 Some(Start {
                     node: *node,
                     geometry,
                     parent: items.parent_world(view, *node)?,
+                    flip,
+                    children,
                 })
             })
             .collect()
@@ -273,10 +318,18 @@ impl BoardCanvas {
         let Some(gesture) = self.gesture.clone() else {
             return;
         };
-        let run = |board: &mut Self, placed: Vec<(NodeId, imaginarium_model::Geometry)>| {
-            for (node, geometry) in placed {
+        // A press on a handle that hasn't moved yet changes nothing.
+        if self.armed.is_some() {
+            return;
+        }
+        let run = |board: &mut Self, placed: Vec<gesture::Placed>| {
+            for placed in placed {
                 // A node gone meanwhile leaves the rest as they are.
-                let _ = commands::execute(board, "board.set_box", &box_args(node, geometry));
+                let _ = commands::execute(
+                    board,
+                    "board.set_box",
+                    &box_args(placed.node, placed.geometry, placed.flip),
+                );
             }
         };
         match gesture {
@@ -296,9 +349,10 @@ impl BoardCanvas {
                 selection,
                 starts,
                 pointer,
+                grab,
                 keep_aspect,
             } => {
-                let to = gesture::resized(&selection, handle, pointer, keep_aspect);
+                let to = gesture::resized(&selection, handle, pointer + grab, keep_aspect);
                 run(self, gesture::resize_all(&selection, &starts, to));
             }
             Gesture::Rotate {
@@ -309,7 +363,7 @@ impl BoardCanvas {
                 snap,
             } => {
                 let mut degrees = gesture::angle(center, pointer) - from;
-                if snap && let [start] = starts[..] {
+                if snap && let [ref start] = starts[..] {
                     let target =
                         ((start.geometry.r + degrees) / SNAP_DEGREES).round() * SNAP_DEGREES;
                     degrees = target - start.geometry.r;
@@ -320,8 +374,9 @@ impl BoardCanvas {
                 node,
                 selection,
                 pointer,
+                grab,
             } => {
-                let radius = (gesture::radius_at(&selection, pointer) * 2.0).round() / 2.0;
+                let radius = (gesture::radius_at(&selection, pointer + grab) * 2.0).round() / 2.0;
                 let _ = commands::execute(
                     self,
                     "shape.set_radius",
@@ -337,7 +392,8 @@ impl BoardCanvas {
         if self.gesture.is_some() {
             self.end_gesture();
         }
-        let _ = self.document.begin_undo_group(UndoScope::User);
+        // Only a group this gesture opened is closed at its end.
+        self.grouped = self.document.begin_undo_group(UndoScope::User).is_ok();
         self.gesture = Some(gesture);
     }
 
@@ -346,7 +402,10 @@ impl BoardCanvas {
         if self.gesture.is_some() {
             self.flush_gesture();
             self.gesture = None;
-            self.document.end_undo_group(UndoScope::User);
+            self.armed = None;
+            if std::mem::take(&mut self.grouped) {
+                self.document.end_undo_group(UndoScope::User);
+            }
         }
     }
 
@@ -354,13 +413,22 @@ impl BoardCanvas {
     /// there.
     fn handle_at(&self, screen: Point) -> Option<(Handle, SelectionBox)> {
         let selection = self.selection_box()?;
-        let radius = self.selected_radius().map(|(_, radius)| radius);
-        let camera = self.camera(self.bounds);
-        gesture::handles(&selection, camera, radius)
+        self.shown_handles(&selection)
             .into_iter()
             .filter(|(_, at)| (*at - screen).hypot() <= gesture::HANDLE_REACH)
             .min_by(|a, b| (a.1 - screen).hypot().total_cmp(&(b.1 - screen).hypot()))
             .map(|(handle, _)| (handle, selection))
+    }
+
+    /// The handles the selection shows (and takes presses on): a single
+    /// line's two ends, fewer on small boxes so they stay movable.
+    fn shown_handles(&self, selection: &SelectionBox) -> Vec<(Handle, Point)> {
+        let radius = self.selected_radius().map(|(_, radius)| radius);
+        let line = match self.starts()[..] {
+            [ref start] if self.selection.with_untracked(Vec::len) == 1 => start.flip,
+            _ => None,
+        };
+        gesture::handles_shown(selection, self.camera(self.bounds), radius, line)
     }
 
     /// Starts the gesture of a press on `handle`.
@@ -368,19 +436,28 @@ impl BoardCanvas {
         &mut self,
         handle: Handle,
         selection: SelectionBox,
-        pointer: Point,
+        screen: Point,
         shift: bool,
     ) {
         let starts = self.starts();
         if starts.is_empty() {
             return;
         }
+        let pointer = self.to_document(self.bounds, screen);
+        // Where the handle itself is, so the box follows it.
+        let at = self
+            .shown_handles(&selection)
+            .into_iter()
+            .find(|(shown, _)| *shown == handle)
+            .map_or(pointer, |(_, at)| self.to_document(self.bounds, at));
+        let grab = at - pointer;
         let gesture = match handle {
             Handle::Resize { x, y } => Gesture::Resize {
                 handle: (x, y),
                 selection,
                 starts,
                 pointer,
+                grab,
                 keep_aspect: shift,
             },
             Handle::Rotate => {
@@ -398,11 +475,13 @@ impl BoardCanvas {
                     node,
                     selection,
                     pointer,
+                    grab,
                 },
                 None => return,
             },
         };
         self.begin_gesture(gesture);
+        self.armed = Some(screen);
     }
 
     /// Brings the board up to date with the document now (painting and
@@ -812,9 +891,8 @@ impl BoardCanvas {
         if matches!(self.gesture, Some(Gesture::Move { .. })) {
             return;
         }
-        let radius = self.selected_radius().map(|(_, radius)| radius);
         let line = Stroke::new(1.5);
-        for (handle, at) in gesture::handles(&selection, camera, radius) {
+        for (handle, at) in self.shown_handles(&selection) {
             match handle {
                 Handle::Resize { .. } => {
                     let half = gesture::HANDLE_SIZE / 2.0 - 0.75;
@@ -953,8 +1031,7 @@ impl BoardCanvas {
                 if *clicks == 1
                     && let Some((handle, selection)) = self.handle_at(*position)
                 {
-                    let pointer = self.to_document(cx.bounds(), *position);
-                    self.press_handle(handle, selection, pointer, modifiers.shift);
+                    self.press_handle(handle, selection, *position, modifiers.shift);
                     cx.request_paint();
                     return true;
                 }
@@ -1040,6 +1117,12 @@ impl BoardCanvas {
                         | Gesture::Resize { pointer: at, .. }
                         | Gesture::Rotate { pointer: at, .. }
                         | Gesture::Radius { pointer: at, .. } => *at = pointer,
+                    }
+                    if self
+                        .armed
+                        .is_some_and(|pressed| (*position - pressed).hypot() >= DRAG_THRESHOLD)
+                    {
+                        self.armed = None;
                     }
                     cx.request_paint();
                     return true;
