@@ -381,7 +381,9 @@ mod tests {
     /// Text and the backgrounds it is drawn on, which must reach 4.5:1
     /// (WCAG AA for body text) in every theme and for every accent the
     /// settings offer.
-    const PAIRS: [(Token, Token); 18] = [
+    const PAIRS: [(Token, Token); 20] = [
+        (Token::Danger, Token::ControlHover),
+        (Token::Danger, Token::ControlActive),
         (Token::Text, Token::PanelBg),
         (Token::TextSecondary, Token::PanelBg),
         (Token::OnWarningSoft, Token::WarningSoft),

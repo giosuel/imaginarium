@@ -521,6 +521,13 @@ impl Ui {
         true
     }
 
+    /// Tells the tree the keyboard was used, for keys the view handles
+    /// itself before the tree (app shortcuts like `Ctrl+K`), so the focus
+    /// ring shows in what they open.
+    pub fn note_keyboard(&mut self) {
+        self.set_keyboard(true);
+    }
+
     /// Records whether the keyboard or the pointer was used last; the
     /// focused widget repaints when its ring comes or goes.
     fn set_keyboard(&mut self, keyboard: bool) {
@@ -1323,7 +1330,14 @@ impl Ui {
                 handled
             }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
-                if let Input::Key { pressed: true, .. } = input {
+                if let Input::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = input
+                    && navigates(key, modifiers)
+                {
                     self.set_keyboard(true);
                 }
                 // Keys go to the focus, unless it is behind a dialog (one that
@@ -1539,10 +1553,22 @@ impl Ui {
             if !self.node(id).is_some_and(|node| node.widget.focusable()) {
                 return false;
             }
+            // A screen reader moves the focus the way the keyboard does.
+            self.set_keyboard(true);
             self.set_focus(fonts, Some(id));
             return true;
         }
         self.call(fonts, id, |widget, cx| widget.access_action(cx, request))
             .unwrap_or(false)
     }
+}
+
+/// Whether a key press is keyboard navigation, which shows focus rings: not
+/// a modifier on its own, and not a pointer chord like Ctrl+wheel or
+/// Shift+click's Shift (as CSS's `:focus-visible` heuristics do).
+fn navigates(key: &Key, modifiers: &crate::window::Modifiers) -> bool {
+    let modifier_alone = matches!(key, Key::Other(name)
+        if ["Control", "Shift", "Alt", "AltGraph", "Super", "Meta", "Hyper"].contains(&name.as_str()));
+    (!modifier_alone && !(modifiers.ctrl || modifiers.alt || modifiers.meta))
+        || matches!(key, Key::Tab)
 }

@@ -154,9 +154,16 @@ shadow), `Label` and `label`, `Button` (styles `ButtonColors::primary`,
 `secondary`, `quiet` and `danger`), `TextInput`, and `Icon` (a line
 icon from SVG path data on Lucide's 24-unit grid).
 
+Labels wrap like text in CSS: in a box that gets too narrow, a label
+breaks lines down to its longest word. `Label::single_line()` keeps one on
+a single line (a status line, which its parent clips).
+
 Focus rings follow the keyboard, like CSS's `:focus-visible`: a click
-focuses a button without a ring, and the next key press shows it.
-Widgets ask `cx.is_focus_visible()` when they paint.
+focuses a button without a ring, and the next navigating key (not
+Ctrl, Shift or Alt on its own, nor a Ctrl or Alt shortcut) shows it, as
+does a screen reader moving the focus. Widgets ask
+`cx.is_focus_visible()` when they paint; a view that handles a shortcut
+itself calls `ui.note_keyboard()`.
 
 ## Layers: popovers, dialogs, tooltips
 

@@ -252,9 +252,11 @@ impl Label {
         self
     }
 
-    /// See [`Label::single_line`], for labels made by [`label`].
+    /// See [`Label::single_line`], for labels made by [`label`]. Change it
+    /// through [`Ui::widget_mut`], which lays the label out again.
     pub fn set_single_line(&mut self, single_line: bool) {
         self.single_line = single_line;
+        self.block = None;
     }
 
     /// Draws the text in `paint` (a token follows the theme).

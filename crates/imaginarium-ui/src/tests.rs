@@ -938,6 +938,28 @@ fn a_click_focuses_without_a_ring_and_a_key_brings_it() {
     frame(&mut ui, &mut fonts);
     assert_eq!(ui.focused(), Some(widget));
     assert_eq!(ring.get(), Some(false), "a click shows no ring");
+    // Ctrl alone, or a Ctrl shortcut, isn't navigation (Ctrl+wheel zooms).
+    ui.input(&mut fonts, &key(Key::Other("Control".into())));
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    ui.input(
+        &mut fonts,
+        &Input::Key {
+            key: Key::Character("z".into()),
+            text: None,
+            pressed: true,
+            repeat: false,
+            modifiers: ctrl,
+        },
+    );
+    frame(&mut ui, &mut fonts);
+    assert_eq!(
+        ring.get(),
+        Some(false),
+        "modifiers and shortcuts show no ring"
+    );
     ui.input(&mut fonts, &key(Key::ArrowDown));
     frame(&mut ui, &mut fonts);
     assert_eq!(ring.get(), Some(true), "the keyboard does");

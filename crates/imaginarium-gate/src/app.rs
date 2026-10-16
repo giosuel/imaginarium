@@ -538,6 +538,8 @@ impl App {
         } = input
             && modifiers.command()
         {
+            // Shortcuts are keyboard use: what they focus shows its ring.
+            self.ui.note_keyboard();
             if c.eq_ignore_ascii_case("k") {
                 if was_open {
                     self.close_palette();
