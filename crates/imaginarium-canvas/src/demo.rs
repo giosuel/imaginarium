@@ -3,14 +3,21 @@
 //! Sample boards, for the examples, tests and benchmarks.
 
 use imaginarium_model::{
-    Actor, Document, DocumentKind, Geometry, NodeId, NodeKind, Parent, Result, Transaction, Value,
+    Actor, Document, DocumentKind, Geometry, NodeId, NodeKind, Parent, Result, Transaction, UndoConfig, Value,
 };
 
 /// The board of the mockups ("Launch plan · Q4"): a frame with three
 /// shapes and lines, a diamond, a triangle, text boxes. Coordinates are the
 /// mockup's, so a window of 1440 × 866 shows it as the mockup does.
 pub fn launch_plan() -> Result<Document> {
-    let mut document = Document::new(DocumentKind::Board)?;
+    launch_plan_with(UndoConfig::default())
+}
+
+/// [`launch_plan`] with an undo configuration of its own (tests turn
+/// merging off, so a gesture right after the board's creation is a step
+/// of its own).
+pub fn launch_plan_with(undo: UndoConfig) -> Result<Document> {
+    let mut document = Document::new_with(DocumentKind::Board, undo)?;
     document.transact(&Actor::User, |txn| {
         let title = text(
             txn,

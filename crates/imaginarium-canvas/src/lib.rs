@@ -24,7 +24,9 @@
 #![warn(missing_docs)]
 
 mod board;
+pub mod commands;
 pub mod demo;
+mod gesture;
 mod hit;
 mod items;
 mod paint;
@@ -37,6 +39,8 @@ pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gesture;
 #[cfg(test)]
 mod tests_select;
 #[cfg(test)]

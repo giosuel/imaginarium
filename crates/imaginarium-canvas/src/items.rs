@@ -214,6 +214,12 @@ impl Items {
         self.places.contains_key(&node)
     }
 
+    /// A node's parent's box space to document space (the board's for
+    /// root nodes); `None` when the parent isn't visible.
+    pub(crate) fn parent_world(&self, view: &DocumentView, node: NodeId) -> Option<Affine> {
+        self.parent_place(view, node).map(|place| place.world)
+    }
+
     /// The place of a node's parent: the board's for root nodes, `None`
     /// when the parent isn't visible.
     fn parent_place(&self, view: &DocumentView, node: NodeId) -> Option<Place> {

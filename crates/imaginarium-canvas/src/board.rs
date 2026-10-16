@@ -21,15 +21,21 @@ use imaginarium_ui::{
     ACCESS_LOCAL_IDS, Cx, Input, Key, Theme, Token, Widget, access_rect, mix, theme,
 };
 
+use crate::commands::{self, box_args, move_args};
+use crate::gesture::{self, Handle, SelectionBox, Side, Start};
 use crate::hit;
-use crate::items::{BoardColors, Items};
+use crate::items::{BoardColors, Items, Look};
 use crate::paint::ItemPainter;
+
+/// A press moves this many logical pixels before it drags.
+const DRAG_THRESHOLD: f64 = 3.0;
 
 /// What the pointer is doing since its press.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Press {
-    /// Pressed on a node, which is now selected.
-    Node,
+    /// Pressed at `at` (window space) on a node, which is now selected;
+    /// it becomes a move once the pointer leaves the threshold.
+    Node { at: Point },
     /// Dragging a marquee from `start` (document space); `additive` keeps
     /// the selection it started with.
     Marquee {
@@ -38,6 +44,36 @@ enum Press {
         additive: bool,
     },
 }
+
+/// A gesture in progress: one undo step, its commands applied at most
+/// once a frame (`canvas.md` §6), from the latest pointer position.
+#[derive(Clone, Debug)]
+enum Gesture {
+    /// Dragging the selection: `applied` is where the last move left it.
+    Move { applied: Point, pointer: Point },
+    Resize {
+        handle: (Side, Side),
+        selection: SelectionBox,
+        starts: Vec<Start>,
+        pointer: Point,
+        keep_aspect: bool,
+    },
+    Rotate {
+        center: Point,
+        from: f64,
+        starts: Vec<Start>,
+        pointer: Point,
+        snap: bool,
+    },
+    Radius {
+        node: NodeId,
+        selection: SelectionBox,
+        pointer: Point,
+    },
+}
+
+/// Rotation snaps to this many degrees with Shift.
+const SNAP_DEGREES: f64 = 15.0;
 
 /// The most items listed for screen readers: the visible ones, up to this.
 const MAX_ACCESS_ITEMS: usize = 2_000;
@@ -80,6 +116,7 @@ pub struct BoardCanvas {
     /// The group a double-click went into: its children select one by one.
     entered: Option<NodeId>,
     press: Option<Press>,
+    gesture: Option<Gesture>,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
     /// The nodes listed for screen readers, by their local access id - 1.
@@ -107,6 +144,7 @@ impl BoardCanvas {
             hovered: None,
             entered: None,
             press: None,
+            gesture: None,
             name_rects: Vec::new(),
             access_nodes: Vec::new(),
             bounds: Rect::ZERO,
@@ -117,6 +155,242 @@ impl BoardCanvas {
     /// Panels and commands read it; it stays valid as nodes go.
     pub fn selection(&self) -> Signal<Vec<NodeId>> {
         self.selection
+    }
+
+    /// The selected nodes a gesture changes: not locked, and not inside
+    /// another selected node (which moves them already), with their boxes
+    /// and parents' spaces now.
+    fn starts(&self) -> Vec<Start> {
+        let view = self.document.view();
+        let selection = self.selection.get_untracked();
+        let Some(items) = &self.items else {
+            return Vec::new();
+        };
+        selection
+            .iter()
+            .filter(|node| !hit::locked(view, **node))
+            .filter(|node| {
+                let mut next = view.node(**node).map(|node| node.parent());
+                while let Some(imaginarium_model::Parent::Node(parent)) = next {
+                    if selection.contains(&parent) {
+                        return false;
+                    }
+                    next = view.node(parent).map(|node| node.parent());
+                }
+                true
+            })
+            .filter_map(|node| {
+                let geometry = view.node(*node)?.geometry().unwrap_or_default();
+                Some(Start {
+                    node: *node,
+                    geometry,
+                    parent: items.parent_world(view, *node)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Moves the selected nodes by `dx`, `dy` points on the board, in one
+    /// transaction. `false` if nothing could move.
+    pub(crate) fn move_selection(&mut self, dx: f64, dy: f64) -> Result<bool> {
+        let starts = self.starts();
+        if starts.is_empty() {
+            return Ok(false);
+        }
+        self.transact(&Actor::User, |txn| {
+            for start in &starts {
+                // The move in the parent's space (a turned frame or group).
+                let inverse = start.parent.inverse();
+                let delta = inverse * Point::new(dx, dy) - inverse * Point::ZERO;
+                let mut geometry = start.geometry;
+                geometry.x += delta.x;
+                geometry.y += delta.y;
+                txn.set_geometry(start.node, geometry)?;
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    /// The box around the selection: a single node's own (turned) box, or
+    /// the straight box around several.
+    fn selection_box(&self) -> Option<SelectionBox> {
+        let items = self.items.as_ref()?;
+        let view = self.document.view();
+        let selection = self.selection.get_untracked();
+        if let [node] = selection[..]
+            && let Some(item) = items.by_node.get(&node)
+        {
+            return Some(SelectionBox {
+                world: item.world,
+                size: item.size,
+            });
+        }
+        let union = selection
+            .iter()
+            .filter_map(|node| hit::node_box(items, view, *node))
+            .reduce(|a, b| a.union(b))?;
+        Some(SelectionBox {
+            world: Affine::translate(union.origin().to_vec2()),
+            size: union.size(),
+        })
+    }
+
+    /// The corner radius of the selection when it is one rectangle.
+    fn selected_radius(&self) -> Option<(NodeId, f64)> {
+        let items = self.items.as_ref()?;
+        let [node] = self.selection.get_untracked()[..] else {
+            return None;
+        };
+        let view_node = self.document.view().node(node)?;
+        let rect = view_node
+            .prop("shape")
+            .and_then(imaginarium_model::Value::as_str)
+            .is_none_or(|preset| preset == "rect");
+        match &items.by_node.get(&node)?.look {
+            Look::Shape { style, .. } if rect && !view_node.props().contains_key("radii") => {
+                Some((node, style.radius))
+            }
+            _ => None,
+        }
+    }
+
+    /// Applies the gesture's latest state: one command per node, at most
+    /// once a frame.
+    fn flush_gesture(&mut self) {
+        let Some(gesture) = self.gesture.clone() else {
+            return;
+        };
+        let run = |board: &mut Self, placed: Vec<(NodeId, imaginarium_model::Geometry)>| {
+            for (node, geometry) in placed {
+                // A node gone meanwhile leaves the rest as they are.
+                let _ = commands::execute(board, "board.set_box", &box_args(node, geometry));
+            }
+        };
+        match gesture {
+            Gesture::Move { applied, pointer } => {
+                let delta = pointer - applied;
+                if delta.hypot() == 0.0 {
+                    return;
+                }
+                self.gesture = Some(Gesture::Move {
+                    applied: pointer,
+                    pointer,
+                });
+                let _ = commands::execute(self, "board.move", &move_args(delta.x, delta.y));
+            }
+            Gesture::Resize {
+                handle,
+                selection,
+                starts,
+                pointer,
+                keep_aspect,
+            } => {
+                let to = gesture::resized(&selection, handle, pointer, keep_aspect);
+                run(self, gesture::resize_all(&selection, &starts, to));
+            }
+            Gesture::Rotate {
+                center,
+                from,
+                starts,
+                pointer,
+                snap,
+            } => {
+                let mut degrees = gesture::angle(center, pointer) - from;
+                if snap && let [start] = starts[..] {
+                    let target =
+                        ((start.geometry.r + degrees) / SNAP_DEGREES).round() * SNAP_DEGREES;
+                    degrees = target - start.geometry.r;
+                }
+                run(self, gesture::rotate_all(&starts, center, degrees));
+            }
+            Gesture::Radius {
+                node,
+                selection,
+                pointer,
+            } => {
+                let radius = (gesture::radius_at(&selection, pointer) * 2.0).round() / 2.0;
+                let _ = commands::execute(
+                    self,
+                    "shape.set_radius",
+                    &commands::radius_args(node, radius),
+                );
+            }
+        }
+    }
+
+    /// Starts a gesture: one undo step until the release.
+    fn begin_gesture(&mut self, gesture: Gesture) {
+        // An open group would otherwise swallow the gesture's step.
+        if self.gesture.is_some() {
+            self.end_gesture();
+        }
+        let _ = self.document.begin_undo_group(UndoScope::User);
+        self.gesture = Some(gesture);
+    }
+
+    /// Applies the gesture's last state and closes its undo step.
+    fn end_gesture(&mut self) {
+        if self.gesture.is_some() {
+            self.flush_gesture();
+            self.gesture = None;
+            self.document.end_undo_group(UndoScope::User);
+        }
+    }
+
+    /// The handle under `screen` (window space), if the selection has one
+    /// there.
+    fn handle_at(&self, screen: Point) -> Option<(Handle, SelectionBox)> {
+        let selection = self.selection_box()?;
+        let radius = self.selected_radius().map(|(_, radius)| radius);
+        let camera = self.camera(self.bounds);
+        gesture::handles(&selection, camera, radius)
+            .into_iter()
+            .filter(|(_, at)| (*at - screen).hypot() <= gesture::HANDLE_REACH)
+            .min_by(|a, b| (a.1 - screen).hypot().total_cmp(&(b.1 - screen).hypot()))
+            .map(|(handle, _)| (handle, selection))
+    }
+
+    /// Starts the gesture of a press on `handle`.
+    fn press_handle(
+        &mut self,
+        handle: Handle,
+        selection: SelectionBox,
+        pointer: Point,
+        shift: bool,
+    ) {
+        let starts = self.starts();
+        if starts.is_empty() {
+            return;
+        }
+        let gesture = match handle {
+            Handle::Resize { x, y } => Gesture::Resize {
+                handle: (x, y),
+                selection,
+                starts,
+                pointer,
+                keep_aspect: shift,
+            },
+            Handle::Rotate => {
+                let center = selection.center();
+                Gesture::Rotate {
+                    center,
+                    from: gesture::angle(center, pointer),
+                    starts,
+                    pointer,
+                    snap: shift,
+                }
+            }
+            Handle::Radius => match self.selected_radius() {
+                Some((node, _)) => Gesture::Radius {
+                    node,
+                    selection,
+                    pointer,
+                },
+                None => return,
+            },
+        };
+        self.begin_gesture(gesture);
     }
 
     /// Selects `nodes` (those that exist and are visible).
@@ -349,6 +623,9 @@ impl BoardCanvas {
     /// does: the background, the tiles (directly in the first frame) and
     /// the frame names. For the widget, exports and tests.
     pub fn paint_into(&mut self, fonts: &mut Fonts, scene: &mut Scene, bounds: Rect, now: Instant) {
+        // A gesture's pointer moves since the last frame become one command.
+        self.sync(fonts);
+        self.flush_gesture();
         self.sync(fonts);
         scene.push_clip(&bounds);
         scene.fill(&bounds, theme().color(Token::BoardBg));
@@ -370,7 +647,7 @@ impl BoardCanvas {
         self.stats = stats;
         self.owed_at = owed.then_some(now);
         self.paint_names(fonts, scene, bounds);
-        self.paint_selection(scene, bounds);
+        self.paint_selection(fonts, scene, bounds);
         scene.pop();
         self.bounds = bounds;
     }
@@ -409,9 +686,10 @@ impl BoardCanvas {
 
     /// The hover outline, the selection's outlines and the marquee, on top
     /// of the tiles.
-    fn paint_selection(&self, scene: &mut Scene, bounds: Rect) {
+    fn paint_selection(&self, fonts: &mut Fonts, scene: &mut Scene, bounds: Rect) {
         let color = Self::selection_color();
         let selection = self.selection.get_untracked();
+        self.paint_handles(fonts, scene, bounds, color);
         if let Some(hovered) = self.hovered
             && !selection.contains(&hovered)
             && self.press.is_none()
@@ -429,6 +707,106 @@ impl BoardCanvas {
             let area = Rect::from_points(camera * start, camera * current);
             scene.fill(&area, color.with_alpha(0.08));
             scene.stroke_with(&area, &Stroke::new(1.0), color.with_alpha(0.8));
+        }
+    }
+
+    /// The selection's box and handles, and its size while resizing.
+    fn paint_handles(
+        &self,
+        fonts: &mut Fonts,
+        scene: &mut Scene,
+        bounds: Rect,
+        color: imaginarium_render::peniko::Color,
+    ) {
+        use imaginarium_render::kurbo::{Circle, RoundedRect, Shape};
+        let Some(selection) = self.selection_box() else {
+            return;
+        };
+        let camera = self.camera(bounds);
+        let knob = theme().color(Token::BoardBg);
+        if self
+            .selection
+            .with_untracked(|selection| selection.len() > 1)
+        {
+            let rect = Rect::from_origin_size(Point::ZERO, selection.size);
+            let outline = camera * selection.world * rect.to_path(0.1);
+            scene.stroke_with(
+                &outline,
+                &Stroke::new(1.0).with_dashes(0.0, [4.0, 3.0]),
+                color,
+            );
+        }
+        // While the selection moves, only its outlines show.
+        if matches!(self.gesture, Some(Gesture::Move { .. })) {
+            return;
+        }
+        let radius = self.selected_radius().map(|(_, radius)| radius);
+        let line = Stroke::new(1.5);
+        for (handle, at) in gesture::handles(&selection, camera, radius) {
+            match handle {
+                Handle::Resize { .. } => {
+                    let half = gesture::HANDLE_SIZE / 2.0 - 0.75;
+                    let square = RoundedRect::from_rect(
+                        Rect::from_center_size(at, (2.0 * half, 2.0 * half)),
+                        2.0,
+                    );
+                    scene.fill(&square, knob);
+                    scene.stroke_with(&square, &line, color);
+                }
+                Handle::Rotate | Handle::Radius => {
+                    let size = if handle == Handle::Rotate {
+                        gesture::ROTATE_SIZE
+                    } else {
+                        gesture::RADIUS_SIZE
+                    };
+                    let circle = Circle::new(at, size / 2.0 - 0.75);
+                    scene.fill(&circle, knob);
+                    scene.stroke_with(&circle, &line, color);
+                }
+            }
+        }
+        // The size, under the box while resizing.
+        if matches!(self.gesture, Some(Gesture::Resize { .. })) {
+            let size = selection.size;
+            let label = format!("{} × {}", size.width.round(), size.height.round());
+            let style = TextStyle::new(11.0)
+                .weight(600.0)
+                .color(theme().color(Token::OnAccent));
+            let block = TextBlock::new(fonts, &label, &style, None);
+            let text = block.size();
+            let screen = camera * selection.world;
+            let corners = [
+                Point::ZERO,
+                Point::new(size.width, 0.0),
+                Point::new(0.0, size.height),
+                Point::new(size.width, size.height),
+            ]
+            .map(|corner| screen * corner);
+            let bottom = corners
+                .iter()
+                .map(|corner| corner.y)
+                .fold(f64::MIN, f64::max);
+            let left = corners
+                .iter()
+                .map(|corner| corner.x)
+                .fold(f64::MAX, f64::min);
+            let right = corners
+                .iter()
+                .map(|corner| corner.x)
+                .fold(f64::MIN, f64::max);
+            let pill = Rect::from_center_size(
+                Point::new((left + right) / 2.0, bottom + 20.0),
+                (text.width + 14.0, 20.0),
+            );
+            scene.fill(
+                &RoundedRect::from_rect(pill, 5.0),
+                theme().color(Token::Accent),
+            );
+            block.paint(
+                scene,
+                Point::new(pill.x0 + 7.0, pill.center().y - text.height / 2.0),
+                true,
+            );
         }
     }
 
@@ -496,6 +874,14 @@ impl BoardCanvas {
             } => {
                 cx.request_focus();
                 cx.capture_pointer();
+                if *clicks == 1
+                    && let Some((handle, selection)) = self.handle_at(*position)
+                {
+                    let pointer = self.to_document(cx.bounds(), *position);
+                    self.press_handle(handle, selection, pointer, modifiers.shift);
+                    cx.request_paint();
+                    return true;
+                }
                 let hit = self.hit_at(*position);
                 let mut selection = self.selection.get_untracked();
                 match hit {
@@ -511,7 +897,7 @@ impl BoardCanvas {
                         self.entered = Some(node);
                         let inner = self.hit_at(*position).unwrap_or(node);
                         self.select(&[inner]);
-                        self.press = Some(Press::Node);
+                        self.press = Some(Press::Node { at: *position });
                     }
                     Some(node) => {
                         if modifiers.shift {
@@ -526,7 +912,7 @@ impl BoardCanvas {
                         } else if !selection.contains(&node) {
                             self.selection.set(vec![node]);
                         }
-                        self.press = Some(Press::Node);
+                        self.press = Some(Press::Node { at: *position });
                     }
                     None => {
                         // Empty board: out of an entered group, and a marquee.
@@ -545,6 +931,31 @@ impl BoardCanvas {
                 true
             }
             Input::PointerMoved(position) => {
+                let pointer = self.to_document(cx.bounds(), *position);
+                if let Some(gesture) = &mut self.gesture {
+                    match gesture {
+                        Gesture::Move { pointer: at, .. }
+                        | Gesture::Resize { pointer: at, .. }
+                        | Gesture::Rotate { pointer: at, .. }
+                        | Gesture::Radius { pointer: at, .. } => *at = pointer,
+                    }
+                    cx.request_paint();
+                    return true;
+                }
+                if let Some(Press::Node { at }) = self.press
+                    && (*position - at).hypot() >= DRAG_THRESHOLD
+                    && !self.starts().is_empty()
+                {
+                    let from = self.to_document(cx.bounds(), at);
+                    self.press = None;
+                    self.hovered = None;
+                    self.begin_gesture(Gesture::Move {
+                        applied: from,
+                        pointer,
+                    });
+                    cx.request_paint();
+                    return true;
+                }
                 if let Some(Press::Marquee {
                     start, additive, ..
                 }) = self.press
@@ -571,6 +982,7 @@ impl BoardCanvas {
                 ..
             } => {
                 cx.release_pointer();
+                self.end_gesture();
                 if let Some(Press::Marquee {
                     start,
                     current,
@@ -626,6 +1038,20 @@ impl BoardCanvas {
                 }
                 cx.request_paint();
                 had
+            }
+            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown
+                if !self.selection.with_untracked(Vec::is_empty) =>
+            {
+                let step = if modifiers.shift { 10.0 } else { 1.0 };
+                let (dx, dy) = match key {
+                    Key::ArrowLeft => (-step, 0.0),
+                    Key::ArrowRight => (step, 0.0),
+                    Key::ArrowUp => (0.0, -step),
+                    _ => (0.0, step),
+                };
+                let _ = commands::execute(self, "board.move", &move_args(dx, dy));
+                cx.request_paint();
+                true
             }
             Key::Tab if !modifiers.command() => {
                 let order = self.tab_order();
@@ -785,7 +1211,9 @@ impl Widget for BoardCanvas {
     }
 
     fn capture_lost(&mut self, cx: &mut Cx<'_>) {
-        if self.press.take().is_some() {
+        let gesture = self.gesture.is_some();
+        self.end_gesture();
+        if self.press.take().is_some() || gesture {
             cx.request_paint();
         }
     }
