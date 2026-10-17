@@ -39,6 +39,9 @@ mod shapes;
 pub mod style;
 
 pub use background::{BACKGROUND, Background};
+
+/// The board's settings, for the app to register.
+pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] = &[&BACKGROUND];
 pub use board::{BoardCanvas, BoardStatus, MAX_ZOOM, MIN_ZOOM, Preset, Tool};
 pub use copy::{NodeCopy, ParagraphCopy, RunCopy};
 pub use items::{BoardColors, node_look};

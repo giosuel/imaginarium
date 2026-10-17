@@ -116,6 +116,10 @@ pub const MAX_ZOOM: f64 = 8.0;
 /// The board's dots, every this many points at 100 %.
 const DOT_PITCH: f64 = 24.0;
 
+/// What the background's cached path was built for: the bounds, the first
+/// dot, the step, the pattern and the scale factor (its bits).
+type BackgroundKey = (Rect, Point, f64, Background, u64);
+
 /// A frame's name sits this far above it, in logical pixels.
 const NAME_GAP: f64 = 8.0;
 
@@ -205,10 +209,7 @@ pub struct BoardCanvas {
     bounds: Rect,
     /// The dots of the last frame: one path, and the view it was built for
     /// (the box, the first dot, the spacing).
-    dots: Option<(
-        (Rect, Point, f64, Background),
-        imaginarium_render::kurbo::BezPath,
-    )>,
+    dots: Option<(BackgroundKey, imaginarium_render::kurbo::BezPath)>,
     /// The pattern behind the shapes.
     background: Background,
 }
@@ -1671,25 +1672,31 @@ impl BoardCanvas {
         );
         // One path of every dot (or line), built again only when the view
         // moves.
-        let key = (bounds, first, step, background);
+        // The scale snaps lines to device pixels: a window moved to another
+        // monitor builds them again.
+        let scale = imaginarium_ui::scale_factor();
+        let key = (bounds, first, step, background, scale.to_bits());
         if self.dots.as_ref().is_none_or(|(built, _)| *built != key) {
             let mut path = imaginarium_render::kurbo::BezPath::new();
             if background == Background::Grid {
-                // Lines 1 px wide, as rectangles on whole pixels.
+                // Lines one device pixel wide (a whole number of them on a
+                // fractional scale), as rectangles on device pixels.
+                let snap = |at: f64| (at * scale).round() / scale;
+                let width = scale.round().max(1.0) / scale;
                 let mut x = first.x;
                 while x < bounds.x1 {
-                    let left = x.round() - 0.5;
+                    let left = snap(x);
                     path.extend(imaginarium_render::kurbo::Shape::path_elements(
-                        &Rect::new(left, bounds.y0, left + 1.0, bounds.y1),
+                        &Rect::new(left, bounds.y0, left + width, bounds.y1),
                         0.1,
                     ));
                     x += step;
                 }
                 let mut y = first.y;
                 while y < bounds.y1 {
-                    let top = y.round() - 0.5;
+                    let top = snap(y);
                     path.extend(imaginarium_render::kurbo::Shape::path_elements(
-                        &Rect::new(bounds.x0, top, bounds.x1, top + 1.0),
+                        &Rect::new(bounds.x0, top, bounds.x1, top + width),
                         0.1,
                     ));
                     y += step;

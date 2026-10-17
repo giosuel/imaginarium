@@ -437,3 +437,58 @@ fn a_frames_opacity_fades_it() {
     let pixel = pixmap.data()[40 * 200 + 50];
     assert!((i32::from(pixel.a) - 128).abs() <= 1, "{pixel:?}");
 }
+
+/// An empty board, drawn on the CPU: its background alone.
+fn render_background(background: crate::Background) -> Pixmap {
+    let mut board = BoardCanvas::new(Document::new(DocumentKind::Board).unwrap());
+    board.set_background(background);
+    let mut fonts = Fonts::bundled_only();
+    let (width, height) = (96u16, 96u16);
+    let mut scene = Scene::new();
+    let bounds = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+    board.paint_into(&mut fonts, &mut scene, bounds, Instant::now());
+    let background = theme().color(imaginarium_ui::Token::BoardBg);
+    CpuRenderer::new(CpuMode::Deterministic).render(&scene, width, height, background)
+}
+
+#[test]
+fn grid_lines_are_one_device_pixel_and_plain_draws_nothing() {
+    let pixmap = render_background(crate::Background::Grid);
+    let width = usize::from(pixmap.width());
+    // The background is the most common pixel (a corner may be on a line).
+    let mut counts: std::collections::HashMap<[u8; 4], usize> = std::collections::HashMap::new();
+    for pixel in pixmap.data() {
+        *counts
+            .entry([pixel.r, pixel.g, pixel.b, pixel.a])
+            .or_default() += 1;
+    }
+    let back = counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(pixel, _)| pixel)
+        .unwrap();
+    let height = usize::from(pixmap.height());
+    let lit = |x: usize| -> Vec<bool> {
+        (0..height)
+            .map(|y| {
+                let pixel = pixmap.data()[y * width + x];
+                [pixel.r, pixel.g, pixel.b, pixel.a] != back
+            })
+            .collect()
+    };
+    // Down a column between the vertical lines (the one with the fewest
+    // lit pixels): every horizontal line is one pixel tall.
+    let column = (0..width)
+        .map(lit)
+        .min_by_key(|column| column.iter().filter(|on| **on).count())
+        .unwrap();
+    let lines = column.iter().filter(|line| **line).count();
+    assert!(lines >= 3, "{column:?}");
+    assert!(
+        column.windows(2).all(|pair| !(pair[0] && pair[1])),
+        "a line two pixels tall: {column:?}"
+    );
+    let plain = render_background(crate::Background::Plain);
+    let first = plain.data()[0];
+    assert!(plain.data().iter().all(|pixel| *pixel == first));
+}
