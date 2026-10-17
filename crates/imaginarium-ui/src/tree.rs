@@ -2256,6 +2256,19 @@ impl Ui {
         self.hit_top(point)
     }
 
+    /// Every widget a screen reader calls `label`, in the tree's order
+    /// (laid out and shown), to tell apart controls that share a name.
+    pub fn find_all_by_label(&mut self, fonts: &mut Fonts, label: &str) -> Vec<WidgetId> {
+        let mut tree = crate::access::AccessTree::default();
+        self.access(fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label))
+            .filter_map(|(node, _)| self.widget_of_access_node(*node))
+            .filter(|id| self.node(*id).is_some())
+            .collect()
+    }
+
     /// The widget a screen reader knows as `label`: the first in the tree
     /// whose own node has that name. For scripted runs and tests of whole
     /// windows, which find controls the way people with a screen reader

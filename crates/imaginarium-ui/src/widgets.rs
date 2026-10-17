@@ -1054,7 +1054,7 @@ impl Widget for ButtonBox {
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         let mut node = Node::new(self.role);
         let selected = self.selected.as_ref().is_some_and(|selected| selected());
-        if self.role == Role::RadioButton {
+        if matches!(self.role, Role::RadioButton | Role::MenuItemRadio) {
             // A radio button says whether it is the one chosen.
             node.set_toggled(if selected {
                 accesskit::Toggled::True
@@ -2005,6 +2005,8 @@ pub struct TextInput {
     on_blur: Option<TextCallback>,
     /// Esc moved the focus away: not a commit.
     escaped: bool,
+    /// The text when the focus came, which Esc puts back (with `on_blur`).
+    focus_text: Option<String>,
     /// Keys the field leaves to its ancestors (a list's ↑/↓, Escape).
     passes: Vec<Key>,
     /// Drawn without its box and focus line (the palette's field).
@@ -2060,6 +2062,7 @@ impl TextInput {
             on_submit: Box::new(|_| {}),
             on_blur: None,
             escaped: false,
+            focus_text: None,
             passes: Vec::new(),
             bare: false,
             colors,
@@ -2080,8 +2083,9 @@ impl TextInput {
     }
 
     /// Called with the text when the focus leaves the field (a click
-    /// elsewhere, Tab), as Enter does: the field's value is kept. Not
-    /// after Esc, which leaves without keeping it.
+    /// elsewhere, Tab), as Enter does: the field's value is kept. Esc
+    /// leaves without keeping it: the text goes back to what it was when
+    /// the field got the focus.
     pub fn on_blur(mut self, action: impl FnMut(&str) + 'static) -> Self {
         self.on_blur = Some(Box::new(action));
         self
@@ -2180,6 +2184,14 @@ impl Widget for TextInput {
                     ..
                 }
             );
+            if self.escaped
+                && self.on_blur.is_some()
+                && let Some(text) = self.focus_text.take()
+                && text != self.field.text()
+            {
+                self.field.editor().set_text(cx.fonts(), &text);
+                (self.on_change)(&text);
+            }
             cx.resign_focus();
         }
         if response.repaint || response.changed {
@@ -2195,6 +2207,7 @@ impl Widget for TextInput {
     fn focus_changed(&mut self, cx: &mut Cx<'_>, focused: bool) {
         if focused {
             self.escaped = false;
+            self.focus_text = Some(self.field.text());
             self.field.focus();
         } else {
             self.field.blur(cx.fonts());
