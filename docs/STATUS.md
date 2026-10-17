@@ -11,8 +11,9 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.6 part 2, crash recovery** (below). M3.6 part 1,
-  saving every change into a board's file, is done (2026-10-17). M3.5 is
+- **Next step:** **M3.6 part 3, the open and save dialogs** (below).
+  M3.6 part 2, crash recovery for untitled boards, is done (2026-10-17);
+  part 1, saving every change into a board's file, too. M3.5 is
   done (2026-10-17), in four stacked parts, each reviewed
   by a fresh agent: the settings file
   (https://github.com/giosuel/imaginarium/pull/61), the Settings window
@@ -1130,8 +1131,10 @@ What M3 builds on:
   - [x] **part 1, saving** (2026-10-17, `shell.md` §3.1 "As built"):
     every change of a board opened from a file goes into the file on a
     saving thread, with the pill's states; read-only for newer files;
-  - part 2, crash recovery for boards without a file, and the start
-    window's recovery notice;
+  - [x] **part 2, crash recovery** (2026-10-17, `shell.md` §3.1 "As
+    built"): untitled boards kept in the recovery folder from their
+    first change, deleted when they close; the start window's notice
+    offers the ones a crashed app left;
   - part 3, the open and save dialogs: Open…, Save…, Save a copy, rename
     and move;
   - part 4, closing a board with unsaved changes (the SaveClose mockup);

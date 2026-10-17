@@ -129,6 +129,27 @@ saves every change into that file on its own:
 - Encrypted and Hub files can't be saved into yet (their keys aren't
   kept).
 
+**As built (M3.6 part 2, crash recovery).** An untitled board is kept in a
+file of its own in the app's recovery folder
+(`$XDG_DATA_HOME/imaginarium/recovery`, `~/Library/Application
+Support/Imaginarium/Recovery`, `%LOCALAPPDATA%\Imaginarium\Recovery`),
+saved exactly as a board with a file (the same debounce, saving thread
+and lock), and the pill still says **Not saved · Save…**: the file isn't
+the board's place.
+- The saving thread makes the file, and its folder, with the **first
+  change** (`Autosave::create`), so an empty board leaves nothing.
+- **Closing** the board deletes the file (`Autosave::discard_in_background`;
+  the close dialog that asks first comes with part 4).
+- **At startup** a thread looks for files there that no running app holds
+  (`imaginarium_io_native::kept_boards`): their lock is free, so the app
+  that wrote them is gone. It keeps them open (and locked), so a second
+  app doesn't offer them too. The start window then shows the mockup's
+  notice above Recent, **"Imaginarium closed unexpectedly. *Untitled
+  board* was kept, with every change."** with **Open it** (or "*2
+  boards* were kept…", **Open them**). They open still untitled, kept in
+  the same files; the notice goes. When the start window is off, it
+  shows when the last board closes.
+
 ### 3.2 Top right
 
 Search (opens the palette, `Ctrl+K`), AI (the assistant, a placeholder
@@ -379,8 +400,8 @@ when the last board closes.
   until files come (M3.6). The links to Settings, Shortcuts and What's new
   come with the windows they open; the templates with M4.
 - **Right:** **Recent** with an empty tile saying boards will show there.
-  The recovery notice, the filter, the thumbnails and dropping files come
-  with files (M3.6).
+  The filter, the thumbnails and dropping files come with files (M3.6
+  part 5); the recovery notice is built (§3.1, part 2).
 - **Fixed size** (960 × 600, `WindowOptions::resizable = false`), so
   Hyprland and Sway float it like a dialog. Nothing has the keys at
   first (no focus ring, as in the mockup); `Ctrl+N` works anywhere in it

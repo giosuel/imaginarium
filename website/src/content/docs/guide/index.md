@@ -40,6 +40,11 @@ button for a board that has a file, and the top left says **Saved**. If
 the file can't be written (it is open in another window, or comes from a
 newer version), the board opens read-only and says why.
 
+A **new board** says **Not saved** until it has a place of its own, but it
+is kept anyway: if Imaginarium closes unexpectedly, the start window
+offers it the next time, with every change. Closing it yourself lets it
+go.
+
 Every board has a **window of its own**. `Ctrl+N` in a board opens
 another one, and `Ctrl+W` / `⌘W` closes it; when the last board closes,
 the start window comes back.
