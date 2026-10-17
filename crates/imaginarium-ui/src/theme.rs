@@ -136,22 +136,24 @@ pub struct Theme {
     pub panel_radius: f64,
     /// Corner radius of buttons and inputs.
     pub control_radius: f64,
-    /// The panels' shadow, drawn as layers of black from the widest to the
-    /// tightest: how far each spreads past the panel, and its alpha.
-    pub shadow: [ShadowLayer; 3],
+    /// The panels' shadow: soft layers under them, as the mockups' CSS
+    /// `box-shadow` (a tight one, then a wide one).
+    pub shadow: [ShadowLayer; 2],
 }
 
-/// One layer of a panel's shadow.
+/// One layer of a panel's shadow, as a CSS `box-shadow` without spread.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowLayer {
-    /// How far it spreads past the panel's edge, in logical pixels.
-    pub spread: f64,
-    /// Black at this alpha.
-    pub alpha: f32,
+    /// How far it falls below the panel, in logical pixels.
+    pub y: f64,
+    /// Its CSS blur radius (twice the Gaussian's standard deviation).
+    pub blur: f64,
+    /// Its color.
+    pub color: Color,
 }
 
-const fn layer(spread: f64, alpha: f32) -> ShadowLayer {
-    ShadowLayer { spread, alpha }
+fn layer(y: f64, blur: f64, color: Color) -> ShadowLayer {
+    ShadowLayer { y, blur, color }
 }
 
 impl Theme {
@@ -204,7 +206,11 @@ impl Theme {
                 (Token::Scrim, Color::BLACK.with_alpha(0.5)),
             ],
             // Black on black needs more weight than the light theme's.
-            [layer(14.0, 0.10), layer(6.0, 0.14), layer(2.0, 0.24)],
+            // The dark mockups' panels.
+            [
+                layer(1.0, 2.0, Color::BLACK.with_alpha(0.4)),
+                layer(8.0, 28.0, Color::BLACK.with_alpha(0.45)),
+            ],
         )
     }
 
@@ -248,14 +254,18 @@ impl Theme {
                 (Token::TooltipBg, rgb(0x18181b)),
                 (Token::Scrim, rgb(0x18181b).with_alpha(0.22)),
             ],
-            [layer(12.0, 0.03), layer(6.0, 0.05), layer(2.0, 0.08)],
+            // The light mockups' panels.
+            [
+                layer(1.0, 2.0, rgb(0x101828).with_alpha(0.06)),
+                layer(8.0, 24.0, rgb(0x101828).with_alpha(0.08)),
+            ],
         )
     }
 
     fn build(
         kind: ThemeKind,
         colors: [(Token, Color); Token::ALL.len()],
-        shadow: [ShadowLayer; 3],
+        shadow: [ShadowLayer; 2],
     ) -> Self {
         let mut table = [Color::TRANSPARENT; Token::ALL.len()];
         for (token, color) in colors {

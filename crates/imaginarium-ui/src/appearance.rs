@@ -247,9 +247,9 @@ mod portal {
             return Some(value);
         }
         let wrapped: OwnedValue = proxy.call("Read", &(namespace, key)).ok()?;
-        match OwnedValue::try_from(wrapped.clone()) {
-            Ok(inner) => Some(inner),
-            Err(_) => Some(wrapped),
+        match &*wrapped {
+            zbus::zvariant::Value::Value(inner) => inner.try_to_owned().ok(),
+            _ => Some(wrapped),
         }
     }
 

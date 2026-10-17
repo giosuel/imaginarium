@@ -183,12 +183,12 @@ impl Flex {
 /// black from the widest to the tightest.
 fn paint_shadow(scene: &mut Scene, bounds: Rect, radius: f64, theme: &crate::theme::Theme) {
     for layer in theme.shadow {
-        let spread = layer.spread;
-        let shadow = RoundedRect::from_rect(
-            bounds.inflate(spread, spread) + Vec2::new(0.0, spread / 2.0),
-            radius + spread,
+        scene.shadow(
+            bounds + Vec2::new(0.0, layer.y),
+            radius,
+            layer.blur / 2.0,
+            layer.color,
         );
-        scene.fill(&shadow, Color::BLACK.with_alpha(layer.alpha));
     }
 }
 
@@ -1644,9 +1644,22 @@ impl Swatch {
         }
     }
 
-    /// Ringed in the accent: the color the selection has now.
+    /// Ringed in the accent: the color the selection has now. A dot is
+    /// ringed in its own color instead, a little apart (Settings' accent).
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Drawn as `shape` (a square by default).
+    pub fn shape(mut self, shape: SwatchShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// `size` px across (28 by default).
+    pub fn size(mut self, size: f64) -> Self {
+        self.size = size;
         self
     }
 
@@ -1703,6 +1716,13 @@ impl Widget for Swatch {
                     1.0,
                     edge,
                 );
+                if self.selected {
+                    scene.stroke(
+                        &imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 + 3.0),
+                        2.0,
+                        self.color.unwrap_or(theme.color(Token::AccentInk)),
+                    );
+                }
             }
             SwatchShape::Ring => {
                 let ring = imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 - 1.5);
