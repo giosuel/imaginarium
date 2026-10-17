@@ -49,6 +49,10 @@ pub struct WindowOptions {
     pub background: Color,
     /// Fill the screen (borderless) instead of opening at `size`.
     pub fullscreen: bool,
+    /// The app ID on Wayland and the window class on X11
+    /// (`ch.giosuel.Imaginarium`), which window rules match. Ignored on
+    /// Windows and macOS.
+    pub app_id: Option<String>,
 }
 
 impl Default for WindowOptions {
@@ -59,6 +63,7 @@ impl Default for WindowOptions {
             gpu: GpuOptions::default(),
             background: Color::WHITE,
             fullscreen: false,
+            app_id: None,
         }
     }
 }
@@ -736,6 +741,16 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                     .fullscreen
                     .then_some(winit::window::Fullscreen::Borderless(None)),
             );
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+        let attributes = match &self.options.app_id {
+            Some(app_id) => {
+                use winit::platform::{wayland, x11};
+                let attributes =
+                    wayland::WindowAttributesExtWayland::with_name(attributes, app_id, app_id);
+                x11::WindowAttributesExtX11::with_name(attributes, app_id, app_id)
+            }
+            None => attributes,
+        };
         let creating = Instant::now();
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),

@@ -1,0 +1,121 @@
+# The Lucide icons the app uses, by Lucide's name (https://lucide.dev).
+# Add a name here, then run `cargo xtask icons` to regenerate lucide.rs.
+
+# Tools
+mouse-pointer-2
+hand
+grip-vertical
+rectangle-horizontal
+circle
+diamond
+triangle
+slash
+brush
+type
+frame
+file-text
+sheet
+square-plus
+
+# The contextual toolbar and the context menu
+palette
+layers
+copy
+copy-plus
+trash
+sparkles
+ellipsis
+scissors
+clipboard
+arrow-up-to-line
+arrow-down-to-line
+group
+spline
+paintbrush
+paint-bucket
+
+# The pill, top right, zoom and help
+menu
+chevron-down
+chevron-up
+chevron-left
+chevron-right
+check
+loader-circle
+triangle-alert
+lock
+search
+share-2
+users
+minus
+plus
+undo-2
+redo-2
+circle-question-mark
+x
+
+# The inspector
+eye
+eye-off
+link
+rotate-cw
+scan
+
+# Start window and files
+folder-open
+file-plus
+rotate-ccw
+
+# Settings
+settings
+sun
+moon
+monitor
+contrast
+keyboard
+hard-drive
+sliders-horizontal
+
+# Presentations
+play
+pause
+presentation
+zoom-in
+timer
+
+# Drawing
+eraser
+pipette
+lasso
+pen-tool
+highlighter
+pencil
+
+# Documents
+bold
+italic
+underline
+strikethrough
+list
+list-ordered
+list-checks
+text-align-start
+text-align-center
+text-align-end
+message-circle
+image
+table
+heading-1
+calendar
+at-sign
+user
+
+# Sheets
+dollar-sign
+percent
+chart-column
+funnel
+sigma
+text-wrap
+table-cells-merge
+grid-3x3
