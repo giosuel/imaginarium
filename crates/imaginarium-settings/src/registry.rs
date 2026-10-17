@@ -57,6 +57,10 @@ pub struct Registry {
     observers: Vec<(SubscriptionId, Observer)>,
     next_subscription: u64,
     persist: Vec<(Scope, PersistHook)>,
+    /// Loading a file: scopes changed meanwhile are saved once at the end,
+    /// not in every half-loaded state.
+    pub(crate) persist_paused: bool,
+    pub(crate) persist_pending: Vec<Scope>,
     /// Entries from settings files that no registered setting claims, per
     /// scope. They are written back unchanged (forward compatibility).
     pub(crate) unknown: BTreeMap<Scope, BTreeMap<String, toml::Value>>,
@@ -152,13 +156,16 @@ impl Registry {
         let value = declaration.normalize(value);
         let key = declaration.key();
         let old = self.effective(declaration);
-        self.forget_preserved(declaration);
+        let forgot = self.forget_preserved(declaration);
         if value == declaration.default_dyn() {
             self.values.remove(key);
         } else {
             self.values.insert(key, value);
         }
-        self.notify_if_changed(declaration, old);
+        if !self.notify_if_changed(declaration, old) && forgot {
+            // The file still holds the entry this version couldn't read.
+            self.persist(declaration.meta().scope);
+        }
         Ok(())
     }
 
@@ -167,18 +174,20 @@ impl Registry {
         let declaration = self.declaration(key)?;
         let old = self.effective(declaration);
         self.values.remove(declaration.key());
-        self.forget_preserved(declaration);
-        self.notify_if_changed(declaration, old);
+        let forgot = self.forget_preserved(declaration);
+        if !self.notify_if_changed(declaration, old) && forgot {
+            self.persist(declaration.meta().scope);
+        }
         Ok(())
     }
 
     /// Drops a file value preserved for this key because this version
     /// couldn't read it. Called when the user sets or resets the setting, so
     /// their choice wins on the next save.
-    fn forget_preserved(&mut self, declaration: &dyn AnySetting) {
-        if let Some(unknown) = self.unknown.get_mut(&declaration.meta().scope) {
-            unknown.remove(declaration.key());
-        }
+    fn forget_preserved(&mut self, declaration: &dyn AnySetting) -> bool {
+        self.unknown
+            .get_mut(&declaration.meta().scope)
+            .is_some_and(|unknown| unknown.remove(declaration.key()).is_some())
     }
 
     /// The effective dynamic value of a registered key.
@@ -264,10 +273,12 @@ impl Registry {
             .unwrap_or_else(|| declaration.default_dyn())
     }
 
-    fn notify_if_changed(&mut self, declaration: &'static dyn AnySetting, old: Value) {
+    /// Notifies observers and saves, if the effective value changed;
+    /// returns whether it did.
+    fn notify_if_changed(&mut self, declaration: &'static dyn AnySetting, old: Value) -> bool {
         let new = self.effective(declaration);
         if new == old {
-            return;
+            return false;
         }
         let change = Change {
             key: declaration.key(),
@@ -278,7 +289,18 @@ impl Registry {
         for (_, observer) in &mut self.observers {
             observer(&change);
         }
-        let scope = change.scope;
+        self.persist(change.scope);
+        true
+    }
+
+    /// Hands `scope`'s TOML to its hooks (after loading, if it is loading).
+    pub(crate) fn persist(&mut self, scope: Scope) {
+        if self.persist_paused {
+            if !self.persist_pending.contains(&scope) {
+                self.persist_pending.push(scope);
+            }
+            return;
+        }
         if self.persist.iter().any(|(of, _)| *of == scope) {
             let toml = self.to_toml(scope);
             for (_, hook) in self.persist.iter_mut().filter(|(of, _)| *of == scope) {
