@@ -152,6 +152,7 @@ impl<T> Setting<T> {
     }
 
     /// Lets a document have its own value ([`SettingMeta::per_document`]).
+    /// Not for lists or secrets: registering one is an error.
     pub const fn per_document(mut self) -> Self {
         self.meta.per_document = true;
         self

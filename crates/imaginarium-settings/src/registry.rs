@@ -102,6 +102,16 @@ impl Registry {
                     .to_owned(),
             });
         }
+        // A document stores plain values (schema-v1.md §4), and never a
+        // secret.
+        if setting.meta().per_document
+            && matches!(setting.kind(), ValueKind::List(_) | ValueKind::SecretRef)
+        {
+            return Err(SettingsError::InvalidKey {
+                key,
+                reason: "a list or a secret can't have a document's own value".to_owned(),
+            });
+        }
         setting
             .validate(&setting.default_dyn())
             .map_err(|err| SettingsError::Invalid {
@@ -559,5 +569,16 @@ mod tests {
         static GROUPED: Setting<bool> =
             Setting::new("canvas.grid", || true, Scope::App, "Grid", "Show grid.").group("view");
         assert_eq!(GROUPED.meta().group, "view");
+    }
+
+    #[test]
+    fn a_list_cant_have_a_documents_own_value() {
+        static TAGS: Setting<Vec<String>> =
+            Setting::new("board.tags", Vec::new, Scope::App, "Tags", "Tags.").per_document();
+        static SNAP: Setting<bool> =
+            Setting::new("board.snap", || true, Scope::App, "Snap", "Snap.").per_document();
+        let mut registry = Registry::new();
+        assert!(registry.register(&TAGS).is_err());
+        assert!(registry.register(&SNAP).is_ok());
     }
 }
