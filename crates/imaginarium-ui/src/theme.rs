@@ -11,8 +11,6 @@ use std::rc::Rc;
 use imaginarium_reactive::Signal;
 use imaginarium_render::peniko::Color;
 
-use crate::window::request_frame;
-
 /// A named color of the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Token {
@@ -32,12 +30,21 @@ pub enum Token {
     ControlHover,
     /// The active tool or chosen option (a tint of the accent).
     ControlActive,
+    /// The selected tool in the tool bar: a stronger tint than
+    /// [`Token::ControlActive`], as the tool bar mockup draws it. Only
+    /// [`Token::AccentInk`] icons go on it.
+    AccentSoft,
     /// Body text and icons.
     Text,
+    /// Body text that steps back a little: a dialog's explanation.
+    TextSecondary,
     /// Secondary text: labels, hints.
     TextMuted,
     /// The quietest text: shortcuts, placeholders.
     TextSubtle,
+    /// Icons and text of a control that can't be used now (redo with
+    /// nothing to redo). Exempt from the contrast rule, as WCAG allows.
+    Disabled,
     /// Accent fills: primary buttons, the selection, toggles.
     Accent,
     /// An accent fill under the pointer.
@@ -46,19 +53,27 @@ pub enum Token {
     AccentPressed,
     /// Accent text and icons on panels (the active tool, links).
     AccentInk,
+    /// An accent outline on a panel (the pill's Save… button).
+    AccentLine,
     /// Text and icons on an [`Token::Accent`] fill.
     OnAccent,
     /// Destructive actions and errors.
     Danger,
     /// Warnings ("Can't save").
     Warning,
+    /// A warning's soft tile (the unsaved-changes dialog's icon).
+    WarningSoft,
+    /// Icons and text on [`Token::WarningSoft`].
+    OnWarningSoft,
     /// Tooltips' background (their text is [`Token::OnAccent`]).
     TooltipBg,
+    /// Dims the window behind a dialog.
+    Scrim,
 }
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 19] = [
+    pub const ALL: [Token; 26] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -67,17 +82,24 @@ impl Token {
         Token::Divider,
         Token::ControlHover,
         Token::ControlActive,
+        Token::AccentSoft,
         Token::Text,
+        Token::TextSecondary,
         Token::TextMuted,
         Token::TextSubtle,
+        Token::Disabled,
         Token::Accent,
         Token::AccentHover,
         Token::AccentPressed,
         Token::AccentInk,
+        Token::AccentLine,
         Token::OnAccent,
         Token::Danger,
         Token::Warning,
+        Token::WarningSoft,
+        Token::OnWarningSoft,
         Token::TooltipBg,
+        Token::Scrim,
     ];
 }
 
@@ -142,21 +164,28 @@ impl Theme {
                 (Token::Divider, rgb(0x28282e)),
                 (Token::ControlHover, rgb(0x2a2a30)),
                 (Token::ControlActive, mix(accent, panel, 0.72)),
+                (Token::AccentSoft, mix(accent, panel, 0.62)),
                 (Token::Text, rgb(0xededf0)),
+                (Token::TextSecondary, rgb(0xd4d4d8)),
                 (Token::TextMuted, rgb(0xa1a1aa)),
                 // Light enough for 4.5:1 on a hovered row too.
                 (Token::TextSubtle, rgb(0x9494a0)),
+                (Token::Disabled, rgb(0x5b5b66)),
                 // Fills keep the accent itself (white text on it passes for
                 // every offered accent); text and icons on dark panels use
                 // a lighter version.
                 (Token::Accent, accent),
-                (Token::AccentHover, mix(accent, Color::BLACK, 0.08)),
-                (Token::AccentPressed, mix(accent, Color::BLACK, 0.16)),
+                (Token::AccentHover, mix(accent, Color::BLACK, 0.14)),
+                (Token::AccentPressed, mix(accent, Color::BLACK, 0.26)),
                 (Token::AccentInk, mix(accent, Color::WHITE, 0.45)),
+                (Token::AccentLine, mix(accent, panel, 0.35)),
                 (Token::OnAccent, Color::WHITE),
                 (Token::Danger, rgb(0xf87171)),
                 (Token::Warning, rgb(0xf5a524)),
+                (Token::WarningSoft, rgb(0x46380f)),
+                (Token::OnWarningSoft, rgb(0xfcd34d)),
                 (Token::TooltipBg, rgb(0x3f3f46)),
+                (Token::Scrim, Color::BLACK.with_alpha(0.5)),
             ],
             // Black on black needs more weight than the light theme's.
             [layer(14.0, 0.10), layer(6.0, 0.14), layer(2.0, 0.24)],
@@ -178,19 +207,26 @@ impl Theme {
                 (Token::Divider, rgb(0xefeff2)),
                 (Token::ControlHover, rgb(0xf1f1f4)),
                 (Token::ControlActive, mix(accent, panel, 0.88)),
+                (Token::AccentSoft, mix(accent, panel, 0.86)),
                 (Token::Text, rgb(0x18181b)),
+                (Token::TextSecondary, rgb(0x3f3f46)),
                 (Token::TextMuted, rgb(0x52525b)),
                 (Token::TextSubtle, rgb(0x6b6b76)),
+                (Token::Disabled, rgb(0xb4b4bc)),
                 (Token::Accent, accent),
-                (Token::AccentHover, mix(accent, Color::BLACK, 0.08)),
-                (Token::AccentPressed, mix(accent, Color::BLACK, 0.16)),
+                (Token::AccentHover, mix(accent, Color::BLACK, 0.14)),
+                (Token::AccentPressed, mix(accent, Color::BLACK, 0.26)),
                 // A little darker, so accent text keeps 4.5:1 on the
                 // active tool's tint too (orange missed it by a hair).
                 (Token::AccentInk, mix(accent, Color::BLACK, 0.15)),
+                (Token::AccentLine, mix(accent, panel, 0.6)),
                 (Token::OnAccent, Color::WHITE),
                 (Token::Danger, rgb(0xb91c1c)),
                 (Token::Warning, rgb(0xb45309)),
+                (Token::WarningSoft, rgb(0xfef3c7)),
+                (Token::OnWarningSoft, rgb(0x92400e)),
                 (Token::TooltipBg, rgb(0x18181b)),
+                (Token::Scrim, rgb(0x18181b).with_alpha(0.22)),
             ],
             [layer(12.0, 0.03), layer(6.0, 0.05), layer(2.0, 0.08)],
         )
@@ -314,7 +350,8 @@ pub fn set_theme(new: Theme) {
     if let Some(signal) = CHANGED.with(|changed| *changed.borrow()) {
         signal.set(generation);
     }
-    request_frame();
+    // Every window shows it, whichever window's setting switched it.
+    crate::window::request_frame_everywhere();
 }
 
 /// How many times the theme changed on this thread.
@@ -361,8 +398,12 @@ mod tests {
     /// Text and the backgrounds it is drawn on, which must reach 4.5:1
     /// (WCAG AA for body text) in every theme and for every accent the
     /// settings offer.
-    const PAIRS: [(Token, Token); 16] = [
+    const PAIRS: [(Token, Token); 21] = [
+        (Token::Danger, Token::ControlHover),
+        (Token::Danger, Token::ControlActive),
         (Token::Text, Token::PanelBg),
+        (Token::TextSecondary, Token::PanelBg),
+        (Token::OnWarningSoft, Token::WarningSoft),
         (Token::Text, Token::BoardBg),
         (Token::Text, Token::ControlHover),
         (Token::Text, Token::ControlActive),
@@ -372,6 +413,7 @@ mod tests {
         (Token::TextSubtle, Token::ControlHover),
         (Token::AccentInk, Token::PanelBg),
         (Token::AccentInk, Token::ControlActive),
+        (Token::AccentInk, Token::AccentSoft),
         (Token::OnAccent, Token::Accent),
         (Token::OnAccent, Token::AccentHover),
         (Token::OnAccent, Token::AccentPressed),
