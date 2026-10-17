@@ -12,10 +12,11 @@
 //! - No feature logic lives here. This crate only *composes* the others, so
 //!   it should stay small and readable.
 //!
-//! Status: M3.4. It opens the start window (or, when the setting
+//! Status: M3.6. It opens the start window (or, when the setting
 //! `startup.show_start_window` is off, a new board), one window per
-//! board. `--demo` opens the mockups' "Launch plan" board instead. Files
-//! come with M3.6.
+//! board, or the board file named on the command line, saving every
+//! change into it. `--demo` opens the mockups' "Launch plan" board
+//! instead.
 //!
 //! ```sh
 //! cargo run -p imaginarium-app                          # the start window
@@ -29,7 +30,8 @@
 //!
 //! Settings are kept in `settings.toml` in the platform's configuration
 //! folder ([`settings_path`]), read at startup and written on a thread of
-//! their own after every change.
+//! their own after every change. Untitled boards are kept for crash
+//! recovery in the platform's data folder ([`recovery_folder`]).
 //!
 //! With `--frames`, the time to the first frame is printed when the
 //! window closes.
@@ -125,6 +127,10 @@ fn main() -> anyhow::Result<()> {
         VERSION,
     );
     app.report_saving(writer.as_ref().map(FileWriter::status), notice);
+    if let Some(folder) = recovery_folder(|name| std::env::var_os(name)) {
+        app.keep_untitled_in(folder);
+        app.look_for_kept_boards();
+    }
     let frames: Option<u64> = value("--frames").and_then(|frames| frames.parse().ok());
     // A file to open: the first argument that isn't an option or an
     // option's value.
@@ -203,6 +209,28 @@ fn settings_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<Pat
     Some(folder.join("settings.toml"))
 }
 
+/// Where untitled boards are kept for crash recovery, from the
+/// environment (`env`): `$XDG_DATA_HOME/imaginarium/recovery` (or
+/// `~/.local/share/imaginarium/recovery`) on Linux,
+/// `~/Library/Application Support/Imaginarium/Recovery` on macOS,
+/// `%LOCALAPPDATA%\Imaginarium\Recovery` on Windows.
+fn recovery_folder(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let var = |name: &str| {
+        env(name)
+            .map(PathBuf::from)
+            .filter(|value| value.is_absolute())
+    };
+    Some(if cfg!(target_os = "windows") {
+        var("LOCALAPPDATA")?.join("Imaginarium").join("Recovery")
+    } else if cfg!(target_os = "macos") {
+        var("HOME")?.join("Library/Application Support/Imaginarium/Recovery")
+    } else {
+        var("XDG_DATA_HOME")
+            .or_else(|| var("HOME").map(|home| home.join(".local/share")))?
+            .join("imaginarium/recovery")
+    })
+}
+
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
@@ -235,6 +263,19 @@ mod tests {
             Some(PathBuf::from("/home/me/.config/imaginarium/settings.toml"))
         );
         assert_eq!(settings_path(env(&[])), None);
+    }
+
+    #[test]
+    fn kept_boards_follow_xdg() {
+        assert_eq!(
+            recovery_folder(env(&[("HOME", "/home/me"), ("XDG_DATA_HOME", "/data")])),
+            Some(PathBuf::from("/data/imaginarium/recovery"))
+        );
+        assert_eq!(
+            recovery_folder(env(&[("HOME", "/home/me"), ("XDG_DATA_HOME", "data")])),
+            Some(PathBuf::from("/home/me/.local/share/imaginarium/recovery"))
+        );
+        assert_eq!(recovery_folder(env(&[])), None);
     }
 }
 
