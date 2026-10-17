@@ -1020,3 +1020,28 @@ fn undo_takes_a_document_setting_back() {
     assert_eq!(a.view().meta().settings().get("board.background"), None);
     assert_consistent(&a);
 }
+
+#[test]
+fn a_document_remembers_its_version_at_open_and_can_be_made_read_only() {
+    let mut a = board();
+    assert_eq!(a.version_at_open(), None, "a new document wasn't opened");
+    let x = shape(&mut a, Parent::Root, 1.0);
+    let mut b = open(&a.export_snapshot().unwrap());
+    assert_eq!(b.version_at_open(), Some(b.version()));
+    shape(&mut b, Parent::Root, 2.0);
+    // What the file doesn't hold yet: everything since it was opened.
+    let since = b
+        .export_updates_since(&b.version_at_open().unwrap())
+        .unwrap();
+    a.apply_remote(&[&since]).unwrap();
+    assert_eq!(a.view(), b.view());
+    assert!(a.view().node(x).is_some());
+    b.set_read_only(ReadOnlyReason::File(
+        "it is open in another window or app".into(),
+    ));
+    assert!(matches!(b.mode(), Mode::ReadOnly(ReadOnlyReason::File(_))));
+    assert!(
+        b.transact(&Actor::User, |t| t.set_title("x")).is_err(),
+        "nothing changes a read-only document"
+    );
+}
