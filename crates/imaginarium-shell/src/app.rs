@@ -49,15 +49,58 @@ pub struct App {
 /// name, its own setting values, and changes to make to them. The board
 /// window keeps it current and does the changes (as commands) at its next
 /// frame.
-#[derive(Default)]
 pub(crate) struct BoardLink {
+    /// Tells boards apart (a closed board's address may be reused).
+    pub(crate) id: u64,
     pub(crate) name: RefCell<String>,
+    /// The board is read-only (a newer file): no This board for it.
+    pub(crate) read_only: Cell<bool>,
+    /// Why the last change Settings asked for failed, for its row.
+    pub(crate) error: RefCell<Option<(&'static str, String)>>,
     /// The board's own values, by setting key.
     pub(crate) own: RefCell<std::collections::BTreeMap<&'static str, imaginarium_settings::Value>>,
     /// Counts changes of `own` and `name`, for Settings to notice.
     pub(crate) generation: Cell<u64>,
     /// Values to set (`None`: follow the user's again), from Settings.
-    pub(crate) asks: RefCell<Vec<(&'static str, Option<imaginarium_settings::Value>)>>,
+    asks: RefCell<Vec<(&'static str, Option<imaginarium_settings::Value>)>>,
+}
+
+impl Default for BoardLink {
+    fn default() -> Self {
+        thread_local! {
+            static NEXT: Cell<u64> = const { Cell::new(0) };
+        }
+        Self {
+            id: NEXT.with(|next| next.replace(next.get() + 1)),
+            name: RefCell::default(),
+            read_only: Cell::new(false),
+            error: RefCell::default(),
+            own: RefCell::default(),
+            generation: Cell::new(0),
+            asks: RefCell::default(),
+        }
+    }
+}
+
+impl BoardLink {
+    /// Asks the board to set `key` (`None`: follow the user's again); its
+    /// window does it at its next frame, which this asks for (an idle
+    /// window draws nothing otherwise).
+    pub(crate) fn ask(&self, key: &'static str, value: Option<imaginarium_settings::Value>) {
+        self.asks.borrow_mut().push((key, value));
+        imaginarium_ui::request_frame_everywhere();
+    }
+
+    /// What Settings asked for since the last frame.
+    pub(crate) fn take_asks(&self) -> Vec<(&'static str, Option<imaginarium_settings::Value>)> {
+        std::mem::take(&mut *self.asks.borrow_mut())
+    }
+
+    /// Something Settings shows changed.
+    pub(crate) fn changed(&self) {
+        self.generation.set(self.generation.get() + 1);
+        imaginarium_ui::request_frame_everywhere();
+    }
 }
 
 /// What the Settings window says about the settings file.
@@ -121,7 +164,11 @@ impl App {
 
     /// `board` is the board window used last.
     pub(crate) fn board_active(&self, board: &Rc<BoardLink>) {
-        *self.active_board.borrow_mut() = Rc::downgrade(board);
+        let was = self.active_board.replace(Rc::downgrade(board));
+        if !was.ptr_eq(&Rc::downgrade(board)) {
+            // Settings' This board names it.
+            imaginarium_ui::request_frame_everywhere();
+        }
     }
 
     /// The board window used last, while it is open.
@@ -804,5 +851,112 @@ mod tests {
         settings_frame(&mut window);
         press(&mut window, "General");
         assert!(!has(&mut window, "This board"));
+    }
+
+    fn board_draw(board: &mut BoardWindow) {
+        let mut scene = Scene::new();
+        board.draw(&mut scene, Size::new(1440.0, 900.0));
+    }
+
+    #[test]
+    fn a_closed_board_never_turns_this_board_into_mine() {
+        use imaginarium_canvas::{BACKGROUND, Background};
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        press(&mut window, "This board");
+        let grid = {
+            let (ui, fonts) = window.ui();
+            ui.find_by_label(fonts, "Grid").unwrap()
+        };
+        // The board closes; a screen reader's click on Grid comes before
+        // Settings draws again.
+        drop(board);
+        window.accessibility_action(&accesskit::ActionRequest {
+            action: accesskit::Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: accesskit::NodeId(grid.access_base()),
+            data: None,
+        });
+        assert_eq!(
+            app.settings().borrow().get(&BACKGROUND).unwrap(),
+            Background::Dots
+        );
+        // Settings shows mine again, without the tabs.
+        settings_frame(&mut window);
+        assert!(!has(&mut window, "This board"));
+    }
+
+    #[test]
+    fn a_read_only_board_has_no_this_board() {
+        let mut newer = Document::new(DocumentKind::Board).unwrap();
+        newer.set_schema_version_for_tests(99).unwrap();
+        let opened = Document::open(&[&newer.export_snapshot().unwrap()]).unwrap();
+        let app = app();
+        let mut board = app.board_window(opened, "From a newer version");
+        board_draw(&mut board);
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        assert!(!has(&mut window, "This board"));
+    }
+
+    #[test]
+    fn this_board_follows_the_board_used_last() {
+        use imaginarium_canvas::BACKGROUND;
+        let app = app();
+        let mut first = app.board_window(Document::new(DocumentKind::Board).unwrap(), "First");
+        let mut second = app.board_window(Document::new(DocumentKind::Board).unwrap(), "Second");
+        board_draw(&mut first);
+        board_draw(&mut second);
+        // A click in the first one makes it the board This board edits.
+        first.input(&Input::PointerButton {
+            primary: true,
+            pressed: true,
+            position: imaginarium_render::kurbo::Point::new(700.0, 450.0),
+            clicks: 1,
+            modifiers: Modifiers::default(),
+        });
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        press(&mut window, "This board");
+        press(&mut window, "Plain");
+        board_draw(&mut first);
+        board_draw(&mut second);
+        assert!(
+            first
+                .board()
+                .unwrap()
+                .own_setting(BACKGROUND.key())
+                .is_some()
+        );
+        assert!(
+            second
+                .board()
+                .unwrap()
+                .own_setting(BACKGROUND.key())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_settings_a_board_takes_are_the_per_document_ones() {
+        let app = app();
+        let declared: Vec<&str> = app
+            .settings()
+            .borrow()
+            .declarations()
+            .filter(|setting| setting.meta().per_document)
+            .map(|setting| setting.key())
+            .collect();
+        let taken: Vec<&str> = imaginarium_canvas::board_settings::BOARD_SETTINGS
+            .iter()
+            .map(|setting| setting.key())
+            .collect();
+        assert_eq!(declared, taken);
     }
 }

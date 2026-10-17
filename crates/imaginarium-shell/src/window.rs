@@ -191,6 +191,8 @@ pub struct BoardWindow {
     app: Option<Rc<App>>,
     /// What Settings sees of this board ("This board").
     link: Rc<crate::app::BoardLink>,
+    /// The board's revision `link` was last brought up to date at.
+    link_seen: Option<u64>,
     /// Windows to open, or this one to close.
     requests: Vec<WindowRequest>,
     /// It asked to close, or was asked to.
@@ -343,6 +345,7 @@ impl BoardWindow {
             frames: 0,
             app: None,
             link: Rc::default(),
+            link_seen: None,
             requests: Vec::new(),
             closed: false,
         };
@@ -450,7 +453,8 @@ impl BoardWindow {
     /// Does what Settings asked of this board, and tells it the board's own
     /// values when they changed.
     fn sync_link(&mut self) {
-        let asks = std::mem::take(&mut *self.link.asks.borrow_mut());
+        let asks = self.link.take_asks();
+        let asked = !asks.is_empty();
         for (key, value) in asks {
             let mut args =
                 Args::new().with("key", imaginarium_commands::ArgValue::String(key.into()));
@@ -460,23 +464,41 @@ impl BoardWindow {
                     imaginarium_commands::ArgValue::String(crate::settings::format_value(value)),
                 );
             }
-            let _ = self.execute("board.set_setting", &args);
+            // Settings checked the value; what can still fail (a
+            // read-only board) shows on its row.
+            let error = self
+                .execute("board.set_setting", &args)
+                .err()
+                .map(|err| (key, err.to_string()));
+            if error.is_some() || self.link.error.borrow().is_some() {
+                *self.link.error.borrow_mut() = error;
+                self.link.changed();
+            }
         }
         let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
             return;
         };
+        // Worked out again only after a document change (or a request).
+        let revision = board.revision();
+        if !asked && self.link_seen == Some(revision) {
+            return;
+        }
+        self.link_seen = Some(revision);
+        let read_only = !matches!(board.document().mode(), imaginarium_model::Mode::Editable);
         let own: std::collections::BTreeMap<&'static str, imaginarium_settings::Value> =
             imaginarium_canvas::board_settings::BOARD_SETTINGS
                 .iter()
                 .filter_map(|setting| Some((setting.key(), board.own_setting(setting.key())?)))
                 .collect();
-        let changed = *self.link.own.borrow() != own || *self.link.name.borrow() != self.name;
+        let changed = *self.link.own.borrow() != own
+            || *self.link.name.borrow() != self.name
+            || self.link.read_only.get() != read_only;
         if changed {
             *self.link.own.borrow_mut() = own;
             *self.link.name.borrow_mut() = self.name.clone();
-            self.link.generation.set(self.link.generation.get() + 1);
+            self.link.read_only.set(read_only);
             // Settings, in its own window, shows them.
-            imaginarium_ui::request_frame_everywhere();
+            self.link.changed();
         }
     }
 
@@ -1558,6 +1580,10 @@ impl Drop for BoardWindow {
         {
             app.board_closed();
         }
+        // Settings may show this board (This board): it notices it's gone.
+        if self.app.is_some() {
+            imaginarium_ui::request_frame_everywhere();
+        }
     }
 }
 
@@ -1601,9 +1627,12 @@ impl View for BoardWindow {
     }
 
     fn input(&mut self, input: &Input) -> bool {
-        // The board Settings' This board edits.
-        if matches!(input, Input::WindowFocus(true))
-            && let Some(app) = &self.app
+        // The board Settings' This board edits: the one with the keys, or
+        // clicked last (without focus following the pointer).
+        if matches!(
+            input,
+            Input::WindowFocus(true) | Input::PointerButton { pressed: true, .. }
+        ) && let Some(app) = &self.app
         {
             app.board_active(&self.link);
         }

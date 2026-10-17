@@ -93,6 +93,14 @@ impl Section {
     }
 }
 
+/// Whose values the window edits.
+enum Target {
+    Mine,
+    Board(Rc<crate::app::BoardLink>),
+    /// This board was shown, but the board is gone (or read-only).
+    Gone,
+}
+
 /// What the window's controls asked for; done after the input, when the
 /// tree can be rebuilt.
 #[derive(Clone, Debug, PartialEq)]
@@ -144,7 +152,7 @@ pub struct SettingsWindow {
     /// This board's values are shown (where a setting can have one).
     board_scope: bool,
     /// The board shown, and its values' generation then.
-    board_seen: Option<(*const crate::app::BoardLink, u64)>,
+    board_seen: Option<(u64, u64)>,
     requests: Vec<WindowRequest>,
     close_after: Option<u64>,
     frames: u64,
@@ -308,7 +316,7 @@ impl SettingsWindow {
         let board = self
             .app
             .active_board()
-            .map(|board| (Rc::as_ptr(&board), board.generation.get()));
+            .map(|board| (board.id, board.generation.get()));
         if board != self.board_seen {
             external = true;
         }
@@ -376,12 +384,13 @@ impl SettingsWindow {
             }
             Ask::Reset(key) => {
                 self.errors.remove(key);
-                match self.board() {
+                match self.target() {
                     // Back to following my setting.
-                    Some(board) => board.asks.borrow_mut().push((key, None)),
-                    None => {
+                    Target::Board(board) => board.ask(key, None),
+                    Target::Mine => {
                         let _ = self.app.settings().borrow_mut().reset(key);
                     }
+                    Target::Gone => self.board_scope = false,
                 }
                 true
             }
@@ -394,10 +403,22 @@ impl SettingsWindow {
 
     /// The board whose values are shown and edited, if This board is.
     fn board(&self) -> Option<Rc<crate::app::BoardLink>> {
-        if !self.board_scope || !self.query.trim().is_empty() {
-            return None;
+        match self.target() {
+            Target::Board(board) => Some(board),
+            Target::Mine | Target::Gone => None,
         }
-        self.app.active_board()
+    }
+
+    /// Whose values the window edits now.
+    fn target(&self) -> Target {
+        if !self.board_scope || !self.query.trim().is_empty() {
+            return Target::Mine;
+        }
+        match self.app.active_board() {
+            Some(board) if !board.read_only.get() => Target::Board(board),
+            // Closed (or read-only) since: never my settings instead.
+            _ => Target::Gone,
+        }
     }
 
     /// The value shown for `declaration`, and whether it is changed (from
@@ -418,7 +439,15 @@ impl SettingsWindow {
     }
 
     fn set(&mut self, key: &'static str, value: Value) {
-        if let Some(board) = self.board() {
+        let board = match self.target() {
+            Target::Board(board) => Some(board),
+            Target::Mine => None,
+            Target::Gone => {
+                self.board_scope = false;
+                return;
+            }
+        };
+        if let Some(board) = board {
             // Checked here, so a refused value says why at once; the board
             // stores it with `board.set_setting`.
             let checked = self
@@ -436,8 +465,7 @@ impl SettingsWindow {
             match checked {
                 Ok(value) => {
                     self.errors.remove(key);
-                    board.asks.borrow_mut().push((key, Some(value)));
-                    imaginarium_ui::request_frame_everywhere();
+                    board.ask(key, Some(value));
                 }
                 Err(err) => {
                     self.errors.insert(key, reason_of(&err));
@@ -538,7 +566,7 @@ impl SettingsWindow {
         self.board_seen = self
             .app
             .active_board()
-            .map(|board| (Rc::as_ptr(&board), board.generation.get()));
+            .map(|board| (board.id, board.generation.get()));
         let searching = !self.query.trim().is_empty();
         let buttons: Vec<WidgetId> = SECTIONS
             .iter()
@@ -645,7 +673,7 @@ impl SettingsWindow {
         // For me and This board, where a setting can have a board's value
         // and a board window was used.
         let board = self.app.active_board();
-        let tabs = board.is_some()
+        let tabs = board.as_ref().is_some_and(|board| !board.read_only.get())
             && all
                 .iter()
                 .any(|declaration| declaration.meta().per_document);
@@ -808,7 +836,16 @@ impl SettingsWindow {
             .ui
             .add(Label::new(meta.description, TextStyle::new(13.0)).color(Token::TextMuted));
         let mut text = vec![title_row, description];
-        if let Some(error) = self.errors.get(key).cloned() {
+        // A change the board itself refused shows on its row too.
+        let board_error = self.board().and_then(|board| {
+            board
+                .error
+                .borrow()
+                .as_ref()
+                .filter(|(of, _)| *of == key)
+                .map(|(_, error)| reason_of(error))
+        });
+        if let Some(error) = self.errors.get(key).cloned().or(board_error) {
             // An alert, so a screen reader says why the value was refused.
             let label = self
                 .ui
