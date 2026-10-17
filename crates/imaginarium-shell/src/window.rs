@@ -725,6 +725,17 @@ impl BoardWindow {
             .as_ref()
             .map(|app| app.created_with())
             .unwrap_or_default();
+        // An untitled board may have no file yet (it is made with the first
+        // change): then it is written from this.
+        let untitled_snapshot = self
+            .file
+            .as_ref()
+            .is_some_and(|file| file.untitled)
+            .then(|| {
+                self.board()
+                    .and_then(|board| board.document().export_snapshot().ok())
+            })
+            .flatten();
         let link = self
             .file
             .as_mut()
@@ -740,6 +751,12 @@ impl BoardWindow {
                                 reason: format!("The board's last changes aren't saved: {reason}"),
                                 back: crate::files::reopen(&from),
                             });
+                        }
+                        if !from.exists()
+                            && let Some(snapshot) = untitled_snapshot
+                        {
+                            return crate::files::write_file(&snapshot, &to, &created_with)
+                                .map_err(|reason| NotPlaced { reason, back: None });
                         }
                         crate::files::move_file(&from, &to)
                     },

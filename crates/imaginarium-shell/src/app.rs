@@ -926,6 +926,28 @@ mod tests {
     }
 
     #[test]
+    fn save_writes_an_untitled_board_that_never_changed() {
+        // Kept from its first change on: it has no file yet.
+        let dir = scratch("save-unchanged");
+        let app = app();
+        app.keep_untitled_in(dir.join("recovery"));
+        let answers = answering(&app);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        let target = dir.join("Empty.imag");
+        *answers.save.lock().unwrap() = Some(target.clone());
+        board
+            .execute("file.save", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| board.path().is_some());
+        assert_eq!(board.path(), Some(target.as_path()));
+        assert!(
+            imaginarium_io_native::open_path(&target, imaginarium_io_native::Credentials::None)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn save_writes_a_board_that_has_no_file_at_all() {
         let dir = scratch("save-new");
         let app = app();
