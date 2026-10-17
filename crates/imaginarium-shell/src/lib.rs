@@ -50,6 +50,7 @@ mod files;
 mod inspector;
 mod menu;
 mod palette;
+mod recent;
 mod settings;
 mod start;
 mod toolbar;

@@ -54,6 +54,10 @@ pub struct App {
     kept: Arc<Mutex<KeptScan>>,
     /// The file dialogs.
     dialogs: RefCell<Arc<dyn crate::files::Dialogs>>,
+    /// The recent boards.
+    recent: crate::recent::SharedRecent,
+    /// Writes their list, when it is kept ([`App::keep_recent_in`]).
+    recent_writer: RefCell<Option<imaginarium_settings::FileWriter>>,
 }
 
 /// A closed board's saving thread finishing, and what its failure means.
@@ -171,7 +175,102 @@ impl App {
             recovery: RefCell::default(),
             kept: Arc::default(),
             dialogs: RefCell::new(Arc::new(crate::files::SystemDialogs)),
+            recent: Arc::default(),
+            recent_writer: RefCell::default(),
         })
+    }
+
+    /// Keeps the recent boards in `file` (`recent.txt` in the app's data
+    /// folder), read on a thread of its own now and written after every
+    /// change.
+    pub fn keep_recent_in(&self, file: std::path::PathBuf) {
+        let writer = imaginarium_settings::FileWriter::new(file.clone());
+        crate::recent::load(
+            file,
+            self.recent.clone(),
+            (*imaginarium_ui::theme()).clone(),
+            writer.sink(),
+        );
+        *self.recent_writer.borrow_mut() = Some(writer);
+    }
+
+    /// The board at `path` was opened or saved: it goes first among the
+    /// recent boards, and its picture is read again on a thread.
+    pub(crate) fn remember(&self, path: &std::path::Path) {
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+        self.change_recent(|boards| {
+            let preview = boards
+                .iter()
+                .position(|board| board.path == path)
+                .and_then(|at| boards.remove(at).preview);
+            boards.insert(
+                0,
+                crate::recent::RecentBoard {
+                    path: path.clone(),
+                    at_ms: crate::recent::now_ms(),
+                    preview,
+                },
+            );
+            boards.truncate(crate::recent::MAX);
+        });
+        let shared = self.recent.clone();
+        let theme = (*imaginarium_ui::theme()).clone();
+        let _ = std::thread::Builder::new()
+            .name("recent-picture".into())
+            .spawn(move || crate::recent::picture(&shared, &path, &theme));
+    }
+
+    /// The board at `path` left the recent boards (its file is gone).
+    pub(crate) fn forget(&self, path: &std::path::Path) {
+        self.change_recent(|boards| boards.retain(|board| board.path != path));
+    }
+
+    /// A board moved from `from` (if it had a place) to `to`.
+    pub(crate) fn moved(&self, from: Option<&std::path::Path>, to: &std::path::Path) {
+        if let Some(from) = from {
+            self.forget(from);
+        }
+        self.remember(to);
+    }
+
+    fn change_recent(&self, change: impl FnOnce(&mut Vec<crate::recent::RecentBoard>)) {
+        let text = {
+            let Ok(mut state) = self.recent.lock() else {
+                return;
+            };
+            change(&mut state.boards);
+            state.changed();
+            crate::recent::to_text(&state.boards)
+        };
+        // Written only once the file was read: else the boards in it would
+        // be lost.
+        let loaded = self.recent.lock().is_ok_and(|state| state.loaded);
+        if loaded && let Some(writer) = self.recent_writer.borrow().as_ref() {
+            let mut sink = writer.sink();
+            sink(text);
+        }
+    }
+
+    /// The recent boards now, and a number that changes with them.
+    pub(crate) fn recent_boards(&self) -> (u64, Vec<crate::recent::RecentBoard>) {
+        self.recent
+            .lock()
+            .map(|state| (state.generation, state.boards.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Whether the recent boards' file was read.
+    #[cfg(test)]
+    pub(crate) fn recent_loaded(&self) -> bool {
+        self.recent.lock().is_ok_and(|state| state.loaded)
+    }
+
+    /// Wakes the caller's window (from `imaginarium_ui::window_waker`)
+    /// when the recent boards change.
+    pub(crate) fn when_recent_changes(&self, wake: Box<dyn Fn() + Send>) {
+        if let Ok(mut state) = self.recent.lock() {
+            state.wakers.push(wake);
+        }
     }
 
     /// Uses `dialogs` instead of the system's (tests).
@@ -396,6 +495,7 @@ impl App {
         opening: imaginarium_io_native::Opening,
     ) -> BoardWindow {
         let name = crate::files::board_name(path);
+        self.remember(path);
         match opening {
             imaginarium_io_native::Opening::Editable(opened, session) => self
                 .board_window(opened.document, &name)
@@ -750,15 +850,16 @@ mod tests {
     /// A board file with `frames` frames in it.
     fn board_file(path: &std::path::Path, frames: usize) {
         let mut document = Document::new(DocumentKind::Board).unwrap();
-        for _ in 0..frames {
+        for n in 0..frames {
             document
                 .transact(&imaginarium_model::Actor::User, |t| {
-                    t.create_node(
+                    let node = t.create_node(
                         imaginarium_model::Parent::Root,
                         None,
                         &imaginarium_model::NodeKind::Frame,
-                    )
-                    .map(|_| ())
+                    )?;
+                    let x = 200.0 * n as f64;
+                    t.set_geometry(node, imaginarium_model::Geometry::new(x, 0.0, 160.0, 100.0))
                 })
                 .unwrap();
         }
@@ -1401,6 +1502,197 @@ mod tests {
         drop(board);
         assert!(app.wait_for_saves().is_empty());
         assert_eq!(nodes_in(&path), 2);
+    }
+
+    fn start_labels(start: &mut StartWindow) -> Vec<String> {
+        let (ui, fonts) = start.ui();
+        let mut tree = imaginarium_ui::AccessTree::default();
+        ui.access(fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .filter_map(|(_, node)| node.label().map(str::to_owned))
+            .collect()
+    }
+
+    fn click_label(start: &mut StartWindow, label: &str) {
+        let (ui, fonts) = start.ui();
+        let widget = ui
+            .find_by_label(fonts, label)
+            .unwrap_or_else(|| panic!("no {label:?}"));
+        let at = ui.bounds(widget).unwrap().center();
+        for pressed in [true, false] {
+            start.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        frame(start);
+    }
+
+    #[test]
+    fn opened_boards_show_in_recent_and_open_from_there() {
+        let dir = scratch("recent");
+        let plan = dir.join("Launch plan.imag");
+        let road = dir.join("Roadmap.imag");
+        board_file(&plan, 2);
+        board_file(&road, 1);
+        let app = app();
+        // None yet: the empty tile, no filter.
+        let mut start = app.start_window();
+        frame(&mut start);
+        assert!(start_has(&mut start, "Recent boards"));
+        assert!(!start_has(&mut start, "Filter recent boards"));
+        drop(app.open_board(&plan).unwrap());
+        drop(app.open_board(&road).unwrap());
+        app.wait_for_saves();
+        frame(&mut start);
+        let labels = start_labels(&mut start);
+        let at = |label: &str| labels.iter().position(|seen| seen == label);
+        // Newest first, then Open another board….
+        let (road_at, plan_at) = (at("Open Roadmap").unwrap(), at("Open Launch plan").unwrap());
+        assert!(road_at < plan_at, "{labels:?}");
+        assert!(at("Open another board…").unwrap() > plan_at);
+        assert!(start_has(&mut start, "Filter recent boards"));
+        // Their pictures come from a thread.
+        let pictured = |app: &App| {
+            app.recent_boards().1.iter().all(|board| {
+                board
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| !preview.is_empty())
+            })
+        };
+        until(|| pictured(&app));
+        assert!(pictured(&app));
+        // The filter: by name.
+        let (ui, fonts) = start.ui();
+        let field = ui.find_by_label(fonts, "Filter recent boards").unwrap();
+        let at_field = ui.bounds(field).unwrap().center();
+        for pressed in [true, false] {
+            start.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at_field,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        for c in "road".chars() {
+            start.input(&Input::Key {
+                key: Key::Character(c.to_string()),
+                text: Some(c.to_string()),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            });
+        }
+        frame(&mut start);
+        assert!(start_has(&mut start, "Open Roadmap"));
+        assert!(!start_has(&mut start, "Open Launch plan"));
+        // A click opens it, and the start window closes.
+        click_label(&mut start, "Open Roadmap");
+        let mut requests = Vec::new();
+        until(|| {
+            frame(&mut start);
+            requests.extend(start.take_requests());
+            !requests.is_empty()
+        });
+        assert_eq!(
+            names(&requests),
+            ["Open(\"Roadmap — Imaginarium\")", "Close"]
+        );
+    }
+
+    #[test]
+    fn the_recent_list_is_kept_and_forgets_boards_that_are_gone() {
+        let dir = scratch("recent-kept");
+        let list = dir.join("data/recent.txt");
+        let plan = dir.join("Plan.imag");
+        let gone = dir.join("Gone.imag");
+        board_file(&plan, 1);
+        board_file(&gone, 1);
+        let app = app();
+        app.keep_recent_in(list.clone());
+        until(|| app.recent_loaded());
+        drop(app.open_board(&gone).unwrap());
+        drop(app.open_board(&plan).unwrap());
+        app.wait_for_saves();
+        until(|| std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 2));
+        std::fs::remove_file(&gone).unwrap();
+        // The next start reads it; a board whose file is gone leaves it.
+        let next = super::tests::app();
+        next.keep_recent_in(list.clone());
+        until(|| next.recent_loaded());
+        let paths: Vec<_> = next
+            .recent_boards()
+            .1
+            .into_iter()
+            .map(|board| board.path)
+            .collect();
+        assert_eq!(paths, [plan]);
+        until(|| std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 1));
+        assert_eq!(std::fs::read_to_string(&list).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_moved_board_moves_in_recent() {
+        let dir = scratch("recent-moved");
+        let from = dir.join("Plan.imag");
+        board_file(&from, 1);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        board_draw(&mut board);
+        let to = dir.join("Plan 2.imag");
+        *answers.save.lock().unwrap() = Some(to.clone());
+        board
+            .execute("file.move", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| board.path() == Some(to.as_path()));
+        let paths: Vec<_> = app
+            .recent_boards()
+            .1
+            .into_iter()
+            .map(|board| board.path)
+            .collect();
+        assert_eq!(paths, [to]);
+    }
+
+    #[test]
+    fn a_dropped_board_file_opens() {
+        let dir = scratch("drop");
+        let path = dir.join("Dropped.imag");
+        board_file(&path, 1);
+        let app = app();
+        // On the start window: it opens, and the start window closes.
+        let mut start = app.start_window();
+        frame(&mut start);
+        start.input(&Input::FileDropped(path.clone()));
+        let mut requests = Vec::new();
+        until(|| {
+            frame(&mut start);
+            requests.extend(start.take_requests());
+            !requests.is_empty()
+        });
+        assert_eq!(
+            names(&requests),
+            ["Open(\"Dropped — Imaginarium\")", "Close"]
+        );
+        drop(requests);
+        app.wait_for_saves();
+        // On a board: another window.
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board.input(&Input::FileDropped(path));
+        let mut seen = Vec::new();
+        run_until(&mut board, |board| {
+            seen.extend(requests_of(board));
+            !seen.is_empty()
+        });
+        assert_eq!(seen, ["Open(\"Dropped — Imaginarium\")"]);
     }
 
     #[test]

@@ -704,6 +704,19 @@ impl BoardWindow {
         });
     }
 
+    /// Opens the board file dropped on the window in a window of its own
+    /// (on a thread), unless a file dialog runs.
+    fn open_dropped(&mut self, path: PathBuf) {
+        if self.app.is_none() || self.file_work.is_some() {
+            return;
+        }
+        self.file_work = Some(FileWork::Open(Pending::spawn(
+            "open-board",
+            move || Some(crate::files::open_file(path)),
+            || Some(Err("no thread to open with".into())),
+        )));
+    }
+
     /// Takes what a file thread finished, and goes on with it.
     fn poll_file_work(&mut self) {
         let Some(work) = self.file_work.take() else {
@@ -735,6 +748,9 @@ impl BoardWindow {
             FileWork::Placing(pending, untitled) => match pending.take() {
                 None => self.file_work = Some(FileWork::Placing(pending, untitled)),
                 Some(Ok(placed)) => {
+                    if let Some(app) = &self.app {
+                        app.moved(self.path(), &placed.path);
+                    }
                     let name = crate::files::board_name(&placed.path);
                     self.link_with(placed.path, placed.session, false, placed.saved);
                     self.rename(name);
@@ -2511,6 +2527,11 @@ impl View for BoardWindow {
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        // A board file dropped on the window opens in one of its own.
+        if let Input::FileDropped(path) = input {
+            self.open_dropped(path.clone());
+            return true;
+        }
         // The board Settings' This board edits: the one with the keys, or
         // clicked last (without focus following the pointer).
         if matches!(

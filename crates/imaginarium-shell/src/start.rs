@@ -5,8 +5,9 @@
 //!
 //! After a crash, a notice on the right offers the boards that were kept
 //! (`App::look_for_kept_boards`). Open… asks for a board file on a thread
-//! of its own (`crate::files`). The recent boards come with M3.6 part 5;
-//! until then the recent list says so. The "Start
+//! of its own (`crate::files`). Recent boards show as tiles with a
+//! picture of each (`crate::recent`), with a filter, then Open another
+//! board…; a board file dropped on the window opens. The "Start
 //! from" templates come with M4's shape libraries, the Settings, Shortcuts
 //! and What's new links with the windows they open.
 
@@ -24,8 +25,8 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, ButtonBox, ButtonColors, Flex, FrameInfo, Icon, Input, Label, Logo, Switch, Token,
-    Ui, View, WidgetId, WindowOptions, WindowRequest, theme,
+    AccessTree, ButtonBox, ButtonColors, Flex, FrameInfo, Icon, Input, InputColors, Label, Logo,
+    Switch, TextInput, Token, Ui, View, WidgetId, WindowOptions, WindowRequest, theme,
 };
 use taffy::prelude::length;
 
@@ -33,11 +34,15 @@ use crate::app::{App, SHOW_START_WINDOW};
 use crate::toolbar::shortcut;
 
 /// What the start window's controls asked for.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum StartAsk {
     NewBoard,
     /// Choose a board file and open it.
     Open,
+    /// Open this recent board.
+    OpenRecent(std::path::PathBuf),
+    /// The recent boards' filter changed.
+    Filter(String),
     /// Open the boards kept after a crash.
     OpenKept,
     /// Open Settings at this section.
@@ -62,9 +67,20 @@ pub struct StartWindow {
     subscription: imaginarium_settings::SubscriptionId,
     /// It asked to close (after New board).
     closing: bool,
-    /// The right side, and what it shows below the notice.
+    /// The right side, and its Recent header (the title and the filter).
     right: WidgetId,
-    recent: [WidgetId; 2],
+    header: WidgetId,
+    title: WidgetId,
+    filter_field: WidgetId,
+    /// The recent boards' rows (or their empty tile), and the drop hint.
+    list: Vec<WidgetId>,
+    hint: Option<WidgetId>,
+    /// What the filter says.
+    filter: String,
+    /// The recent boards' change number the list was built for.
+    recent_seen: Option<u64>,
+    /// It asked to be woken when the recent boards change.
+    waiting_for_recent: bool,
     /// The crash notice, while it shows.
     notice: Option<WidgetId>,
     /// It asked to be woken when the search for kept boards is done.
@@ -106,7 +122,7 @@ impl StartWindow {
             }
         });
         let divider = ui.add(Flex::column().width(1.0).background(Token::Divider));
-        let (right, recent) = recent(&mut ui);
+        let (right, header, title, filter_field) = recent(&mut ui, &asks);
         let root = ui.add_with_children(
             Flex::row()
                 .fill()
@@ -130,7 +146,14 @@ impl StartWindow {
             subscription,
             closing: false,
             right,
-            recent,
+            header,
+            title,
+            filter_field,
+            list: Vec::new(),
+            hint: None,
+            filter: String::new(),
+            recent_seen: None,
+            waiting_for_recent: false,
             notice: None,
             waiting_for_kept: false,
             opening: None,
@@ -162,7 +185,8 @@ impl StartWindow {
         self.lay_out_right();
     }
 
-    /// The right side: an error, the crash notice, then Recent.
+    /// The right side: an error, the crash notice, then Recent and the
+    /// drop hint.
     fn lay_out_right(&mut self) {
         let children: Vec<WidgetId> = self
             .error
@@ -170,7 +194,9 @@ impl StartWindow {
             .map(|(error, _)| *error)
             .into_iter()
             .chain(self.notice)
-            .chain(self.recent)
+            .chain([self.header])
+            .chain(self.list.iter().copied())
+            .chain(self.hint)
             .collect();
         self.ui.set_children(self.right, &children);
     }
@@ -179,6 +205,106 @@ impl StartWindow {
     #[cfg(test)]
     pub(crate) fn is_opening(&self) -> bool {
         self.opening.is_some()
+    }
+
+    /// Builds the recent boards' tiles again when they or the filter
+    /// changed.
+    fn sync_recent(&mut self, force: bool) {
+        if !self.waiting_for_recent
+            && let Some(wake) = imaginarium_ui::window_waker()
+        {
+            self.app.when_recent_changes(Box::new(wake));
+            self.waiting_for_recent = true;
+        }
+        let (generation, boards) = self.app.recent_boards();
+        if !force && self.recent_seen == Some(generation) {
+            return;
+        }
+        self.recent_seen = Some(generation);
+        for widget in std::mem::take(&mut self.list) {
+            self.ui.remove(widget);
+        }
+        if let Some(hint) = self.hint.take() {
+            self.ui.remove(hint);
+        }
+        // The filter only once there is something to filter.
+        let header: Vec<WidgetId> = if boards.is_empty() {
+            vec![self.title]
+        } else {
+            vec![self.title, self.filter_field]
+        };
+        self.ui.set_children(self.header, &header);
+        let query = self.filter.trim().to_lowercase();
+        let home = home_folder();
+        let now = crate::recent::now_ms();
+        let shown: Vec<_> = boards
+            .iter()
+            .map(|board| {
+                let name = crate::files::board_name(&board.path);
+                let folder = crate::recent::folder_text(&board.path, home.as_deref());
+                (board, name, folder)
+            })
+            .filter(|(_, name, folder)| {
+                query.is_empty()
+                    || name.to_lowercase().contains(&query)
+                    || folder.to_lowercase().contains(&query)
+            })
+            .take(RECENT_SHOWN)
+            .collect();
+        self.list = if boards.is_empty() {
+            vec![empty_tile(&mut self.ui, "The boards you open show here.")]
+        } else {
+            let mut tiles: Vec<WidgetId> = shown
+                .iter()
+                .map(|(board, name, folder)| {
+                    let when = crate::recent::when_text(board.at_ms, now);
+                    recent_tile(
+                        &mut self.ui,
+                        board,
+                        name,
+                        &format!("{folder} · {when}"),
+                        &self.asks,
+                    )
+                })
+                .collect();
+            if shown.is_empty() {
+                let text = format!(
+                    "No recent board matches \u{201c}{}\u{201d}.",
+                    self.filter.trim()
+                );
+                tiles.push(empty_tile(&mut self.ui, &text));
+            }
+            tiles.push(open_tile(&mut self.ui, &self.asks));
+            rows(&mut self.ui, tiles)
+        };
+        if imaginarium_ui::file_drops_supported() {
+            let hint = self.ui.add(
+                Label::new("Drop an .imag file here to open it.", TextStyle::new(12.0))
+                    .color(Token::TextSubtle)
+                    .single_line(),
+            );
+            self.hint = Some(self.ui.add_with_children(
+                Flex::row().style(|style| style.margin.top = taffy::LengthPercentageAuto::auto()),
+                &[hint],
+            ));
+        }
+        self.lay_out_right();
+    }
+
+    /// Opens the recent board at `path` (on a thread of its own), or says
+    /// why it can't be (and forgets it if its file is gone).
+    fn open_recent(&mut self, path: std::path::PathBuf) {
+        if self.closing || self.opening.is_some() {
+            return;
+        }
+        if !path.exists() {
+            self.app.forget(&path);
+        }
+        self.opening = Some(crate::files::Pending::spawn(
+            "open-board",
+            move || Some(crate::files::open_file(path)),
+            || Some(Err("no thread to open with".into())),
+        ));
     }
 
     /// Asks for a board file to open, on a thread of its own (once at a
@@ -295,6 +421,11 @@ impl StartWindow {
             match ask {
                 StartAsk::NewBoard => self.new_board(),
                 StartAsk::Open => self.open_file(),
+                StartAsk::OpenRecent(path) => self.open_recent(path),
+                StartAsk::Filter(text) => {
+                    self.filter = text;
+                    self.sync_recent(true);
+                }
                 StartAsk::OpenKept => self.open_kept_boards(),
                 StartAsk::Settings(section) => self.open_settings(section),
             }
@@ -419,7 +550,7 @@ fn link(ui: &mut Ui, title: &str, asks: &StartAsks, ask: StartAsk) -> WidgetId {
     );
     let asks = asks.clone();
     ButtonBox::new(title, ButtonColors::quiet(), move || {
-        asks.borrow_mut().push(ask);
+        asks.borrow_mut().push(ask.clone());
     })
     .height(22.0)
     .padding(2.0, 2.0)
@@ -547,30 +678,68 @@ fn notice(ui: &mut Ui, count: usize, name: &str, asks: &StartAsks) -> WidgetId {
     )
 }
 
-/// The right side: the recent boards (none yet: they come with M3.6 part
-/// 5), and the crash notice above them when there is one. Returns the
-/// side and what it shows below the notice.
-fn recent(ui: &mut Ui) -> (WidgetId, [WidgetId; 2]) {
+/// Recent boards shown at most: two rows of three with Open another
+/// board… (the Start mockup); the filter finds the others.
+const RECENT_SHOWN: usize = 5;
+
+/// The right side: the Recent header with its filter; the tiles come
+/// with [`StartWindow::sync_recent`]. Returns the side, the header, its
+/// title and the filter.
+fn recent(ui: &mut Ui, asks: &StartAsks) -> (WidgetId, WidgetId, WidgetId, WidgetId) {
     let title = ui.add(
         Label::new("Recent", TextStyle::new(15.0).weight(600.0))
             .color(Token::Text)
-            .single_line(),
+            .single_line()
+            .grow(1.0),
     );
+    let icon = ui.add(Icon::named("search", 14.0, Token::TextSubtle));
+    let input = {
+        let asks = asks.clone();
+        ui.add(
+            TextInput::new(
+                "Filter recent boards",
+                "Filter",
+                TextStyle::new(13.0),
+                InputColors::themed(),
+            )
+            .bare()
+            .on_change(move |text| asks.borrow_mut().push(StartAsk::Filter(text.to_owned()))),
+        )
+    };
+    let field = ui.add_with_children(Flex::row().grow(1.0), &[input]);
+    let filter = ui.add_with_children(
+        Flex::row()
+            .width(200.0)
+            .height(30.0)
+            .gap(6.0)
+            .align_center()
+            .padding(10.0, 0.0)
+            .border(1.0, Token::ControlBorder)
+            .radius(8.0)
+            .background(Token::PanelBg),
+        &[icon, field],
+    );
+    let header = ui.add_with_children(Flex::row().gap(12.0).align_center(), &[title]);
+    let side = ui.add_with_children(
+        Flex::column().gap(16.0).grow(1.0).style(|style| {
+            style.padding = padding(28.0, 28.0, 24.0, 20.0);
+            style.min_size.width = length(0.0);
+        }),
+        &[header],
+    );
+    (side, header, title, filter)
+}
+
+/// A tile saying there is nothing to show (no recent boards yet, or none
+/// matching the filter).
+fn empty_tile(ui: &mut Ui, text: &str) -> WidgetId {
     let icon = ui.add(Icon::named("folder-open", 20.0, Token::TextMuted));
-    let empty = ui.add(
-        Label::new("The boards you open show here.", TextStyle::new(13.0))
+    let label = ui.add(
+        Label::new(text, TextStyle::new(13.0))
             .color(Token::TextMuted)
             .single_line(),
     );
-    let later = ui.add(
-        Label::new(
-            "Listing them comes in a later preview.",
-            TextStyle::new(12.0),
-        )
-        .color(Token::TextSubtle)
-        .single_line(),
-    );
-    let tile = ui.add_with_children(
+    ui.add_with_children(
         Flex::column()
             .height(112.0)
             .gap(8.0)
@@ -581,16 +750,112 @@ fn recent(ui: &mut Ui) -> (WidgetId, [WidgetId; 2]) {
                 style.justify_content = taffy::JustifyContent::CENTER;
             })
             .role(Role::Group, "Recent boards"),
-        &[icon, empty, later],
+        &[icon, label],
+    )
+}
+
+/// A recent board: its picture, its name, its folder and when.
+fn recent_tile(
+    ui: &mut Ui,
+    board: &crate::recent::RecentBoard,
+    name: &str,
+    detail: &str,
+    asks: &StartAsks,
+) -> WidgetId {
+    let picture = ui.add(crate::recent::PreviewTile {
+        preview: board.preview.clone(),
+    });
+    let title = ui.add(
+        Label::new(name, TextStyle::new(13.0).weight(600.0))
+            .color(Token::Text)
+            .single_line(),
     );
-    let side = ui.add_with_children(
-        Flex::column().gap(16.0).grow(1.0).style(|style| {
-            style.padding = padding(28.0, 28.0, 24.0, 20.0);
+    let detail = ui.add(
+        Label::new(detail, TextStyle::new(12.0))
+            .color(Token::TextSubtle)
+            .single_line(),
+    );
+    let words = ui.add_with_children(Flex::column().gap(2.0), &[title, detail]);
+    let content = ui.add_with_children(
+        Flex::column().gap(8.0).grow(1.0).style(|style| {
             style.min_size.width = length(0.0);
+            style.overflow = taffy::Point {
+                x: taffy::Overflow::Hidden,
+                y: taffy::Overflow::Visible,
+            };
         }),
-        &[title, tile],
+        &[picture, words],
     );
-    (side, [title, tile])
+    let asks = asks.clone();
+    let path = board.path.clone();
+    ButtonBox::new(format!("Open {name}"), ButtonColors::quiet(), move || {
+        asks.borrow_mut().push(StartAsk::OpenRecent(path.clone()));
+    })
+    .padding(0.0, 0.0)
+    .radius(10.0)
+    .role(Role::Link)
+    .add_to(ui, &[content])
+}
+
+/// The dashed tile after the recent boards: Open another board….
+fn open_tile(ui: &mut Ui, asks: &StartAsks) -> WidgetId {
+    let icon = ui.add(Icon::named("folder-open", 20.0, Token::TextMuted));
+    let label = ui.add(
+        Label::new("Open another board…", TextStyle::new(13.0))
+            .color(Token::TextMuted)
+            .single_line(),
+    );
+    let tile = ui.add_with_children(crate::recent::DashedTile, &[icon, label]);
+    let content = ui.add_with_children(Flex::column().grow(1.0), &[tile]);
+    let asks = asks.clone();
+    ButtonBox::new("Open another board…", ButtonColors::quiet(), move || {
+        asks.borrow_mut().push(StartAsk::Open);
+    })
+    .padding(0.0, 0.0)
+    .radius(10.0)
+    .role(Role::Link)
+    .add_to(ui, &[content])
+}
+
+/// `tiles` in rows of three equal columns, 14 px apart.
+fn rows(ui: &mut Ui, tiles: Vec<WidgetId>) -> Vec<WidgetId> {
+    tiles
+        .chunks(3)
+        .map(|row| {
+            let mut cells: Vec<WidgetId> = row
+                .iter()
+                .map(|&tile| {
+                    ui.add_with_children(
+                        Flex::column().grow(1.0).style(|style| {
+                            style.flex_basis = length(0.0);
+                            style.min_size.width = length(0.0);
+                        }),
+                        &[tile],
+                    )
+                })
+                .collect();
+            // A short last row keeps the columns' width.
+            while cells.len() < 3 {
+                cells.push(ui.add(Flex::column().grow(1.0).style(|style| {
+                    style.flex_basis = length(0.0);
+                })));
+            }
+            ui.add_with_children(
+                Flex::row()
+                    .gap(14.0)
+                    .style(|style| style.align_items = taffy::AlignItems::FLEX_START),
+                &cells,
+            )
+        })
+        .collect()
+}
+
+/// The user's home folder, for showing folders from it.
+fn home_folder() -> Option<std::path::PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_absolute())
 }
 
 impl View for StartWindow {
@@ -598,12 +863,17 @@ impl View for StartWindow {
         self.handle_asks();
         self.poll_opening();
         self.sync_notice();
+        self.sync_recent(false);
         self.ui
             .layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
         self.ui.paint(&mut self.fonts, scene);
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        if let Input::FileDropped(path) = input {
+            self.open_recent(path.clone());
+            return true;
+        }
         // Ctrl+N wherever the keys are.
         if let Input::Key {
             key,

@@ -31,7 +31,8 @@
 //! Settings are kept in `settings.toml` in the platform's configuration
 //! folder ([`settings_path`]), read at startup and written on a thread of
 //! their own after every change. Untitled boards are kept for crash
-//! recovery in the platform's data folder ([`recovery_folder`]).
+//! recovery in the platform's data folder ([`recovery_folder`]), and the
+//! list of recent boards next to them (`recent.txt`).
 //!
 //! With `--frames`, the time to the first frame is printed when the
 //! window closes.
@@ -128,6 +129,10 @@ fn main() -> anyhow::Result<()> {
     );
     app.report_saving(writer.as_ref().map(FileWriter::status), notice);
     if let Some(folder) = recovery_folder(|name| std::env::var_os(name)) {
+        // The recent boards' list lives next to it, in the data folder.
+        if let Some(data) = folder.parent() {
+            app.keep_recent_in(data.join("recent.txt"));
+        }
         app.keep_untitled_in(folder);
         app.look_for_kept_boards();
     }
