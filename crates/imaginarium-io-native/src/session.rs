@@ -74,8 +74,9 @@ impl Drop for Lock {
     }
 }
 
-/// Another writer holds the file.
-pub(crate) const IN_USE: &str = "it is open in another window or app";
+/// Why a file opens read-only when another writer holds it
+/// ([`imaginarium_model::ReadOnlyReason::File`]).
+pub const IN_USE: &str = "it is open in another window or app";
 
 /// Locks the file at `path` (open as `file`) against other writers.
 /// `Err(IN_USE)` if another writer has it.
