@@ -241,7 +241,7 @@ impl App {
         Ok(match opening {
             imaginarium_io_native::Opening::Editable(opened, session) => self
                 .board_window(opened.document, &name)
-                .saved_in(path.to_owned(), session),
+                .saved_in(path.to_owned(), *session),
             // Nothing is written into it; the pill says why.
             imaginarium_io_native::Opening::ReadOnly(opened) => {
                 self.board_window(opened.document, &name)

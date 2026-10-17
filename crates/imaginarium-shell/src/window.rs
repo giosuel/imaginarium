@@ -508,10 +508,21 @@ impl BoardWindow {
         file.unsent = None;
     }
 
-    /// When the unsent changes are due, if there are any.
+    /// When the unsent changes are due, if there are any and they can go
+    /// then: not during a gesture (its end is input, which saves), and not
+    /// in the past (an export that failed tries again a moment later), so
+    /// the window's other timers aren't hidden behind it.
     fn save_deadline(&self) -> Option<Instant> {
+        let gesturing = self
+            .ui
+            .widget::<BoardCanvas>(self.board)
+            .is_some_and(BoardCanvas::is_gesturing);
+        if gesturing {
+            return None;
+        }
         let (first, last) = self.file.as_ref()?.unsent?;
-        Some((last + SAVE_AFTER_STILL).min(first + SAVE_AT_LATEST))
+        let due = (last + SAVE_AFTER_STILL).min(first + SAVE_AT_LATEST);
+        Some(due.max(Instant::now() + std::time::Duration::from_millis(10)))
     }
 
     /// Shows in the pill how the file is doing, when that changed. Saving…
