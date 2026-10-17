@@ -11,10 +11,13 @@ use imaginarium_ui::{Input, Key, Modifiers};
 use crate::BoardCanvas;
 use crate::tests_select::{Harness, sample};
 
-/// A key with Ctrl (Linux's Mod), and Shift or Alt if asked.
+/// A key with the platform's Mod (Ctrl, ⌘ on macOS), and Shift or Alt
+/// if asked.
 fn chord(board: &mut Harness, key: Key, shift: bool, alt: bool) {
+    let mac = cfg!(target_os = "macos");
     let modifiers = Modifiers {
-        ctrl: true,
+        ctrl: !mac,
+        meta: mac,
         shift,
         alt,
         ..Modifiers::default()
@@ -129,7 +132,7 @@ fn order_commands_move_in_the_stack() {
     assert_eq!(order(&board).last(), Some(&interview));
     ctrl(&mut board, "[");
     assert_eq!(order(&board).first(), Some(&interview));
-    chord(&mut board, Key::Character("]".into()), false, true);
+    chord(&mut board, Key::ArrowUp, false, false);
     assert_eq!(order(&board)[1], interview, "one step forward");
 }
 
@@ -254,7 +257,7 @@ fn reordering_keeps_the_selected_nodes_in_their_order() {
     let (mut board, n) = four();
     board.click((300.0, 150.0));
     board.shift_click((450.0, 150.0));
-    chord(&mut board, Key::Character("]".into()), false, true);
+    chord(&mut board, Key::ArrowUp, false, false);
     assert_eq!(root_order(&board), vec![n[0], n[3], n[1], n[2]]);
 }
 
