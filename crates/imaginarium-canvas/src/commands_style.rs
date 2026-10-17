@@ -403,6 +403,20 @@ pub static SET_STROKE_OPACITY: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>
 /// The color opacity commands.
 pub(crate) const OPACITY_COMMANDS: [&FnCommand<BoardCanvas>; 2] =
     [&SET_FILL_OPACITY, &SET_STROKE_OPACITY];
+/// Every node: opacity, hiding, names and styles apply to all kinds.
+fn takes_any(_node: &NodeView) -> bool {
+    true
+}
+
+/// Shapes: their type can change.
+fn takes_preset(node: &NodeView) -> bool {
+    matches!(node.kind(), NodeKind::Shape)
+}
+
+/// The nodes with overrides of their own.
+fn takes_reset(node: &NodeView) -> bool {
+    !node.style_overrides().is_empty()
+}
 
 fn failed(id: &'static str) -> impl Fn(imaginarium_model::ModelError) -> CommandError {
     move |err| CommandError::Failed {
@@ -410,6 +424,345 @@ fn failed(id: &'static str) -> impl Fn(imaginarium_model::ModelError) -> Command
         message: err.to_string(),
     }
 }
+
+/// `style.set_opacity`.
+pub static SET_OPACITY: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.set_opacity",
+    CommandMeta::new(
+        "Opacity",
+        "Set how opaque the selected nodes are, from 0 (invisible) to 1 (solid).",
+    )
+    .category("Style")
+    .synonyms(&["transparency", "alpha", "see-through", "deckkraft"])
+    .icon("eye"),
+    |board, args| {
+        let opacity = args.float("opacity").unwrap_or(1.0).clamp(0.0, 1.0);
+        set(board, "style.set_opacity", takes_any, "opacity", |_| {
+            Value::Number(opacity)
+        })
+    },
+)
+.availability(|board| available(board, takes_any))
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "opacity",
+        description: "From 0 (invisible) to 1 (solid).",
+        kind: ArgKind::Float {
+            min: Some(0.0),
+            max: Some(1.0),
+        },
+        required: true,
+    }],
+});
+
+/// `style.set_text_size`.
+pub static SET_TEXT_SIZE: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.set_text_size",
+    CommandMeta::new(
+        "Text size",
+        "Set the size of the selected text boxes' and shapes' text, in points.",
+    )
+    .category("Style")
+    .synonyms(&["font size", "bigger text", "smaller text", "schriftgröße"])
+    .icon("type"),
+    |board, args| {
+        let size = args.float("size").unwrap_or(16.0).clamp(4.0, 400.0);
+        set(board, "style.set_text_size", takes_text, "size", |_| {
+            Value::Number(size)
+        })
+    },
+)
+.availability(|board| available(board, takes_text))
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "size",
+        description: "The text size in points.",
+        kind: ArgKind::Float {
+            min: Some(4.0),
+            max: Some(400.0),
+        },
+        required: true,
+    }],
+});
+
+/// `style.reset`.
+pub static RESET_STYLE: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.reset",
+    CommandMeta::new(
+        "Reset to style",
+        "Remove the values changed on the selected nodes themselves, so they look as their named style (or the defaults) says.",
+    )
+    .category("Style")
+    .synonyms(&["clear formatting", "reset style", "default look"])
+    .icon("rotate-ccw"),
+    |board, _args| {
+        let nodes = targets(board, takes_reset);
+        if nodes.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        let props: Vec<(NodeId, Vec<String>)> = {
+            let view = board.document().view();
+            nodes
+                .iter()
+                .filter_map(|node| {
+                    let keys = view.node(*node)?.style_overrides().iter().map(|(key, _)| key.to_owned()).collect();
+                    Some((*node, keys))
+                })
+                .collect()
+        };
+        board
+            .transact(&Actor::User, |txn| {
+                for (node, keys) in &props {
+                    for key in keys {
+                        txn.set_style_override(*node, key, Value::Null)?;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(failed("style.reset"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| available(board, takes_reset));
+
+/// `style.apply`.
+pub static APPLY_STYLE: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.apply",
+    CommandMeta::new(
+        "Apply style",
+        "Give the selected nodes the board's named style `style` (its id), or no named style with an empty id; their own changes stay.",
+    )
+    .category("Style")
+    .synonyms(&["named style", "use style", "formatvorlage"])
+    .icon("paintbrush"),
+    |board, args| {
+        let style = args.str("style").unwrap_or("");
+        let style = if style.is_empty() {
+            None
+        } else {
+            let id = board
+                .document()
+                .view()
+                .style_ids()
+                .find(|id| id.as_str() == style)
+                .cloned();
+            Some(id.ok_or_else(|| CommandError::InvalidArgs {
+                id: "style.apply",
+                reason: "no such style on this board".into(),
+            })?)
+        };
+        let nodes = targets(board, takes_any);
+        if nodes.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| {
+                for node in &nodes {
+                    txn.set_style(*node, style.as_ref())?;
+                }
+                Ok(())
+            })
+            .map_err(failed("style.apply"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| {
+    if board.document().view().style_ids().next().is_none() {
+        Availability::Hidden
+    } else {
+        available(board, takes_any)
+    }
+})
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "style",
+        description: "The style's id; empty for none.",
+        kind: ArgKind::String { max_len: Some(64) },
+        required: true,
+    }],
+});
+
+/// `board.rename`.
+pub static RENAME: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.rename",
+    CommandMeta::new(
+        "Rename",
+        "Give the one selected node a name (frames show theirs above them); an empty name removes it.",
+    )
+    .category("Edit")
+    .synonyms(&["name", "label", "title", "umbenennen"])
+    .icon("type"),
+    |board, args| {
+        let name = args.str("name").unwrap_or("").trim().to_owned();
+        let [node] = targets(board, takes_any)[..] else {
+            return Err(CommandError::InvalidArgs {
+                id: "board.rename",
+                reason: "select one node".into(),
+            });
+        };
+        let value = if name.is_empty() {
+            Value::Null
+        } else {
+            Value::String(name.as_str().into())
+        };
+        if board.document().view().node(node).and_then(|node| node.name()) == Some(name.as_str()) {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| txn.set_prop(node, "name", value))
+            .map_err(failed("board.rename"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| {
+    if targets(board, takes_any).len() == 1 {
+        Availability::Enabled
+    } else {
+        Availability::Hidden
+    }
+})
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "name",
+        description: "The new name; empty to remove it.",
+        kind: ArgKind::String { max_len: Some(256) },
+        required: true,
+    }],
+});
+
+/// `board.set_hidden`.
+pub static SET_HIDDEN: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.set_hidden",
+    CommandMeta::new(
+        "Hide or show",
+        "Hide the selected nodes (`hidden` true: they stay on the board but aren't drawn or clicked), or show them again (false; with no hidden node selected, every hidden node).",
+    )
+    .category("Arrange")
+    .synonyms(&["hide", "show", "visibility", "ausblenden"])
+    .icon("eye-off"),
+    |board, args| {
+        let hidden = args.bool("hidden").unwrap_or(true);
+        let mut nodes = targets(board, takes_any);
+        let changed: Vec<NodeId> = {
+            let view = board.document().view();
+            // A hidden node leaves the selection, so showing again works
+            // on the board's hidden nodes when none is selected.
+            if !hidden && !nodes.iter().any(|node| view.node(*node).is_some_and(NodeView::hidden)) {
+                nodes = view
+                    .walk()
+                    .into_iter()
+                    .filter(|node| view.node(*node).is_some_and(NodeView::hidden))
+                    .filter(|node| !crate::hit::locked(view, *node))
+                    .collect();
+            }
+            nodes
+                .into_iter()
+                .filter(|node| view.node(*node).is_some_and(|node| node.hidden() != hidden))
+                .collect()
+        };
+        if changed.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| {
+                for node in &changed {
+                    let value = if hidden { Value::Bool(true) } else { Value::Null };
+                    txn.set_prop(*node, "hidden", value)?;
+                }
+                Ok(())
+            })
+            .map_err(failed("board.set_hidden"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| {
+    let view = board.document().view();
+    let any_hidden = || view.walk().into_iter().any(|node| view.node(node).is_some_and(NodeView::hidden));
+    if !targets(board, takes_any).is_empty() || any_hidden() {
+        Availability::Enabled
+    } else {
+        Availability::Hidden
+    }
+})
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "hidden",
+        description: "True to hide, false to show.",
+        kind: ArgKind::Bool,
+        required: true,
+    }],
+});
+
+const PRESETS: &[&str] = &["rect", "ellipse", "diamond", "triangle", "line"];
+
+/// `shape.set_preset`.
+pub static SET_PRESET: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "shape.set_preset",
+    CommandMeta::new(
+        "Change shape",
+        "Turn the selected shapes into another shape (rect, ellipse, diamond, triangle or line), keeping their box, text and look.",
+    )
+    .category("Style")
+    .synonyms(&["shape type", "convert shape", "form ändern"])
+    .icon("diamond"),
+    |board, args| {
+        let preset = args
+            .str("preset")
+            .and_then(crate::board::Preset::parse)
+            .ok_or_else(|| CommandError::InvalidArgs {
+                id: "shape.set_preset",
+                reason: "`preset` names no shape".into(),
+            })?;
+        let nodes = targets(board, takes_preset);
+        let changed: Vec<NodeId> = {
+            let view = board.document().view();
+            nodes
+                .into_iter()
+                .filter(|node| {
+                    view.node(*node)
+                        .is_some_and(|node| preset_of(node) != preset.name())
+                })
+                .collect()
+        };
+        if changed.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| {
+                for node in &changed {
+                    txn.set_prop(*node, "shape", Value::String(preset.name().into()))?;
+                }
+                Ok(())
+            })
+            .map_err(failed("shape.set_preset"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| available(board, takes_preset))
+.args(ArgsSchema {
+    args: &[ArgSpec {
+        name: "preset",
+        description: "The shape: rect, ellipse, diamond, triangle or line.",
+        kind: ArgKind::Enum { variants: PRESETS },
+        required: true,
+    }],
+});
+
+/// A shape's preset name (a rectangle without one).
+pub fn preset_of(node: &NodeView) -> String {
+    preset(node).unwrap_or("rect").to_owned()
+}
+
+/// The inspector's commands, for [`board_commands`](crate::commands::board_commands).
+pub(crate) const INSPECTOR_COMMANDS: [&FnCommand<BoardCanvas>; 7] = [
+    &SET_OPACITY,
+    &SET_TEXT_SIZE,
+    &RESET_STYLE,
+    &APPLY_STYLE,
+    &RENAME,
+    &SET_HIDDEN,
+    &SET_PRESET,
+];
 
 /// The style commands, for [`board_commands`](crate::commands::board_commands).
 pub(crate) const STYLE_COMMANDS: [&FnCommand<BoardCanvas>; 5] = [

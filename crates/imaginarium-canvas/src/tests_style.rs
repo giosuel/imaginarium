@@ -198,3 +198,105 @@ fn opacity_keeps_each_nodes_own_color_and_old_uppercase_colors_count() {
         "no step for the same color"
     );
 }
+
+#[test]
+fn the_inspectors_commands_change_the_selection_in_one_step_each() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    let widget = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(widget)
+        .unwrap()
+        .select(&[interview]);
+    run(
+        &mut board,
+        "style.set_opacity",
+        Args::new().with("opacity", ArgValue::Float(0.5)),
+    );
+    assert_eq!(prop(&board, interview, "opacity"), Some(Value::Number(0.5)));
+    // Reset to style takes every own value away.
+    run(&mut board, "style.reset", Args::new());
+    let view = board.board().document().view();
+    assert!(view.node(interview).unwrap().style_overrides().is_empty());
+    // A name, a hidden node, another shape.
+    run(
+        &mut board,
+        "board.rename",
+        Args::new().with("name", ArgValue::String("First step".into())),
+    );
+    run(
+        &mut board,
+        "shape.set_preset",
+        Args::new().with("preset", ArgValue::String("ellipse".into())),
+    );
+    run(
+        &mut board,
+        "board.set_hidden",
+        Args::new().with("hidden", ArgValue::Bool(true)),
+    );
+    let view = board.board().document().view();
+    let node = view.node(interview).unwrap();
+    assert_eq!(node.name(), Some("First step"));
+    assert!(node.hidden());
+    assert_eq!(crate::commands_style::preset_of(node), "ellipse");
+    run(
+        &mut board,
+        "board.set_hidden",
+        Args::new().with("hidden", ArgValue::Bool(false)),
+    );
+    assert!(
+        !board
+            .board()
+            .document()
+            .view()
+            .node(interview)
+            .unwrap()
+            .hidden()
+    );
+}
+
+#[test]
+fn a_named_style_applies_and_hides_without_styles() {
+    use imaginarium_model::{Actor, Document, DocumentKind, Geometry, NodeKind, Parent};
+    let board = sample();
+    let widget = board.board;
+    let canvas = board.ui.widget::<BoardCanvas>(widget).unwrap();
+    let apply = &crate::commands_style::APPLY_STYLE;
+    assert_eq!(Command::availability(apply, canvas), Availability::Hidden);
+    let mut document = Document::new(DocumentKind::Board).unwrap();
+    let (node, _) = document
+        .transact(&Actor::User, |txn| {
+            let style = txn.create_style("Note", None)?;
+            txn.set_style_prop(&style, "fill", Value::String("#fef3c7".into()))?;
+            let node = txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+            txn.set_geometry(node, Geometry::new(10.0, 10.0, 100.0, 60.0))?;
+            Ok(node)
+        })
+        .unwrap();
+    let mut board = Harness::new(document);
+    let widget = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(widget)
+        .unwrap()
+        .select(&[node]);
+    let style = board
+        .board()
+        .document()
+        .view()
+        .style_ids()
+        .next()
+        .unwrap()
+        .as_str()
+        .to_owned();
+    run(
+        &mut board,
+        "style.apply",
+        Args::new().with("style", ArgValue::String(style)),
+    );
+    assert_eq!(
+        prop(&board, node, "fill"),
+        Some(Value::String("#fef3c7".into()))
+    );
+}
