@@ -32,4 +32,5 @@ pub static BACKGROUND: Setting<Background> = Setting::new(
     "The pattern behind your shapes. Not printed or exported.",
 )
 .group("appearance")
+.per_document()
 .synonyms(&["dots", "grid", "pattern", "canvas", "raster"]);

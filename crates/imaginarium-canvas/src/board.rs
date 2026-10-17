@@ -1643,18 +1643,20 @@ impl BoardCanvas {
         }
     }
 
-    /// The pattern behind the shapes now.
+    /// The user's background, which the board draws unless it has its own
+    /// (`board.set_setting`).
     pub fn background(&self) -> Background {
         self.background
     }
 
-    /// Draws `background` behind the shapes from the next frame.
+    /// Sets the user's background, drawn from the next frame unless the
+    /// board has its own.
     pub fn set_background(&mut self, background: Background) {
         self.background = background;
     }
 
     fn paint_background(&mut self, scene: &mut Scene, bounds: Rect) {
-        let background = self.background;
+        let background = self.effective_background();
         if background == Background::Plain {
             return;
         }

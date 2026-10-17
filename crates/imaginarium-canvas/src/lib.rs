@@ -25,6 +25,7 @@
 
 mod background;
 mod board;
+pub mod board_settings;
 pub mod clipboard;
 pub mod commands;
 pub mod commands_style;

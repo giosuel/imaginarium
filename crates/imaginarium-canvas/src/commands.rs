@@ -929,7 +929,8 @@ pub fn board_commands() -> &'static [&'static FnCommand<BoardCanvas>] {
     &BOARD_COMMANDS
 }
 
-static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 61] = [
+static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 62] = [
+    &crate::board_settings::SET_SETTING,
     &COPY,
     &CUT,
     &PASTE,
