@@ -81,5 +81,5 @@ pub use theme::{DEFAULT_ACCENT, Paint, Theme, ThemeKind, Token, contrast, mix, s
 
 pub use window::{
     FrameCauses, FrameInfo, Ime, Input, Key, Modifiers, MonitorInfo, RunStats, UiError, View,
-    WindowOptions, request_frame, run, run_with_gpu, scale_factor,
+    WindowOptions, WindowRequest, request_frame, run, run_with_gpu, scale_factor,
 };

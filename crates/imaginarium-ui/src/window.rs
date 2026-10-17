@@ -333,6 +333,12 @@ pub trait View {
         let _ = request;
         false
     }
+
+    /// Windows to open, or this one to close: asked after input and
+    /// timers.
+    fn take_requests(&mut self) -> Vec<WindowRequest> {
+        Vec::new()
+    }
 }
 
 impl<V: View + ?Sized> View for &mut V {
@@ -366,6 +372,63 @@ impl<V: View + ?Sized> View for &mut V {
     fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
         (**self).accessibility_action(request)
     }
+    fn take_requests(&mut self) -> Vec<WindowRequest> {
+        (**self).take_requests()
+    }
+}
+
+impl<V: View + ?Sized> View for Box<V> {
+    fn paint(&mut self, scene: &mut Scene, size: Size) {
+        (**self).paint(scene, size);
+    }
+    fn opened(&mut self, gpu: &GpuInfo) {
+        (**self).opened(gpu);
+    }
+    fn input(&mut self, input: &Input) -> bool {
+        (**self).input(input)
+    }
+    fn presented(&mut self, frame: &FrameInfo) -> bool {
+        (**self).presented(frame)
+    }
+    fn wake_at(&mut self) -> Option<Instant> {
+        (**self).wake_at()
+    }
+    fn wake(&mut self, now: Instant) -> bool {
+        (**self).wake(now)
+    }
+    fn should_close(&mut self) -> bool {
+        (**self).should_close()
+    }
+    fn ime_area(&mut self) -> Option<Rect> {
+        (**self).ime_area()
+    }
+    fn accessibility(&mut self, tree: &mut AccessTree) {
+        (**self).accessibility(tree);
+    }
+    fn accessibility_action(&mut self, request: &accesskit::ActionRequest) -> bool {
+        (**self).accessibility_action(request)
+    }
+    fn take_requests(&mut self) -> Vec<WindowRequest> {
+        (**self).take_requests()
+    }
+}
+
+/// What a view asks of the windows (one window per document, a start
+/// window that opens a board and closes itself).
+pub enum WindowRequest {
+    /// Open another window showing this view.
+    Open(WindowOptions, Box<dyn View>),
+    /// Close this view's window. The run ends when the last one closes.
+    Close,
+}
+
+impl std::fmt::Debug for WindowRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(options, _) => f.debug_tuple("Open").field(&options.title).finish(),
+            Self::Close => f.write_str("Close"),
+        }
+    }
 }
 
 /// Events from other threads into the event loop.
@@ -385,7 +448,7 @@ impl From<accesskit_winit::Event> for UserEvent {
 /// What a run of the window did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunStats {
-    /// Frames presented.
+    /// Frames presented (by the first window).
     pub frames: u64,
     /// From the call to [`run`] until the first frame was presented.
     pub first_frame: Option<Duration>,
@@ -450,17 +513,18 @@ pub fn scale_factor() -> f64 {
     SCALE_FACTOR.with(Cell::get)
 }
 
-/// Asks for a frame of the current thread's window. Effects call this when
-/// what they show changed; the request is collected before the event loop
-/// goes back to sleep.
+/// Asks for a frame of the current thread's windows. Effects call this
+/// when what they show changed; the request is collected before the event
+/// loop goes back to sleep.
 pub fn request_frame() {
     FRAME_REQUESTED.with(|requested| requested.set(true));
 }
 
 /// Opens a window showing `view` and runs until it is closed (by the user
-/// or [`View::should_close`]). Blocks the calling thread, which must be the
-/// main thread on some platforms. Pass `&mut view` to keep the view.
-pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError> {
+/// or [`View::should_close`]) and every window it opened is closed too.
+/// Blocks the calling thread, which must be the main thread on some
+/// platforms. Pass `&mut view` to keep the view.
+pub fn run<'v>(options: WindowOptions, view: impl View + 'v) -> Result<RunStats, UiError> {
     let gpu = GpuStart::spawn(&options.gpu);
     run_with_gpu(gpu, options, view)
 }
@@ -468,10 +532,10 @@ pub fn run(options: WindowOptions, view: impl View) -> Result<RunStats, UiError>
 /// [`run`], on a GPU that started opening earlier: call
 /// [`GpuStart::spawn`] first thing, so the drivers load while the program
 /// loads fonts and builds its view. Its options replace `options.gpu`.
-pub fn run_with_gpu(
+pub fn run_with_gpu<'v>(
     gpu: GpuStart,
     options: WindowOptions,
-    view: impl View,
+    view: impl View + 'v,
 ) -> Result<RunStats, UiError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -483,24 +547,12 @@ pub fn run_with_gpu(
         let _ = waker.send_event(UserEvent::Pasted);
     });
     let mut shell = Shell {
-        options,
-        view,
-        window: None,
-        renderer: None,
+        windows: std::collections::HashMap::new(),
+        pending: vec![(options, Box::new(view) as Box<dyn View + 'v>)],
+        first: None,
+        focused: None,
         gpu: Some(gpu),
-        causes: FrameCauses::default(),
-        scene: Scene::new(),
-        scale: 1.0,
-        physical: PhysicalSize::new(0, 0),
-        pointer: Point::ZERO,
-        modifiers: Modifiers::default(),
-        clicks: ClickCounter::default(),
-        ime: None,
         proxy,
-        access: None,
-        occluded: false,
-        retry_at: None,
-        ime_resend: false,
         started: Instant::now(),
         stats: RunStats::default(),
         error: None,
@@ -514,13 +566,12 @@ pub fn run_with_gpu(
     }
 }
 
-struct Shell<V> {
+/// One window: its view and what drawing and input need of it.
+struct WindowState<'v> {
     options: WindowOptions,
-    view: V,
-    window: Option<Arc<Window>>,
+    view: Box<dyn View + 'v>,
+    window: Arc<Window>,
     renderer: Option<WindowRenderer>,
-    /// The GPU opening meanwhile, until the first frame takes it.
-    gpu: Option<GpuStart>,
     /// Why the next frame is drawn.
     causes: FrameCauses,
     scene: Scene,
@@ -534,9 +585,8 @@ struct Shell<V> {
     /// The input method's state as last told to the window: `None` off,
     /// otherwise on with this caret area.
     ime: Option<Rect>,
-    proxy: EventLoopProxy<UserEvent>,
     /// The screen reader bridge; idle until a screen reader asks.
-    access: Option<accesskit_winit::Adapter>,
+    access: accesskit_winit::Adapter,
     /// The last frame was skipped because the window is hidden: draw again
     /// when it shows (or something else asks), not in a loop.
     occluded: bool,
@@ -545,17 +595,29 @@ struct Shell<V> {
     /// Send the input method's caret area even if it looks unchanged (the
     /// scale factor changed, and with it the physical position).
     ime_resend: bool,
+    frames: u64,
+    /// It asked to close (or the user did).
+    closing: bool,
+}
+
+/// The event loop's state: every window, and the GPU they share.
+struct Shell<'v> {
+    windows: std::collections::HashMap<WindowId, WindowState<'v>>,
+    /// Windows asked for, opened at the next chance.
+    pending: Vec<(WindowOptions, Box<dyn View + 'v>)>,
+    /// The window opened first, whose start the statistics measure.
+    first: Option<WindowId>,
+    /// The window with the keyboard (pasted text goes there).
+    focused: Option<WindowId>,
+    /// The GPU opening meanwhile, until the first frame takes it.
+    gpu: Option<GpuStart>,
+    proxy: EventLoopProxy<UserEvent>,
     started: Instant,
     stats: RunStats,
     error: Option<UiError>,
 }
 
-impl<V: View> Shell<V> {
-    fn fail(&mut self, event_loop: &ActiveEventLoop, err: UiError) {
-        self.error = Some(err);
-        event_loop.exit();
-    }
-
+impl WindowState<'_> {
     fn request_redraw(&mut self, cause: Cause) {
         match cause {
             Cause::Resize => self.causes.resize = true,
@@ -564,21 +626,13 @@ impl<V: View> Shell<V> {
             Cause::Request => self.causes.request = true,
             Cause::Access => self.causes.access = true,
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.window.request_redraw();
     }
 
-    /// Notes the monitor the window is on, for the statistics. Wayland
-    /// knows it only once the window is shown, so this follows resizes.
-    fn note_monitor(&mut self) {
-        if let Some(monitor) = self
-            .window
-            .as_ref()
-            .and_then(|window| window.current_monitor())
-        {
-            self.stats.monitor = Some(MonitorInfo::of(&monitor));
-        }
+    fn monitor(&self) -> Option<MonitorInfo> {
+        self.window
+            .current_monitor()
+            .map(|monitor| MonitorInfo::of(&monitor))
     }
 
     fn logical(&self, position: PhysicalPosition<f64>) -> Point {
@@ -587,23 +641,20 @@ impl<V: View> Shell<V> {
 
     /// Tells the window whether a text field has the focus and where its
     /// caret is, when that changed.
-    fn update_ime(&mut self) {
-        let Some(window) = &self.window else {
-            return;
-        };
+    fn update_ime(&mut self, reset: bool) {
         let area = self.view.ime_area();
-        if IME_RESET.with(|reset| reset.replace(false)) && self.ime.is_some() {
-            window.set_ime_allowed(false);
+        if reset && self.ime.is_some() {
+            self.window.set_ime_allowed(false);
             self.ime = None;
         }
         if area == self.ime && !std::mem::take(&mut self.ime_resend) {
             return;
         }
         if area.is_some() != self.ime.is_some() {
-            window.set_ime_allowed(area.is_some());
+            self.window.set_ime_allowed(area.is_some());
         }
         if let Some(area) = area {
-            window.set_ime_cursor_area(
+            self.window.set_ime_cursor_area(
                 LogicalPosition::new(area.x0, area.y0),
                 LogicalSize::new(area.width(), area.height()),
             );
@@ -613,11 +664,8 @@ impl<V: View> Shell<V> {
 
     /// Sends the view's accessibility tree, if a screen reader listens.
     fn update_access(&mut self) {
-        let Some(adapter) = &mut self.access else {
-            return;
-        };
         let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
-        adapter.update_if_active(|| {
+        self.access.update_if_active(|| {
             let mut tree = AccessTree::default();
             view.accessibility(&mut tree);
             tree.into_update(title, scale)
@@ -629,120 +677,42 @@ impl<V: View> Shell<V> {
             self.request_redraw(Cause::Input);
         }
     }
-
-    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(window) = self.window.clone() else {
-            return;
-        };
-        let start = Instant::now();
-        let physical = self.physical;
-        let size = Size::new(
-            f64::from(physical.width) / self.scale,
-            f64::from(physical.height) / self.scale,
-        );
-        self.scene.clear();
-        SCALE_FACTOR.with(|scale| scale.set(self.scale));
-        self.view.paint(&mut self.scene, size);
-        let paint = start.elapsed();
-        if self.renderer.is_none() {
-            let gpu = self
-                .gpu
-                .take()
-                .unwrap_or_else(|| GpuStart::spawn(&self.options.gpu));
-            let opening = Instant::now();
-            match WindowRenderer::with_start(gpu, window.clone(), physical.width, physical.height) {
-                Ok(renderer) => {
-                    self.stats.gpu_opened = Some(opening.elapsed());
-                    self.stats.gpu_startup = Some(*renderer.startup());
-                    self.stats.gpu = Some(renderer.info().clone());
-                    self.view.opened(renderer.info());
-                    self.renderer = Some(renderer);
-                    // The view learned about the GPU after this frame's
-                    // layout: one more frame shows what it does with it.
-                    self.request_redraw(Cause::Request);
-                }
-                Err(err) => return self.fail(event_loop, err.into()),
-            }
-        }
-        let Some(renderer) = &mut self.renderer else {
-            return;
-        };
-        let outcome = renderer.render(
-            &self.scene,
-            self.options.background,
-            Affine::scale(self.scale),
-        );
-        let render = match outcome {
-            Ok(FrameOutcome::Presented(timing)) => timing,
-            // The causes stay: the frame that is drawn counts them.
-            Ok(FrameOutcome::Skipped(skip)) => {
-                match skip {
-                    Skip::Reconfigured => window.request_redraw(),
-                    Skip::Lost => match renderer.recreate_surface(window.clone()) {
-                        Ok(()) => window.request_redraw(),
-                        Err(err) => self.fail(event_loop, err.into()),
-                    },
-                    // Asking again at once would spin while it's minimized
-                    // (winit delivers redraws to hidden windows too).
-                    Skip::Occluded => self.occluded = true,
-                    Skip::Timeout => self.retry_at = Some(Instant::now() + RETRY_AFTER_TIMEOUT),
-                }
-                return;
-            }
-            Err(err) => {
-                self.fail(event_loop, err.into());
-                return;
-            }
-        };
-        self.occluded = false;
-        self.stats.frames += 1;
-        let mut causes = std::mem::take(&mut self.causes);
-        if causes == FrameCauses::default() {
-            causes.system = true;
-        }
-        let now = Instant::now();
-        if self.stats.first_frame.is_none() {
-            self.stats.first_frame = Some(now - self.started);
-            self.note_monitor();
-        }
-        let frame = FrameInfo {
-            number: self.stats.frames,
-            paint,
-            render,
-            at: now - self.started,
-            scale: self.scale,
-            physical_size: (physical.width, physical.height),
-            causes,
-        };
-        if self.view.presented(&frame) {
-            self.request_redraw(Cause::Request);
-        }
-        // What is on screen changed: tell the screen reader.
-        self.update_access();
-    }
 }
 
-impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
+impl<'v> Shell<'v> {
+    fn fail(&mut self, event_loop: &ActiveEventLoop, err: UiError) {
+        self.error = Some(err);
+        event_loop.exit();
+    }
+
+    /// Opens the windows asked for.
+    fn open_pending(&mut self, event_loop: &ActiveEventLoop) {
+        for (options, view) in std::mem::take(&mut self.pending) {
+            if let Err(err) = self.open(event_loop, options, view) {
+                return self.fail(event_loop, err);
+            }
         }
+    }
+
+    fn open(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        options: WindowOptions,
+        view: Box<dyn View + 'v>,
+    ) -> Result<(), UiError> {
         // Invisible until the accessibility adapter is attached, as
         // AccessKit requires (on Windows and macOS).
         let attributes = Window::default_attributes()
             .with_visible(false)
-            .with_title(self.options.title.clone())
-            .with_inner_size(LogicalSize::new(
-                self.options.size.width,
-                self.options.size.height,
-            ))
+            .with_title(options.title.clone())
+            .with_inner_size(LogicalSize::new(options.size.width, options.size.height))
             .with_fullscreen(
-                self.options
+                options
                     .fullscreen
                     .then_some(winit::window::Fullscreen::Borderless(None)),
             );
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
-        let attributes = match &self.options.app_id {
+        let attributes = match &options.app_id {
             Some(app_id) => {
                 use winit::platform::{wayland, x11};
                 let attributes =
@@ -752,100 +722,285 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
             None => attributes,
         };
         let creating = Instant::now();
-        let window = match event_loop.create_window(attributes) {
-            Ok(window) => Arc::new(window),
-            Err(err) => return self.fail(event_loop, UiError::Window(err.to_string())),
-        };
-        self.stats.window_created = Some(creating.elapsed());
-        self.scale = window.scale_factor();
-        self.physical = window.inner_size();
+        let window = event_loop
+            .create_window(attributes)
+            .map(Arc::new)
+            .map_err(|err| UiError::Window(err.to_string()))?;
+        let id = window.id();
+        if self.first.is_none() {
+            self.first = Some(id);
+            self.stats.window_created = Some(creating.elapsed());
+        }
         // The renderer comes with the first frame, after its layout: the
         // GPU keeps opening meanwhile.
-        self.access = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+        let access = accesskit_winit::Adapter::with_event_loop_proxy(
             event_loop,
             &window,
             self.proxy.clone(),
-        ));
+        );
         window.set_visible(true);
         window.request_redraw();
-        self.window = Some(window);
+        let state = WindowState {
+            options,
+            view,
+            scale: window.scale_factor(),
+            physical: window.inner_size(),
+            window,
+            renderer: None,
+            causes: FrameCauses::default(),
+            scene: Scene::new(),
+            pointer: Point::ZERO,
+            modifiers: Modifiers::default(),
+            clicks: ClickCounter::default(),
+            ime: None,
+            access,
+            occluded: false,
+            retry_at: None,
+            ime_resend: false,
+            frames: 0,
+            closing: false,
+        };
+        self.windows.insert(id, state);
+        self.focused.get_or_insert(id);
+        Ok(())
+    }
+
+    /// The windows' requests: windows to open, and windows to close.
+    fn handle_requests(&mut self) {
+        for state in self.windows.values_mut() {
+            for request in state.view.take_requests() {
+                match request {
+                    WindowRequest::Open(options, view) => self.pending.push((options, view)),
+                    WindowRequest::Close => state.closing = true,
+                }
+            }
+            if state.view.should_close() {
+                state.closing = true;
+            }
+        }
+    }
+
+    /// A renderer for `id`: the GPU opening since the start for the first
+    /// window, a sibling of another window's for the next ones.
+    fn renderer_for(&mut self, id: WindowId) -> Result<WindowRenderer, UiError> {
+        let Some(state) = self.windows.get(&id) else {
+            return Err(UiError::Window("no such window".into()));
+        };
+        let (window, physical) = (state.window.clone(), state.physical);
+        if let Some(other) = self
+            .windows
+            .values()
+            .find_map(|other| other.renderer.as_ref())
+        {
+            return Ok(other.sibling(window, physical.width, physical.height)?);
+        }
+        let gpu = self
+            .gpu
+            .take()
+            .unwrap_or_else(|| GpuStart::spawn(&state.options.gpu));
+        Ok(WindowRenderer::with_start(
+            gpu,
+            window,
+            physical.width,
+            physical.height,
+        )?)
+    }
+
+    fn redraw(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
+        let start = Instant::now();
+        let Some(state) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let physical = state.physical;
+        let size = Size::new(
+            f64::from(physical.width) / state.scale,
+            f64::from(physical.height) / state.scale,
+        );
+        state.scene.clear();
+        SCALE_FACTOR.with(|scale| scale.set(state.scale));
+        state.view.paint(&mut state.scene, size);
+        let paint = start.elapsed();
+        if state.renderer.is_none() {
+            let opening = Instant::now();
+            let renderer = match self.renderer_for(id) {
+                Ok(renderer) => renderer,
+                Err(err) => return self.fail(event_loop, err),
+            };
+            let first = self.first == Some(id);
+            if first {
+                self.stats.gpu_opened = Some(opening.elapsed());
+                self.stats.gpu_startup = Some(*renderer.startup());
+                self.stats.gpu = Some(renderer.info().clone());
+            }
+            let Some(state) = self.windows.get_mut(&id) else {
+                return;
+            };
+            state.view.opened(renderer.info());
+            state.renderer = Some(renderer);
+            // The view learned about the GPU after this frame's layout:
+            // one more frame shows what it does with it.
+            state.request_redraw(Cause::Request);
+        }
+        let Some(state) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let Some(renderer) = &mut state.renderer else {
+            return;
+        };
+        let outcome = renderer.render(
+            &state.scene,
+            state.options.background,
+            Affine::scale(state.scale),
+        );
+        let render = match outcome {
+            Ok(FrameOutcome::Presented(timing)) => timing,
+            // The causes stay: the frame that is drawn counts them.
+            Ok(FrameOutcome::Skipped(skip)) => {
+                match skip {
+                    Skip::Reconfigured => state.window.request_redraw(),
+                    Skip::Lost => match renderer.recreate_surface(state.window.clone()) {
+                        Ok(()) => state.window.request_redraw(),
+                        Err(err) => self.fail(event_loop, err.into()),
+                    },
+                    // Asking again at once would spin while it's minimized
+                    // (winit delivers redraws to hidden windows too).
+                    Skip::Occluded => state.occluded = true,
+                    Skip::Timeout => state.retry_at = Some(Instant::now() + RETRY_AFTER_TIMEOUT),
+                }
+                return;
+            }
+            Err(err) => {
+                self.fail(event_loop, err.into());
+                return;
+            }
+        };
+        state.occluded = false;
+        state.frames += 1;
+        let mut causes = std::mem::take(&mut state.causes);
+        if causes == FrameCauses::default() {
+            causes.system = true;
+        }
+        let now = Instant::now();
+        if self.first == Some(id) {
+            self.stats.frames = state.frames;
+            if self.stats.first_frame.is_none() {
+                self.stats.first_frame = Some(now - self.started);
+                self.stats.monitor = state.monitor().or(self.stats.monitor.take());
+            }
+        }
+        let frame = FrameInfo {
+            number: state.frames,
+            paint,
+            render,
+            at: now - self.started,
+            scale: state.scale,
+            physical_size: (physical.width, physical.height),
+            causes,
+        };
+        if state.view.presented(&frame) {
+            state.request_redraw(Cause::Request);
+        }
+        // What is on screen changed: tell the screen reader.
+        state.update_access();
+    }
+}
+
+impl ApplicationHandler<UserEvent> for Shell<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.open_pending(event_loop);
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::Access(event) => event,
             UserEvent::Pasted => {
-                for text in crate::clipboard::take_pasted() {
-                    self.deliver(Input::Paste(text));
+                // Pasted text goes where the keys are.
+                let target = self.focused.and_then(|id| self.windows.get_mut(&id));
+                if let Some(state) = target {
+                    for text in crate::clipboard::take_pasted() {
+                        state.deliver(Input::Paste(text));
+                    }
                 }
                 return;
             }
         };
+        let Some(state) = self.windows.get_mut(&event.window_id) else {
+            return;
+        };
         match event.window_event {
-            accesskit_winit::WindowEvent::InitialTreeRequested => self.update_access(),
+            accesskit_winit::WindowEvent::InitialTreeRequested => state.update_access(),
             accesskit_winit::WindowEvent::ActionRequested(request) => {
-                if self.view.accessibility_action(&request) {
-                    self.request_redraw(Cause::Access);
+                if state.view.accessibility_action(&request) {
+                    state.request_redraw(Cause::Access);
                 }
-                self.update_access();
+                state.update_access();
             }
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        if let (Some(access), Some(window)) = (&mut self.access, &self.window) {
-            access.process_event(window, &event);
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if matches!(event, WindowEvent::RedrawRequested) {
+            return self.redraw(event_loop, id);
         }
+        let Some(state) = self.windows.get_mut(&id) else {
+            return;
+        };
+        state.access.process_event(&state.window, &event);
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => state.closing = true,
             WindowEvent::Resized(size) => {
                 // Compositors repeat the size (Hyprland on focus changes):
                 // nothing to draw then.
-                if size == self.physical {
+                if size == state.physical {
                     return;
                 }
-                self.physical = size;
-                if let Some(renderer) = &mut self.renderer {
+                state.physical = size;
+                if let Some(renderer) = &mut state.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                self.note_monitor();
-                self.request_redraw(Cause::Resize);
+                if self.first == Some(id) {
+                    self.stats.monitor = state.monitor().or(self.stats.monitor.take());
+                }
+                state.request_redraw(Cause::Resize);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // A move to a monitor with another scale (criterion 5). The
                 // new physical size follows as a `Resized` event.
-                self.scale = scale_factor;
-                self.ime_resend = true;
-                self.note_monitor();
-                self.request_redraw(Cause::Resize);
+                state.scale = scale_factor;
+                state.ime_resend = true;
+                state.request_redraw(Cause::Resize);
             }
-            WindowEvent::Occluded(false) if self.occluded => {
-                self.occluded = false;
-                self.request_redraw(Cause::Resize);
+            WindowEvent::Occluded(false) if state.occluded => {
+                state.occluded = false;
+                state.request_redraw(Cause::Resize);
             }
-            WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = self.logical(position);
-                self.deliver(Input::PointerMoved(self.pointer));
+                state.pointer = state.logical(position);
+                let at = state.pointer;
+                state.deliver(Input::PointerMoved(at));
             }
-            WindowEvent::CursorLeft { .. } => self.deliver(Input::PointerLeft),
+            WindowEvent::CursorLeft { .. } => state.deliver(Input::PointerLeft),
             // The left button is `primary`; `primary: false` is the right
             // one. The others (middle, back, forward) aren't delivered yet,
             // so they don't open context menus.
             WindowEvent::MouseInput { button, .. }
                 if !matches!(button, MouseButton::Left | MouseButton::Right) => {}
-            WindowEvent::MouseInput { state, button, .. } => {
-                let pressed = state == ElementState::Pressed;
-                let clicks = self.clicks.count(button, pressed, self.pointer);
+            WindowEvent::MouseInput {
+                state: pressed,
+                button,
+                ..
+            } => {
+                let pressed = pressed == ElementState::Pressed;
+                let clicks = state.clicks.count(button, pressed, state.pointer);
                 let input = Input::PointerButton {
                     primary: button == MouseButton::Left,
                     pressed,
-                    position: self.pointer,
+                    position: state.pointer,
                     clicks,
-                    modifiers: self.modifiers,
+                    modifiers: state.modifiers,
                 };
-                self.deliver(input);
+                state.deliver(input);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = match delta {
@@ -853,27 +1008,27 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                     MouseScrollDelta::LineDelta(x, y) => {
                         Vec2::new(f64::from(x), f64::from(y)) * 48.0
                     }
-                    MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x, p.y) / self.scale,
+                    MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x, p.y) / state.scale,
                 };
                 let input = Input::Scroll {
                     delta,
-                    position: self.pointer,
-                    modifiers: self.modifiers,
+                    position: state.pointer,
+                    modifiers: state.modifiers,
                 };
-                self.deliver(input);
+                state.deliver(input);
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                let state = modifiers.state();
-                self.modifiers = Modifiers {
-                    shift: state.shift_key(),
-                    ctrl: state.control_key(),
-                    alt: state.alt_key(),
-                    meta: state.super_key(),
+                let keys = modifiers.state();
+                state.modifiers = Modifiers {
+                    shift: keys.shift_key(),
+                    ctrl: keys.control_key(),
+                    alt: keys.alt_key(),
+                    meta: keys.super_key(),
                 };
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let input = key_input(&event, self.modifiers);
-                self.deliver(input);
+                let input = key_input(&event, state.modifiers);
+                state.deliver(input);
             }
             WindowEvent::Ime(ime) => {
                 let ime = match ime {
@@ -882,14 +1037,16 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                     winit::event::Ime::Commit(text) => Ime::Commit(text),
                     winit::event::Ime::Disabled => Ime::Disabled,
                 };
-                self.deliver(Input::Ime(ime));
+                state.deliver(Input::Ime(ime));
             }
             WindowEvent::Focused(focused) => {
-                if !focused {
+                if focused {
+                    self.focused = Some(id);
+                } else {
                     // Keys released elsewhere never reach us.
-                    self.modifiers = Modifiers::default();
+                    state.modifiers = Modifiers::default();
                 }
-                self.deliver(Input::WindowFocus(focused));
+                state.deliver(Input::WindowFocus(focused));
             }
             _ => {}
         }
@@ -897,35 +1054,53 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if self.retry_at.is_some_and(|at| at <= now) {
-            self.retry_at = None;
-            if let Some(window) = &self.window {
-                window.request_redraw();
+        let requested = FRAME_REQUESTED.with(|requested| requested.replace(false));
+        let mut wake_at: Option<Instant> = None;
+        for state in self.windows.values_mut() {
+            if state.retry_at.is_some_and(|at| at <= now) {
+                state.retry_at = None;
+                state.window.request_redraw();
+            }
+            let mut wake = state.view.wake_at();
+            if wake.is_some_and(|at| at <= now) {
+                if state.view.wake(now) {
+                    state.request_redraw(Cause::Timer);
+                }
+                wake = state.view.wake_at().filter(|at| *at > now);
+            }
+            for at in [wake, state.retry_at].into_iter().flatten() {
+                wake_at = Some(wake_at.map_or(at, |soonest| soonest.min(at)));
             }
         }
-        let mut wake_at = self.view.wake_at();
-        if wake_at.is_some_and(|at| at <= now) {
-            if self.view.wake(now) {
-                self.request_redraw(Cause::Timer);
+        // After the timers, which may have asked for a frame too. Which
+        // window's content asked isn't known: they all draw (one that
+        // didn't change draws the same).
+        if requested || FRAME_REQUESTED.with(|requested| requested.replace(false)) {
+            for state in self.windows.values_mut() {
+                state.request_redraw(Cause::Request);
             }
-            wake_at = self.view.wake_at().filter(|at| *at > now);
         }
-        // After the timer, which may have asked for a frame too.
-        if FRAME_REQUESTED.with(|requested| requested.replace(false)) {
-            self.request_redraw(Cause::Request);
+        // Windows to open or close, after the timers: one may have ended
+        // a scripted run.
+        self.handle_requests();
+        self.windows.retain(|_, state| !state.closing);
+        if self
+            .focused
+            .is_some_and(|id| !self.windows.contains_key(&id))
+        {
+            self.focused = self.windows.keys().next().copied();
         }
-        // After the timer: it may have ended a scripted run.
-        if self.view.should_close() {
+        self.open_pending(event_loop);
+        if self.windows.is_empty() {
             event_loop.exit();
             return;
         }
-        self.update_ime();
-        // Sleep until input arrives or the view's timer runs out: nothing
-        // is drawn unless something changed (gate criterion 6).
-        let wake_at = match (wake_at, self.retry_at) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let reset = IME_RESET.with(|reset| reset.replace(false));
+        if let Some(state) = self.focused.and_then(|id| self.windows.get_mut(&id)) {
+            state.update_ime(reset);
+        }
+        // Sleep until input arrives or a view's timer runs out: nothing is
+        // drawn unless something changed (gate criterion 6).
         event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
