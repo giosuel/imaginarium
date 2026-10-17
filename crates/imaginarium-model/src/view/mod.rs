@@ -42,6 +42,7 @@ pub struct MetaView {
     pub(crate) language: Option<Arc<str>>,
     pub(crate) created: Option<i64>,
     pub(crate) required_features: Vec<String>,
+    pub(crate) settings: Props,
     pub(crate) other: Props,
 }
 
@@ -74,6 +75,12 @@ impl MetaView {
     /// Features needed to edit (schema-v1.md §10.2).
     pub fn required_features(&self) -> &[String] {
         &self.required_features
+    }
+
+    /// The document's own setting values (`meta.settings`), by setting
+    /// key (`board.background`); settings not listed follow the user's.
+    pub fn settings(&self) -> &Props {
+        &self.settings
     }
 
     /// Keys this version doesn't interpret.

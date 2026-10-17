@@ -57,6 +57,10 @@ pub struct SettingMeta {
     pub synonyms: &'static [&'static str],
     /// Hidden behind "Show advanced" in the UI.
     pub advanced: bool,
+    /// A document can have its own value ("This board"), stored in the
+    /// document; the setting's own value is the default for documents
+    /// without one.
+    pub per_document: bool,
 }
 
 /// Custom validation hook: returns a user-facing message on failure.
@@ -121,6 +125,7 @@ impl<T> Setting<T> {
                 group: "",
                 synonyms: &[],
                 advanced: false,
+                per_document: false,
             },
             constraint: Constraint::None,
             validator: None,
@@ -143,6 +148,13 @@ impl<T> Setting<T> {
     /// Hides the setting behind "Show advanced".
     pub const fn advanced(mut self) -> Self {
         self.meta.advanced = true;
+        self
+    }
+
+    /// Lets a document have its own value ([`SettingMeta::per_document`]).
+    /// Not for lists or secrets: registering one is an error.
+    pub const fn per_document(mut self) -> Self {
+        self.meta.per_document = true;
         self
     }
 

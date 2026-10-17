@@ -33,6 +33,13 @@ pub(crate) enum Command {
         style: Stroke,
         color: Color,
     },
+    /// A soft shadow: a rounded rectangle blurred by a Gaussian.
+    Shadow {
+        rect: Rect,
+        radius: f32,
+        std_dev: f32,
+        color: Color,
+    },
     /// A clip to an axis-aligned rectangle (in the current transform).
     PushClipRect(Rect),
     PushClip(BezPath),
@@ -210,11 +217,33 @@ impl Scene {
         }
     }
 
+    /// A soft shadow: `rect` with corners of `radius`, blurred by a
+    /// Gaussian of standard deviation `std_dev` (half a CSS blur radius),
+    /// in `color`.
+    pub fn shadow(&mut self, rect: Rect, radius: f64, std_dev: f64, color: impl Into<Color>) {
+        self.commands.push(Command::Shadow {
+            rect,
+            radius: radius as f32,
+            std_dev: std_dev.max(0.0) as f32,
+            color: color.into(),
+        });
+    }
+
     /// Strokes the outline of `shape`, `width` wide.
     pub fn stroke(&mut self, shape: &impl Shape, width: f64, color: impl Into<Color>) {
         self.commands.push(Command::Stroke {
             path: shape.to_path(PATH_TOLERANCE),
             style: Stroke::new(width),
+            color: color.into(),
+        });
+    }
+
+    /// Strokes the outline of `shape` with a full stroke style (caps,
+    /// joins, dashes), as line icons need.
+    pub fn stroke_with(&mut self, shape: &impl Shape, style: &Stroke, color: impl Into<Color>) {
+        self.commands.push(Command::Stroke {
+            path: shape.to_path(PATH_TOLERANCE),
+            style: style.clone(),
             color: color.into(),
         });
     }
@@ -433,6 +462,7 @@ pub(crate) trait Sink {
     fn set_transform(&mut self, transform: Affine);
     fn set_color(&mut self, color: Color);
     fn fill_rect(&mut self, rect: &Rect);
+    fn fill_blurred(&mut self, rect: &Rect, radius: f32, std_dev: f32);
     fn fill_path(&mut self, path: &BezPath);
     fn stroke_path(&mut self, path: &BezPath, style: &Stroke);
     fn push_clip_rect(&mut self, rect: &Rect);
@@ -511,6 +541,15 @@ pub(crate) fn replay(scene: &Scene, sink: &mut impl Sink, base: Affine) {
             Command::Fill { path, color } => {
                 sink.set_color(*color);
                 sink.fill_path(path);
+            }
+            Command::Shadow {
+                rect,
+                radius,
+                std_dev,
+                color,
+            } => {
+                sink.set_color(*color);
+                sink.fill_blurred(rect, *radius, *std_dev);
             }
             Command::Stroke { path, style, color } => {
                 sink.set_color(*color);
@@ -605,6 +644,10 @@ macro_rules! impl_sink {
             }
             fn fill_rect(&mut self, rect: &Rect) {
                 self.context.fill_rect(rect);
+            }
+            fn fill_blurred(&mut self, rect: &Rect, radius: f32, std_dev: f32) {
+                self.context
+                    .fill_blurred_rounded_rect(rect, radius, std_dev, false);
             }
             fn fill_path(&mut self, path: &BezPath) {
                 self.context.fill_path(path);

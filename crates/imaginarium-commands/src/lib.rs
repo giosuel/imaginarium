@@ -56,4 +56,4 @@ pub use error::CommandError;
 pub use id::CommandId;
 pub use keymap::{Key, KeyPress, Keymap, Modifiers, Platform, Shortcut};
 pub use registry::Registry;
-pub use search::{SearchHit, SearchIndex, Usage, UsageStats};
+pub use search::{Explanation, SearchHit, SearchIndex, Usage, UsageStats};

@@ -23,9 +23,15 @@
 //!   chains) come with the app (M2) and collaboration (M8).
 #![forbid(unsafe_code)]
 
+mod autosave;
 mod error;
+mod kept;
+mod session;
 
+pub use autosave::{Autosave, Compact, RETRY_AFTER, SNAPSHOT_AFTER, SaveState, Storage};
 pub use error::{NativeError, Result};
+pub use kept::{KeptBoard, kept_boards};
+pub use session::{CANT_WRITE, FileId, IN_USE, Opening, Session};
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
