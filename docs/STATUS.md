@@ -11,8 +11,11 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.5 part 2, the Settings window** (below). Part 1,
-  the settings file, is done (2026-10-17). M3.4 is done (2026-10-17), in
+- **Next step:** **M3.5 part 3, M3's settings applied at once** (below):
+  theme, accent, reduce motion and board background, with the mockup's
+  theme cards and swatches. Parts 1 (the settings file,
+  https://github.com/giosuel/imaginarium/pull/61) and 2 (the Settings
+  window) are done (2026-10-17). M3.4 is done (2026-10-17), in
   six parts, each reviewed by a fresh agent and stacked: the board window
   (https://github.com/giosuel/imaginarium/pull/56), the command palette
   (https://github.com/giosuel/imaginarium/pull/57), the contextual
@@ -1106,8 +1109,9 @@ What M3 builds on:
   - [x] **part 1, the settings file** (2026-10-17, `shell.md` §5 "As
     built"): read at startup, written after every change on a thread of
     its own, an unreadable file moved aside instead of overwritten;
-  - part 2, the Settings window (`Ctrl+,`): sections, search, an editor
-    for every kind of value, Changed and Reset;
+  - [x] **part 2, the Settings window** (2026-10-17, `shell.md` §5 "As
+    built"): `Ctrl+,`, sections, search, an editor for every kind of
+    value, Changed and Reset, the keyboard shortcuts (to read);
   - part 3, M3's settings applied at once (theme, accent, reduce motion,
     board background) with the mockup's editors;
   - part 4, the This board scope, stored in the document;

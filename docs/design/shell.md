@@ -407,8 +407,38 @@ can't read are kept (`persist.rs`). A file that can't be read at all
 `settings.toml.unreadable-<seconds>` and the defaults are used; if it
 can't be moved, nothing is saved that session, so the user's file is
 never overwritten (`Registry::open_file`). For now these notices go to
-standard error; the Settings window shows them (part 2). Two instances of
-the app write the same file: the last save wins.
+standard error, and the Settings window shows them. Two instances of the
+app write the same file: the last save wins.
+
+**As built (M3.5, the Settings window).** `SettingsWindow` in
+`imaginarium-shell`, 1120 × 720, opened with `Ctrl+,` (`settings.open`)
+from a board or the start window (whose Settings and Shortcuts links
+open it), one at a time:
+- **Sidebar:** a search field, then the sections. A setting's section
+  follows its group (`.group("appearance")`, else its key's first
+  segment: `ui` → Appearance, `board`/`canvas` → Board, `files` → Files
+  and saving, others → General); advanced settings go to Advanced.
+- **Rows** (generated from the registry): title, a "Changed" badge and a
+  reset button when the value isn't the default, the description, and an
+  editor chosen by the value's kind: a switch (bool), a segmented control
+  (an enum of up to three values), a dropdown (more values, or a numeric
+  range of at most 16 steps), a text field (numbers, text, paths, lists
+  as comma-separated items; it keeps its value on Enter or when the focus
+  leaves, and says why a value was refused), a swatch and hex field
+  (colors), and the keychain entry's name (secrets, edited with M6).
+  Changes apply at once and are saved (above); a change from elsewhere
+  (the palette, another window) shows at once.
+- **Search:** every word in the title, description, synonyms or key;
+  the results are grouped by section, shortcuts included.
+- **Keyboard shortcuts** lists the board's and the windows' commands with
+  their keys; changing them comes later.
+- A notice above the settings when saving fails or the file was
+  unreadable.
+- **Not yet:** the scope tabs For me and This board (part 4), the
+  mockup's theme cards and accent swatches (part 3, with the settings
+  they edit), ↑↓ in a dropdown's list (Tab moves through it), and
+  bringing an open Settings window to the front (`Ctrl+,` does nothing
+  while it is open).
 
 ## 6. Layers, popovers and focus
 
