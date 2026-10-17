@@ -438,7 +438,10 @@ Esc and **Cancel** keep the window. **Don't save** closes it and its
 recovery file goes. **Save…** is Save… (part 3); the window closes once
 the board is in its place, and stays if the save dialog is cancelled or
 the save fails. A board whose file fails is written fresh in the new
-place (its old file lacks the last changes).
+place (its old file lacks the last changes); if that fails too, it is
+kept for recovery from then on. While the dialog asks, the keys are its
+own: no shortcut, menu or board behind it, and a key it has no use for
+leaves them on Save….
 
 ## 4. The start window
 
