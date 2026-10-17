@@ -840,6 +840,12 @@ impl BoardCanvas {
         }
     }
 
+    /// Whether `node` is locked, by itself or by a frame or group it is
+    /// in: commands leave it alone.
+    pub fn is_locked(&self, node: NodeId) -> bool {
+        crate::hit::locked(self.document.view(), node)
+    }
+
     /// A number that changes whenever the document does (local edits,
     /// undo, remote changes): panels compare it to skip work when nothing
     /// changed.

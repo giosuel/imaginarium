@@ -240,11 +240,8 @@ fn the_inspectors_commands_change_the_selection_in_one_step_each() {
     assert_eq!(node.name(), Some("First step"));
     assert!(node.hidden());
     assert_eq!(crate::commands_style::preset_of(node), "ellipse");
-    run(
-        &mut board,
-        "board.set_hidden",
-        Args::new().with("hidden", ArgValue::Bool(false)),
-    );
+    // A hidden node leaves the selection; Show hidden brings it back.
+    run(&mut board, "board.show_hidden", Args::new());
     assert!(
         !board
             .board()

@@ -929,7 +929,7 @@ pub fn board_commands() -> &'static [&'static FnCommand<BoardCanvas>] {
     &BOARD_COMMANDS
 }
 
-static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 60] = [
+static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 61] = [
     &COPY,
     &CUT,
     &PASTE,
@@ -990,6 +990,7 @@ static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 60] = [
     crate::commands_style::INSPECTOR_COMMANDS[4],
     crate::commands_style::INSPECTOR_COMMANDS[5],
     crate::commands_style::INSPECTOR_COMMANDS[6],
+    crate::commands_style::INSPECTOR_COMMANDS[7],
 ];
 
 /// Arguments of `text.replace`.

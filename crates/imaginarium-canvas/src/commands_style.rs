@@ -408,6 +408,13 @@ fn takes_any(_node: &NodeView) -> bool {
     true
 }
 
+/// Shapes and text: what opacity applies to (a group draws nothing of
+/// its own, and a frame's opacity would only reach its background until
+/// layers come).
+fn takes_opacity(node: &NodeView) -> bool {
+    matches!(node.kind(), NodeKind::Shape | NodeKind::Text)
+}
+
 /// Shapes: their type can change.
 fn takes_preset(node: &NodeView) -> bool {
     matches!(node.kind(), NodeKind::Shape)
@@ -430,19 +437,19 @@ pub static SET_OPACITY: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
     "style.set_opacity",
     CommandMeta::new(
         "Opacity",
-        "Set how opaque the selected nodes are, from 0 (invisible) to 1 (solid).",
+        "Set how opaque the selected shapes and text boxes are, from 0 (invisible) to 1 (solid).",
     )
     .category("Style")
     .synonyms(&["transparency", "alpha", "see-through", "deckkraft"])
     .icon("eye"),
     |board, args| {
         let opacity = args.float("opacity").unwrap_or(1.0).clamp(0.0, 1.0);
-        set(board, "style.set_opacity", takes_any, "opacity", |_| {
+        set(board, "style.set_opacity", takes_opacity, "opacity", |_| {
             Value::Number(opacity)
         })
     },
 )
-.availability(|board| available(board, takes_any))
+.availability(|board| available(board, takes_opacity))
 .args(ArgsSchema {
     args: &[ArgSpec {
         name: "opacity",
@@ -693,6 +700,48 @@ pub static SET_HIDDEN: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
     }],
 });
 
+/// `board.show_hidden`.
+pub static SHOW_HIDDEN: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "board.show_hidden",
+    CommandMeta::new(
+        "Show hidden",
+        "Show every hidden node on the board again (hidden nodes aren't drawn, clicked or selected).",
+    )
+    .category("Arrange")
+    .synonyms(&["unhide", "show all", "einblenden"])
+    .icon("eye"),
+    |board, _args| {
+        let hidden: Vec<NodeId> = {
+            let view = board.document().view();
+            view.walk()
+                .into_iter()
+                .filter(|node| view.node(*node).is_some_and(NodeView::hidden))
+                .filter(|node| !crate::hit::locked(view, *node))
+                .collect()
+        };
+        if hidden.is_empty() {
+            return Ok(Outcome::Unchanged);
+        }
+        board
+            .transact(&Actor::User, |txn| {
+                for node in &hidden {
+                    txn.set_prop(*node, "hidden", Value::Null)?;
+                }
+                Ok(())
+            })
+            .map_err(failed("board.show_hidden"))?;
+        Ok(Outcome::Done)
+    },
+)
+.availability(|board| {
+    let view = board.document().view();
+    if view.walk().into_iter().any(|node| view.node(node).is_some_and(NodeView::hidden)) {
+        Availability::Enabled
+    } else {
+        Availability::Disabled("Nothing is hidden")
+    }
+});
+
 const PRESETS: &[&str] = &["rect", "ellipse", "diamond", "triangle", "line"];
 
 /// `shape.set_preset`.
@@ -754,7 +803,8 @@ pub fn preset_of(node: &NodeView) -> String {
 }
 
 /// The inspector's commands, for [`board_commands`](crate::commands::board_commands).
-pub(crate) const INSPECTOR_COMMANDS: [&FnCommand<BoardCanvas>; 7] = [
+pub(crate) const INSPECTOR_COMMANDS: [&FnCommand<BoardCanvas>; 8] = [
+    &SHOW_HIDDEN,
     &SET_OPACITY,
     &SET_TEXT_SIZE,
     &RESET_STYLE,

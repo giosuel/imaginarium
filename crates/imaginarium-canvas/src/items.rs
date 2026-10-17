@@ -1059,6 +1059,21 @@ fn text_bounds(world: Affine, text: &ItemText) -> Rect {
     world.transform_rect_bbox(rect).inflate(reach, reach)
 }
 
+/// How a shape or frame looks as the board draws it, in `theme`: a
+/// frame with the theme's frame colors, 1 pt border and 4 pt corners
+/// where it has none of its own (panels show this, not the shape
+/// defaults).
+pub fn node_look(view: &DocumentView, node: NodeId, theme: &imaginarium_ui::Theme) -> ShapeStyle {
+    let is_frame = view
+        .node(node)
+        .is_some_and(|node| matches!(node.kind(), imaginarium_model::NodeKind::Frame));
+    if is_frame {
+        frame_style(view, node, &BoardColors::of(theme))
+    } else {
+        style::shape_style(view, node, theme.kind())
+    }
+}
+
 /// A frame's style: its own, else the theme's frame colors, a 1 pt border
 /// and 4 pt corners.
 fn frame_style(view: &DocumentView, node: NodeId, colors: &BoardColors) -> ShapeStyle {

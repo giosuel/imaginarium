@@ -39,7 +39,7 @@ pub mod style;
 
 pub use board::{BoardCanvas, BoardStatus, MAX_ZOOM, MIN_ZOOM, Preset, Tool};
 pub use copy::{NodeCopy, ParagraphCopy, RunCopy};
-pub use items::BoardColors;
+pub use items::{BoardColors, node_look};
 pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
