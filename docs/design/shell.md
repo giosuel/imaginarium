@@ -178,6 +178,25 @@ Each control opens a popover: the fill popover has the board's colors (no
 fill, white, pastels, strong colors), a hex field and opacity. During a
 drag the toolbar hides and comes back when the gesture ends.
 
+**As built (M3.4, the contextual toolbar).** Built per frame from the
+selection's state (which commands apply, the first node's look); rebuilt
+only when that changes.
+- **Place.** Centered on the selection's box, 32 px above it (clear of
+  the turn handle), or 16 px below when the top panels would cover it;
+  kept inside the window. Hidden while the board has a gesture (moving,
+  resizing, drawing, panning).
+- **Controls**, each shown only when its command applies: fill, outline,
+  outline width, corner radius (rectangles), text color (text boxes,
+  instead of fill); arrange (a menu), duplicate, delete; AI (a note,
+  M6) and More (the context menu's commands).
+- **Commands** behind them, new in the canvas: `style.set_fill`,
+  `set_stroke`, `set_stroke_width`, `set_radius`, `set_text_color`, one
+  undo step over the selected nodes that take them, hidden when none
+  does.
+- **Popovers.** Colors: the board's palette (in the theme's version),
+  no color, a hex field and the opacity. Widths and radii: short lists
+  with the current one checked.
+
 ### 3.6 The inspector (`Ctrl+I`)
 
 A panel on the right, 300 px wide, for everything the toolbar is too small
@@ -227,6 +246,13 @@ Search button opens it as a lightly dimmed dialog.
 Right-click on a selection or the board. The same commands as the
 toolbar's More, in groups (clipboard; order and group; Convert to path,
 copy style and paste style; lock and delete), with shortcuts.
+
+**As built (M3.4, the context menu).** A right-click on a node selects
+it (as a click would) and lists the selection's commands: clipboard;
+order and grouping; edit text and lock; Delete in the danger color. On
+the board: paste, select all, zoom, undo. Rows that don't apply are
+left out, those that can't run are greyed; ↑↓ move, Enter runs. The
+same menu serves the toolbar's More and Arrange.
 
 ### 3.9 Dialogs
 

@@ -11,11 +11,13 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.4 part 3, the contextual toolbar** for the
-  selection (`shell.md` §3.5, the PartContextBar mockup). Parts 1 and 2
-  are done (2026-10-17): the board window
-  (https://github.com/giosuel/imaginarium/pull/56) and the command
-  palette, each reviewed by a fresh agent, stacked on M3.3's PRs.
+- **Next step:** **M3.4 part 5, the inspector** (`Ctrl+I`,
+  `shell.md` §3.6, the Inspector mockups). Parts 1 to 4 are done
+  (2026-10-17): the board window
+  (https://github.com/giosuel/imaginarium/pull/56), the command palette
+  (https://github.com/giosuel/imaginarium/pull/57), the contextual
+  toolbar and the context menu, each reviewed by a fresh agent, stacked
+  on M3.3's PRs.
   M3.3 is done (2026-10-17): the board's commands, tools and
   clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
   `imaginarium-canvas` shows and edits a board. Each part was reviewed by
@@ -1071,6 +1073,11 @@ What M3 builds on:
     "As built"): commands and settings in one search, highlighted
     matches, availability with reasons, settings changed in place,
     recent first. Not yet: arguments typed inline;
+  - [x] **parts 3 and 4, the contextual toolbar and the context menu**
+    (2026-10-17, `shell.md` §3.5 and §3.8 "As built"): style commands on
+    the selection (fill, outline, width, radius, text color), the bar
+    above the selection with its popovers, menus of commands for More,
+    Arrange and right-clicks;
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;
