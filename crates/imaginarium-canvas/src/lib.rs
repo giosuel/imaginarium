@@ -23,6 +23,7 @@
 
 #![warn(missing_docs)]
 
+mod background;
 mod board;
 pub mod clipboard;
 pub mod commands;
@@ -37,6 +38,7 @@ mod paint;
 mod shapes;
 pub mod style;
 
+pub use background::{BACKGROUND, Background};
 pub use board::{BoardCanvas, BoardStatus, MAX_ZOOM, MIN_ZOOM, Preset, Tool};
 pub use copy::{NodeCopy, ParagraphCopy, RunCopy};
 pub use items::{BoardColors, node_look};

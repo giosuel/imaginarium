@@ -2137,6 +2137,7 @@ dependencies = [
  "imaginarium-model",
  "imaginarium-reactive",
  "imaginarium-render",
+ "imaginarium-settings",
  "imaginarium-text",
  "imaginarium-ui",
  "proptest",

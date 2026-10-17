@@ -31,6 +31,7 @@ pub use tools::{Preset, Tool};
 
 use edit::{Editing, FIELD_ACCESS};
 
+use crate::background::Background;
 use crate::commands::{self, box_args, move_args};
 use crate::gesture::{self, Handle, SelectionBox, Side, Start};
 use crate::hit;
@@ -204,7 +205,12 @@ pub struct BoardCanvas {
     bounds: Rect,
     /// The dots of the last frame: one path, and the view it was built for
     /// (the box, the first dot, the spacing).
-    dots: Option<((Rect, Point, f64), imaginarium_render::kurbo::BezPath)>,
+    dots: Option<(
+        (Rect, Point, f64, Background),
+        imaginarium_render::kurbo::BezPath,
+    )>,
+    /// The pattern behind the shapes.
+    background: Background,
 }
 
 impl BoardCanvas {
@@ -242,6 +248,7 @@ impl BoardCanvas {
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
+            background: Background::Dots,
         }
     }
 
@@ -1069,7 +1076,7 @@ impl BoardCanvas {
         self.sync(fonts);
         scene.push_clip(&bounds);
         scene.fill(&bounds, theme().color(Token::BoardBg));
-        self.paint_dots(scene, bounds);
+        self.paint_background(scene, bounds);
         let viewport = self.viewport(bounds);
         let mut stats = CanvasStats::default();
         if let Some(items) = &self.items {
@@ -1635,7 +1642,21 @@ impl BoardCanvas {
         }
     }
 
-    fn paint_dots(&mut self, scene: &mut Scene, bounds: Rect) {
+    /// The pattern behind the shapes now.
+    pub fn background(&self) -> Background {
+        self.background
+    }
+
+    /// Draws `background` behind the shapes from the next frame.
+    pub fn set_background(&mut self, background: Background) {
+        self.background = background;
+    }
+
+    fn paint_background(&mut self, scene: &mut Scene, bounds: Rect) {
+        let background = self.background;
+        if background == Background::Plain {
+            return;
+        }
         // At least this far apart on screen, so a screenful stays a few
         // thousand dots.
         let mut pitch = DOT_PITCH;
@@ -1648,26 +1669,56 @@ impl BoardCanvas {
             bounds.x0 + ((start.x / pitch).ceil() * pitch - start.x) * self.zoom,
             bounds.y0 + ((start.y / pitch).ceil() * pitch - start.y) * self.zoom,
         );
-        // One path of every dot, built again only when the view moves.
-        let key = (bounds, first, step);
+        // One path of every dot (or line), built again only when the view
+        // moves.
+        let key = (bounds, first, step, background);
         if self.dots.as_ref().is_none_or(|(built, _)| *built != key) {
             let mut path = imaginarium_render::kurbo::BezPath::new();
-            let mut y = first.y;
-            while y < bounds.y1 {
+            if background == Background::Grid {
+                // Lines 1 px wide, as rectangles on whole pixels.
                 let mut x = first.x;
                 while x < bounds.x1 {
+                    let left = x.round() - 0.5;
                     path.extend(imaginarium_render::kurbo::Shape::path_elements(
-                        &imaginarium_render::kurbo::Circle::new((x, y), 1.2),
+                        &Rect::new(left, bounds.y0, left + 1.0, bounds.y1),
                         0.1,
                     ));
                     x += step;
                 }
-                y += step;
+                let mut y = first.y;
+                while y < bounds.y1 {
+                    let top = y.round() - 0.5;
+                    path.extend(imaginarium_render::kurbo::Shape::path_elements(
+                        &Rect::new(bounds.x0, top, bounds.x1, top + 1.0),
+                        0.1,
+                    ));
+                    y += step;
+                }
+            } else {
+                let mut y = first.y;
+                while y < bounds.y1 {
+                    let mut x = first.x;
+                    while x < bounds.x1 {
+                        path.extend(imaginarium_render::kurbo::Shape::path_elements(
+                            &imaginarium_render::kurbo::Circle::new((x, y), 1.2),
+                            0.1,
+                        ));
+                        x += step;
+                    }
+                    y += step;
+                }
             }
             self.dots = Some((key, path));
         }
         if let Some((_, path)) = &self.dots {
-            scene.fill(path, theme().color(Token::BoardDot));
+            let color = theme().color(Token::BoardDot);
+            // Lines cover more than dots: fainter, so the board stays calm.
+            let color = if background == Background::Grid {
+                color.with_alpha(0.6)
+            } else {
+                color
+            };
+            scene.fill(path, color);
         }
     }
 
