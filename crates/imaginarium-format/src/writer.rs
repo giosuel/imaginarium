@@ -142,6 +142,20 @@ impl<F: Write + Seek + Durable> Writer<F> {
         &self.state
     }
 
+    /// How long the file is where this writer will append: if the file on
+    /// disk is longer or shorter, someone else wrote to it.
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// The file's length on disk now.
+    ///
+    /// # Errors
+    /// If it can't be found out.
+    pub fn len_on_disk(&mut self) -> Result<u64> {
+        Ok(self.file.seek(SeekFrom::End(0))?)
+    }
+
     /// Number of records appended since the last commit.
     pub fn pending(&self) -> usize {
         self.pending
