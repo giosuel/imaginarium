@@ -438,9 +438,14 @@ open it), one at a time:
 - `Ctrl+W` closes the window.
 - A notice above the settings when saving fails or the file was
   unreadable.
+- **The board background** (`board.background`, declared in
+  `imaginarium-canvas`, shown in Appearance as the mockup's Dots, Grid
+  and Plain): every board window follows it at once. The grid is 1 px
+  lines at the dots' pitch, fainter than the dots.
 - **Not yet:** the scope tabs For me and This board (part 4), the
-  mockup's theme cards and accent swatches (part 3, with the settings
-  they edit), ↑↓ in a dropdown's list (Tab moves through it), and
+  mockup's theme cards and accent swatches (with the theme settings,
+  M3.7: following the system, light, high contrast and reduced motion
+  are that milestone's), ↑↓ in a dropdown's list (Tab moves through it), and
   bringing an open Settings window to the front (`Ctrl+,` does nothing
   while it is open).
 
