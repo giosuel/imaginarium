@@ -599,7 +599,13 @@ fn a_command_that_cant_run_says_why_and_stays() {
 #[test]
 fn a_setting_changes_in_place_and_the_bar_follows() {
     let mut window = Harness::new();
-    let search = window.named("Search commands and settings (Ctrl+K)");
+    // Ctrl+K, or ⌘K on macOS.
+    let keys = crate::toolbar::shortcut(
+        &crate::commands::shell_keymap(imaginarium_commands::Platform::current()),
+        "palette.open",
+    )
+    .unwrap();
+    let search = window.named(&format!("Search commands and settings ({keys})"));
     let at = window.bounds(search).center();
     window.click(at);
     assert!(palette_open(&mut window));
