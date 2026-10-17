@@ -40,6 +40,9 @@ pub enum Token {
     TextMuted,
     /// The quietest text: shortcuts, placeholders.
     TextSubtle,
+    /// Icons and text of a control that can't be used now (redo with
+    /// nothing to redo). Exempt from the contrast rule, as WCAG allows.
+    Disabled,
     /// Accent fills: primary buttons, the selection, toggles.
     Accent,
     /// An accent fill under the pointer.
@@ -66,7 +69,7 @@ pub enum Token {
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 23] = [
+    pub const ALL: [Token; 24] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -79,6 +82,7 @@ impl Token {
         Token::TextSecondary,
         Token::TextMuted,
         Token::TextSubtle,
+        Token::Disabled,
         Token::Accent,
         Token::AccentHover,
         Token::AccentPressed,
@@ -159,6 +163,7 @@ impl Theme {
                 (Token::TextMuted, rgb(0xa1a1aa)),
                 // Light enough for 4.5:1 on a hovered row too.
                 (Token::TextSubtle, rgb(0x9494a0)),
+                (Token::Disabled, rgb(0x5b5b66)),
                 // Fills keep the accent itself (white text on it passes for
                 // every offered accent); text and icons on dark panels use
                 // a lighter version.
@@ -198,6 +203,7 @@ impl Theme {
                 (Token::TextSecondary, rgb(0x3f3f46)),
                 (Token::TextMuted, rgb(0x52525b)),
                 (Token::TextSubtle, rgb(0x6b6b76)),
+                (Token::Disabled, rgb(0xb4b4bc)),
                 (Token::Accent, accent),
                 (Token::AccentHover, mix(accent, Color::BLACK, 0.14)),
                 (Token::AccentPressed, mix(accent, Color::BLACK, 0.26)),
