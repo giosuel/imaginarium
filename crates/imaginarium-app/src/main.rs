@@ -74,26 +74,37 @@ fn main() -> anyhow::Result<()> {
         .register_all(imaginarium_shell::SETTINGS)
         .context("registering the shell's settings")?;
     // A settings file is never required (ADR-0014): one that can't be read
-    // leaves the defaults.
-    let writer = match value("--settings")
-        .map(PathBuf::from)
-        .or_else(settings_path)
-    {
+    // is moved aside and the defaults are used.
+    let path = if args.iter().any(|arg| arg == "--settings") {
+        Some(
+            value("--settings")
+                .map(PathBuf::from)
+                .context("--settings needs a file")?,
+        )
+    } else {
+        settings_path(|name| std::env::var_os(name))
+    };
+    let writer = match path {
         Some(path) => {
-            match settings.load_file(Scope::App, &path) {
-                Ok(report) => {
-                    for (key, reason) in &report.invalid {
-                        eprintln!(
-                            "imaginarium: {}: `{key}` kept as it was: {reason}",
-                            path.display()
-                        );
-                    }
-                }
-                Err(err) => eprintln!("imaginarium: settings not read: {err}"),
+            let opened = settings.open_file(Scope::App, &path);
+            for (key, reason) in &opened.report.invalid {
+                eprintln!(
+                    "imaginarium: {}: `{key}` kept as it was: {reason}",
+                    path.display()
+                );
             }
-            let writer = FileWriter::new(path);
-            settings.persist_to(Scope::App, writer.sink());
-            Some(writer)
+            if let Some(reason) = &opened.unreadable {
+                eprintln!("imaginarium: {} can't be read: {reason}", path.display());
+                match &opened.set_aside {
+                    Some(aside) => eprintln!("imaginarium: it was moved to {}", aside.display()),
+                    None => eprintln!("imaginarium: settings won't be saved this time"),
+                }
+            }
+            opened.saving.then(|| {
+                let writer = FileWriter::new(path);
+                settings.persist_to(Scope::App, writer.sink());
+                writer
+            })
         }
         None => None,
     };
@@ -116,11 +127,10 @@ fn main() -> anyhow::Result<()> {
     };
     let setup = started.elapsed();
     let stats = imaginarium_ui::run_with_gpu(gpu, options, view).context("running the app")?;
-    if let Some(err) = writer.as_ref().and_then(FileWriter::last_error) {
+    // Writes what is pending, then says if saving failed.
+    if let Some(err) = writer.and_then(FileWriter::finish) {
         eprintln!("imaginarium: settings not saved: {err}");
     }
-    // Writes what is pending.
-    drop(writer);
     // Windows that failed while others stayed open.
     for err in &stats.window_errors {
         eprintln!("imaginarium: a window closed: {err}");
@@ -131,25 +141,62 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Where the settings file is: `$XDG_CONFIG_HOME/imaginarium` (or
-/// `~/.config/imaginarium`) on Linux, `~/Library/Application
-/// Support/Imaginarium` on macOS, `%APPDATA%\\Imaginarium` on Windows.
-fn settings_path() -> Option<PathBuf> {
-    let env = |name: &str| {
-        std::env::var_os(name)
-            .filter(|value| !value.is_empty())
+/// Where the settings file is, from the environment (`env`):
+/// `$XDG_CONFIG_HOME/imaginarium` (or `~/.config/imaginarium`) on Linux,
+/// `~/Library/Application Support/Imaginarium` on macOS,
+/// `%APPDATA%\Imaginarium` on Windows. A relative `XDG_CONFIG_HOME` is
+/// ignored, as the XDG spec says.
+fn settings_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let var = |name: &str| {
+        env(name)
             .map(PathBuf::from)
+            .filter(|value| value.is_absolute())
     };
     let folder = if cfg!(target_os = "windows") {
-        env("APPDATA")?.join("Imaginarium")
+        var("APPDATA")?.join("Imaginarium")
     } else if cfg!(target_os = "macos") {
-        env("HOME")?.join("Library/Application Support/Imaginarium")
+        var("HOME")?.join("Library/Application Support/Imaginarium")
     } else {
-        env("XDG_CONFIG_HOME")
-            .or_else(|| env("HOME").map(|home| home.join(".config")))?
+        var("XDG_CONFIG_HOME")
+            .or_else(|| var("HOME").map(|home| home.join(".config")))?
             .join("imaginarium")
     };
     Some(folder.join("settings.toml"))
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.into())
+        }
+    }
+
+    #[test]
+    fn the_settings_file_follows_xdg() {
+        assert_eq!(
+            settings_path(env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/cfg")])),
+            Some(PathBuf::from("/cfg/imaginarium/settings.toml"))
+        );
+        assert_eq!(
+            settings_path(env(&[("HOME", "/home/me")])),
+            Some(PathBuf::from("/home/me/.config/imaginarium/settings.toml"))
+        );
+        // Relative or empty: ignored.
+        assert_eq!(
+            settings_path(env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "cfg")])),
+            Some(PathBuf::from("/home/me/.config/imaginarium/settings.toml"))
+        );
+        assert_eq!(
+            settings_path(env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "")])),
+            Some(PathBuf::from("/home/me/.config/imaginarium/settings.toml"))
+        );
+        assert_eq!(settings_path(env(&[])), None);
+    }
 }
 
 /// The startup's timings, for scripted runs: `setup` is the time from
