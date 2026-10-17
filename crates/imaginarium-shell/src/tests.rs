@@ -33,8 +33,15 @@ impl Harness {
     }
 
     fn with(document: Document) -> Self {
+        Self::with_settings(document, |_| {})
+    }
+
+    /// A window on `document` with settings `set` before it opens.
+    fn with_settings(document: Document, set: impl FnOnce(&mut Registry)) -> Self {
         let mut registry = Registry::new();
         registry.register_all(crate::SETTINGS).unwrap();
+        registry.register_all(imaginarium_canvas::SETTINGS).unwrap();
+        set(&mut registry);
         let settings = Rc::new(RefCell::new(registry));
         let board = BoardCanvas::new(document);
         let window = BoardWindow::new(
@@ -525,6 +532,7 @@ fn the_bar_follows_its_setting_and_a_command() {
 fn a_floating_setting_survives_the_start() {
     let mut registry = Registry::new();
     registry.register_all(crate::SETTINGS).unwrap();
+    registry.register_all(imaginarium_canvas::SETTINGS).unwrap();
     registry.set(&TOOLBAR_POSITION, Dock::Floating).unwrap();
     let settings = Rc::new(RefCell::new(registry));
     let board = BoardCanvas::new(Document::new(DocumentKind::Board).unwrap());
@@ -1418,4 +1426,57 @@ fn the_board_background_follows_its_setting() {
         window.board().background(),
         imaginarium_canvas::Background::Grid
     );
+}
+
+fn set_background(window: &mut Harness, background: imaginarium_canvas::Background) {
+    window
+        .settings
+        .borrow_mut()
+        .set(&imaginarium_canvas::BACKGROUND, background)
+        .unwrap();
+}
+
+#[test]
+fn a_board_window_opens_with_the_background_set() {
+    let window = Harness::with_settings(Document::new(DocumentKind::Board).unwrap(), |settings| {
+        settings
+            .set(
+                &imaginarium_canvas::BACKGROUND,
+                imaginarium_canvas::Background::Grid,
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        window.board().background(),
+        imaginarium_canvas::Background::Grid
+    );
+}
+
+#[test]
+fn a_background_change_survives_a_tool_bar_move() {
+    use imaginarium_canvas::Background;
+    // During a drag: it shows at once, and the drop keeps it.
+    let mut window = Harness::new();
+    let (grip, _) = grip_and_bar(&mut window);
+    let from = window.bounds(grip).center();
+    window.input(Input::PointerMoved(from));
+    window.press(from, true, 1, false);
+    window.input(Input::PointerMoved(Point::new(1400.0, 450.0)));
+    set_background(&mut window, Background::Grid);
+    window.frame();
+    assert_eq!(window.board().background(), Background::Grid);
+    window.press(Point::new(1400.0, 450.0), false, 1, false);
+    window.frame();
+    window.frame();
+    assert_eq!(window.window.dock(), Dock::Right);
+    assert_eq!(window.board().background(), Background::Grid);
+    // Before the frame a dock command comes: still kept.
+    set_background(&mut window, Background::Plain);
+    let args = imaginarium_commands::Args::new().with(
+        "edge",
+        imaginarium_commands::ArgValue::String("left".into()),
+    );
+    window.window.execute("view.dock_toolbar", &args).unwrap();
+    window.frame();
+    assert_eq!(window.board().background(), Background::Plain);
 }

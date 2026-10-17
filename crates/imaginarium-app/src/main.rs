@@ -73,6 +73,9 @@ fn main() -> anyhow::Result<()> {
     settings
         .register_all(imaginarium_shell::SETTINGS)
         .context("registering the shell's settings")?;
+    settings
+        .register_all(imaginarium_canvas::SETTINGS)
+        .context("registering the board's settings")?;
     // A settings file is never required (ADR-0014): one that can't be read
     // is moved aside and the defaults are used.
     let path = if args.iter().any(|arg| arg == "--settings") {

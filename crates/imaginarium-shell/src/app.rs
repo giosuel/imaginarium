@@ -208,6 +208,7 @@ mod tests {
     fn app() -> Rc<App> {
         let mut registry = Registry::new();
         registry.register_all(crate::SETTINGS).unwrap();
+        registry.register_all(imaginarium_canvas::SETTINGS).unwrap();
         registry.register(&SECONDS).unwrap();
         App::new(
             Fonts::bundled_only(),
@@ -407,6 +408,7 @@ mod tests {
         // windows: the palette doesn't offer it.
         let mut registry = Registry::new();
         registry.register_all(crate::SETTINGS).unwrap();
+        registry.register_all(imaginarium_canvas::SETTINGS).unwrap();
         let mut alone = BoardWindow::new(
             BoardCanvas::new(Document::new(DocumentKind::Board).unwrap()),
             "Untitled board",

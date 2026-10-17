@@ -1327,6 +1327,7 @@ mod tests {
         assert_eq!(Section::of(&DEBUG.meta()), Section::Advanced);
         let mut registry = imaginarium_settings::Registry::new();
         registry.register_all(crate::SETTINGS).unwrap();
+        registry.register_all(imaginarium_canvas::SETTINGS).unwrap();
         assert!(
             sections_of(&registry)
                 .iter()

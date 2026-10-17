@@ -180,6 +180,9 @@ pub struct BoardWindow {
     /// Set when a setting changed (from the palette, Settings, another
     /// window); read at the next frame.
     settings_changed: Arc<AtomicBool>,
+    /// Set when the board background changed; read at the next frame
+    /// (apart from the tool bar's flag, which its own moves clear).
+    background_changed: Arc<AtomicBool>,
     subscription: SubscriptionId,
     size: Size,
     close_after: Option<u64>,
@@ -283,8 +286,14 @@ impl BoardWindow {
         );
         let settings_changed = Arc::new(AtomicBool::new(false));
         let flag = settings_changed.clone();
+        let background_changed = Arc::new(AtomicBool::new(false));
+        let background_flag = background_changed.clone();
         let subscription = settings.borrow_mut().subscribe(move |change| {
-            if change.key == TOOLBAR_POSITION.key() || change.key == BACKGROUND.key() {
+            if change.key == BACKGROUND.key() {
+                background_flag.store(true, Ordering::Relaxed);
+                imaginarium_ui::request_frame_everywhere();
+            }
+            if change.key == TOOLBAR_POSITION.key() {
                 flag.store(true, Ordering::Relaxed);
                 // The change may come from another window: this one
                 // draws to follow it.
@@ -325,6 +334,7 @@ impl BoardWindow {
             popup: None,
             settings,
             settings_changed,
+            background_changed,
             subscription,
             size: Size::new(1440.0, 900.0),
             close_after: None,
@@ -450,6 +460,10 @@ impl BoardWindow {
             if dock != self.dock {
                 self.put_bar(dock);
             }
+        }
+        // The background doesn't move the bar: it follows at once, even
+        // during a drag.
+        if self.background_changed.swap(false, Ordering::Relaxed) {
             self.apply_background();
         }
         if self.dock == Dock::Floating && self.drag.is_none() {
