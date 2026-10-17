@@ -837,8 +837,12 @@ mod tests {
         assert!(start.take_requests().is_empty());
         // Cancelled: nothing happens.
         start.input(&ctrl("o"));
-        until(|| answers.asked.lock().unwrap().len() == 3);
-        frame(&mut start);
+        assert!(start.is_opening());
+        until(|| {
+            frame(&mut start);
+            !start.is_opening()
+        });
+        assert!(!start.is_opening());
         assert!(start.take_requests().is_empty());
     }
 
@@ -1052,6 +1056,117 @@ mod tests {
             .unwrap();
         run_until(&mut board, |_| nodes_in(&from) == 2);
         assert_eq!(nodes_in(&from), 2);
+    }
+
+    #[test]
+    fn a_change_while_the_file_moves_survives_closing() {
+        let dir = scratch("move-close");
+        let from = dir.join("Plan.imag");
+        board_file(&from, 1);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        board_draw(&mut board);
+        let to = dir.join("Moved.imag");
+        *answers.save.lock().unwrap() = Some(to.clone());
+        board
+            .execute("file.move", &imaginarium_commands::Args::new())
+            .unwrap();
+        // The move starts (the pill says so) …
+        run_until(&mut board, |board| status_named(board, "Saving…"));
+        assert!(status_named(&mut board, "Saving…"));
+        // … a change, and the window closes before the move's result is in.
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        assert!(board.close_requested());
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert_eq!(nodes_in(&to), 2);
+    }
+
+    #[test]
+    fn the_added_extension_never_replaces_a_board_unasked() {
+        let dir = scratch("extension-taken");
+        let budget = dir.join("Budget.imag");
+        board_file(&budget, 3);
+        let from = dir.join("Plan.imag");
+        board_file(&from, 1);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        board_draw(&mut board);
+        // The dialog asked about replacing "Budget", not "Budget.imag".
+        *answers.save.lock().unwrap() = Some(dir.join("Budget"));
+        board
+            .execute("file.move", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| {
+            let (ui, fonts) = board.ui();
+            ui.find_by_label(fonts, "Can't save the board there")
+                .is_some()
+        });
+        assert_eq!(nodes_in(&budget), 3);
+        assert_eq!(board.path(), Some(from.as_path()));
+    }
+
+    #[test]
+    fn a_board_this_version_cant_write_has_no_copy() {
+        // Unknown records or a newer format: a copy would drop them.
+        let mut document = Document::new(DocumentKind::Board).unwrap();
+        document.set_read_only(imaginarium_model::ReadOnlyReason::File(
+            "it holds data this version doesn't know".into(),
+        ));
+        let app = app();
+        let mut board = app.board_window(document, "Newer");
+        assert!(
+            board
+                .execute("file.save_copy", &imaginarium_commands::Args::new())
+                .is_err()
+        );
+        // Open elsewhere: a copy is fine.
+        let mut document = Document::new(DocumentKind::Board).unwrap();
+        document.set_read_only(imaginarium_model::ReadOnlyReason::File(
+            imaginarium_io_native::IN_USE.into(),
+        ));
+        let mut board = app.board_window(document, "Elsewhere");
+        assert!(
+            board
+                .execute("file.save_copy", &imaginarium_commands::Args::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_untitled_board_that_cant_be_saved_there_stays_kept() {
+        let dir = scratch("save-refused");
+        let other = dir.join("Other.imag");
+        board_file(&other, 2);
+        let app = app();
+        app.keep_untitled_in(dir.join("recovery"));
+        let answers = answering(&app);
+        let _open = app.open_board(&other).unwrap();
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        // Never changed: no recovery file yet; then saved onto a board open
+        // elsewhere, which is refused.
+        *answers.save.lock().unwrap() = Some(other.clone());
+        board
+            .execute("file.save", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| {
+            let (ui, fonts) = board.ui();
+            ui.find_by_label(fonts, "Can't save the board there")
+                .is_some()
+        });
+        assert_eq!(nodes_in(&other), 2);
+        // Still kept: a change reaches its recovery file.
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        let kept = board.kept_path().unwrap().to_owned();
+        run_until(&mut board, |_| nodes_in(&kept) == 1);
+        assert_eq!(nodes_in(&kept), 1);
     }
 
     #[test]

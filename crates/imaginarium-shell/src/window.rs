@@ -462,15 +462,21 @@ impl BoardWindow {
     /// from its first change on (`shell.md` §4); the file is deleted when
     /// the board closes. `created_with` names the app in the file.
     pub fn kept_in(mut self, path: PathBuf, created_with: &str) -> Self {
+        self.keep_at(path, created_with);
+        self
+    }
+
+    /// See [`BoardWindow::kept_in`].
+    fn keep_at(&mut self, path: PathBuf, created_with: &str) {
         let Some(document) = self
             .ui
             .widget::<BoardCanvas>(self.board)
             .map(BoardCanvas::document)
         else {
-            return self;
+            return;
         };
         let Ok(snapshot) = document.export_snapshot() else {
-            return self;
+            return;
         };
         let saved = document.version();
         let revision = self.board_revision();
@@ -491,7 +497,6 @@ impl BoardWindow {
             waker,
         });
         self.update_save_state();
-        self
     }
 
     /// Goes on keeping an untitled board found after a crash in its file
@@ -550,11 +555,49 @@ impl BoardWindow {
         self.update_save_state();
     }
 
+    /// Whatever the board has that its file lacks goes out at once.
+    fn unsent_now(&mut self) {
+        if let Some(file) = &mut self.file {
+            let now = Instant::now();
+            file.unsent = Some((now, now));
+        }
+        self.save_changes(true);
+    }
+
+    /// The dialog's answer with the board extension, unless adding it
+    /// names a file that is there already (the dialog asked about
+    /// replacing the name without it): then why not.
+    fn chosen_path(&mut self, path: PathBuf) -> Option<PathBuf> {
+        let with = crate::files::with_extension(path.clone());
+        if with != path && with.exists() {
+            let name = with
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.show_message(
+                "Can't save the board there",
+                &format!(
+                    "A file named \u{201c}{name}\u{201d} is there already. Choose another name, or \
+                     type the whole name with .imag to replace it."
+                ),
+            );
+            return None;
+        }
+        Some(with)
+    }
+
     /// What the shell's commands see of this window.
     fn shell_cx(&self) -> ShellCx {
         let mode = self.board().map(|board| board.document().mode().clone());
         let file = match &mode {
-            Some(imaginarium_model::Mode::ReadOnly(imaginarium_model::ReadOnlyReason::File(_))) => {
+            // Open elsewhere, or not writable: a copy is fine. Anything else
+            // (a newer format, unknown records) isn't even copied: this
+            // version would drop what it doesn't know.
+            Some(imaginarium_model::Mode::ReadOnly(imaginarium_model::ReadOnlyReason::File(
+                reason,
+            ))) if reason == imaginarium_io_native::IN_USE
+                || reason == imaginarium_io_native::CANT_WRITE =>
+            {
                 FileState::ReadOnly
             }
             Some(imaginarium_model::Mode::ReadOnly(_)) => FileState::Newer,
@@ -616,7 +659,7 @@ impl BoardWindow {
             Ask::OpenFile => FileWork::Open(Pending::spawn(
                 "open-dialog",
                 move || dialogs.open_board().map(crate::files::open_file),
-                Some(Err("no thread to open with".into())),
+                || Some(Err("no thread to open with".into())),
             )),
             Ask::Place => {
                 let untitled = self.shell_cx().file == FileState::Untitled;
@@ -628,7 +671,7 @@ impl BoardWindow {
                 FileWork::PlaceWhere(Pending::spawn(
                     "save-dialog",
                     move || dialogs.save_board(title, folder.as_deref(), &format!("{name}.imag")),
-                    None,
+                    || None,
                 ))
             }
             _ => FileWork::CopyWhere(Pending::spawn(
@@ -640,7 +683,7 @@ impl BoardWindow {
                         &format!("{name} copy.imag"),
                     )
                 },
-                None,
+                || None,
             )),
         });
     }
@@ -666,7 +709,11 @@ impl BoardWindow {
             FileWork::PlaceWhere(pending) => match pending.take() {
                 None => self.file_work = Some(FileWork::PlaceWhere(pending)),
                 Some(None) => {}
-                Some(Some(path)) => self.place_at(crate::files::with_extension(path)),
+                Some(Some(path)) => {
+                    if let Some(path) = self.chosen_path(path) {
+                        self.place_at(path);
+                    }
+                }
             },
             FileWork::Placing(pending, untitled) => match pending.take() {
                 None => self.file_work = Some(FileWork::Placing(pending, untitled)),
@@ -676,10 +723,23 @@ impl BoardWindow {
                     self.rename(name);
                 }
                 Some(Err(not)) => {
-                    self.file = None;
+                    let kept = self
+                        .file
+                        .take()
+                        .filter(|file| file.untitled)
+                        .map(|file| file.path);
                     if let Some(back) = not.back {
                         let (path, session, saved) = *back;
                         self.link_with(path, session, untitled, saved);
+                    } else if let Some(path) = kept {
+                        // Kept for recovery again, as before.
+                        let created_with = self
+                            .app
+                            .as_ref()
+                            .map(|app| app.created_with())
+                            .unwrap_or_default();
+                        self.keep_at(path, &created_with);
+                        self.unsent_now();
                     }
                     self.update_save_state();
                     self.show_message("Can't save the board there", &not.reason);
@@ -689,7 +749,9 @@ impl BoardWindow {
                 None => self.file_work = Some(FileWork::CopyWhere(pending)),
                 Some(None) => {}
                 Some(Some(path)) => {
-                    let path = crate::files::with_extension(path);
+                    let Some(path) = self.chosen_path(path) else {
+                        return;
+                    };
                     let snapshot = self.board().map(|board| board.document().export_snapshot());
                     let Some(Ok(snapshot)) = snapshot else {
                         self.show_message("Can't save a copy", "The board can't be copied.");
@@ -703,7 +765,7 @@ impl BoardWindow {
                     self.file_work = Some(FileWork::Copying(Pending::spawn(
                         "save-copy",
                         move || crate::files::write_copy(&snapshot, &path, &created_with),
-                        Err("no thread to save with".into()),
+                        || Err("no thread to save with".into()),
                     )));
                 }
             },
@@ -725,12 +787,11 @@ impl BoardWindow {
             .as_ref()
             .map(|app| app.created_with())
             .unwrap_or_default();
-        // An untitled board may have no file yet (it is made with the first
-        // change): then it is written from this.
-        let untitled_snapshot = self
-            .file
-            .as_ref()
-            .is_some_and(|file| file.untitled)
+        let untitled = self.file.as_ref().is_none_or(|file| file.untitled);
+        // An untitled board can always be written from this: its recovery
+        // file may not exist yet (it is made with the first change), or
+        // may fail.
+        let snapshot = untitled
             .then(|| {
                 self.board()
                     .and_then(|board| board.document().export_snapshot().ok())
@@ -739,33 +800,43 @@ impl BoardWindow {
         let link = self
             .file
             .as_mut()
-            .and_then(|file| Some((file.path.clone(), file.untitled, file.autosave.take()?)));
-        let work = match link {
-            Some((from, untitled, autosave)) => (
-                Pending::spawn(
-                    "move-board",
-                    move || {
-                        // Moved only once the file holds every change sent.
-                        if let Some(reason) = autosave.finish() {
-                            return Err(NotPlaced {
-                                reason: format!("The board's last changes aren't saved: {reason}"),
-                                back: crate::files::reopen(&from),
-                            });
+            .and_then(|file| Some((file.path.clone(), file.autosave.take()?)));
+        let no_thread = || {
+            Err(NotPlaced {
+                reason: "no thread to save with".into(),
+                back: None,
+            })
+        };
+        let pending = match link {
+            Some((from, autosave)) => Pending::spawn(
+                "move-board",
+                move || {
+                    // Moved only once the file holds every change sent.
+                    let unsaved = autosave.finish();
+                    match (untitled, unsaved, snapshot) {
+                        (false, Some(reason), _) => Err(NotPlaced {
+                            reason: format!("The board's last changes aren't saved: {reason}"),
+                            back: crate::files::reopen(&from),
+                        }),
+                        (true, None, _) if from.exists() => crate::files::move_file(&from, &to),
+                        // Its recovery file lacks something (or isn't
+                        // there): written fresh, then that file goes.
+                        (true, _, Some(snapshot)) => {
+                            match crate::files::write_file(&snapshot, &to, &created_with) {
+                                Ok(placed) => {
+                                    let _ = std::fs::remove_file(&from);
+                                    Ok(placed)
+                                }
+                                Err(reason) => Err(NotPlaced {
+                                    reason,
+                                    back: crate::files::reopen(&from),
+                                }),
+                            }
                         }
-                        if !from.exists()
-                            && let Some(snapshot) = untitled_snapshot
-                        {
-                            return crate::files::write_file(&snapshot, &to, &created_with)
-                                .map_err(|reason| NotPlaced { reason, back: None });
-                        }
-                        crate::files::move_file(&from, &to)
-                    },
-                    Err(NotPlaced {
-                        reason: "no thread to save with".into(),
-                        back: None,
-                    }),
-                ),
-                untitled,
+                        _ => crate::files::move_file(&from, &to),
+                    }
+                },
+                no_thread,
             ),
             None => {
                 let snapshot = self.board().map(|board| board.document().export_snapshot());
@@ -773,23 +844,18 @@ impl BoardWindow {
                     self.show_message("Can't save the board", "The board can't be written.");
                     return;
                 };
-                (
-                    Pending::spawn(
-                        "save-board",
-                        move || {
-                            crate::files::write_file(&snapshot, &to, &created_with)
-                                .map_err(|reason| NotPlaced { reason, back: None })
-                        },
-                        Err(NotPlaced {
-                            reason: "no thread to save with".into(),
-                            back: None,
-                        }),
-                    ),
-                    true,
+                Pending::spawn(
+                    "save-board",
+                    move || {
+                        crate::files::write_file(&snapshot, &to, &created_with)
+                            .map_err(|reason| NotPlaced { reason, back: None })
+                    },
+                    no_thread,
                 )
             }
         };
-        self.file_work = Some(FileWork::Placing(work.0, work.1));
+        self.file_work = Some(FileWork::Placing(pending, untitled));
+        self.update_save_state();
     }
 
     /// The file the board is saved into, if it has one (an untitled
@@ -890,7 +956,10 @@ impl BoardWindow {
             .ui
             .widget::<BoardCanvas>(self.board)
             .map(|board| board.document().mode().clone());
+        let placing = matches!(self.file_work, Some(FileWork::Placing(..)));
         let shown = match (&mode, &self.file) {
+            // Its file is moving (or being written) to its new place.
+            _ if placing => chrome::SaveShown::Saving,
             (Some(imaginarium_model::Mode::ReadOnly(reason)), _) => {
                 chrome::SaveShown::ReadOnly(read_only_text(reason))
             }
@@ -961,6 +1030,10 @@ impl BoardWindow {
     /// deleted instead; otherwise (the window went away: the app failed)
     /// it stays, to be offered again.
     fn finish_saving(&mut self, discard: bool) {
+        if matches!(self.file_work, Some(FileWork::Placing(..))) {
+            self.finish_placing();
+            return;
+        }
         let untitled = discard && self.file.as_ref().is_some_and(|file| file.untitled);
         if !untitled {
             self.save_changes(true);
@@ -984,6 +1057,53 @@ impl BoardWindow {
             None => {
                 let _ = finishing.join();
             }
+        }
+    }
+
+    /// The window closes while its board's file moves: a thread waits for
+    /// the move, then writes into the file wherever the board ended up
+    /// what the board has beyond what its old file held (the app waits
+    /// for it before it exits).
+    fn finish_placing(&mut self) {
+        let Some(FileWork::Placing(pending, _)) = self.file_work.take() else {
+            return;
+        };
+        let updates = self
+            .file
+            .as_ref()
+            .zip(self.board())
+            .and_then(|(file, board)| board.document().export_updates_since(&file.saved).ok());
+        let finishing = std::thread::Builder::new()
+            .name("move-finish".into())
+            .spawn(move || {
+                let (path, session) = match pending.wait() {
+                    Some(Ok(placed)) => (placed.path, placed.session),
+                    Some(Err(not)) => match not.back {
+                        Some(back) => {
+                            let (path, session, _) = *back;
+                            (path, session)
+                        }
+                        None => return Some(not.reason),
+                    },
+                    None => return Some("saving stopped".into()),
+                };
+                let updates = updates?;
+                let id = imaginarium_io_native::FileId {
+                    path,
+                    doc_id: session.doc_id(),
+                };
+                let autosave = Autosave::start(session, id, || {});
+                autosave.update(updates);
+                autosave.finish()
+            });
+        match (finishing, &self.app) {
+            (Ok(finishing), Some(app)) => {
+                app.finishing(finishing, "a board's last changes weren't saved");
+            }
+            (Ok(finishing), None) => {
+                let _ = finishing.join();
+            }
+            (Err(_), _) => {}
         }
     }
 

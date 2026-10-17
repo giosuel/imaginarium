@@ -57,16 +57,24 @@ pub(crate) struct Pending<T> {
 
 impl<T: Send + 'static> Pending<T> {
     /// Runs `work` on a thread named `name`; the window whose view runs
-    /// now is woken when it is done. If no thread can start, `work` is
-    /// given up and `failed` is the result.
-    pub(crate) fn spawn(name: &str, work: impl FnOnce() -> T + Send + 'static, failed: T) -> Self {
+    /// now is woken when it is done. If no thread can start, or `work`
+    /// panics (a bug, a dialog library's), `failed()` is the result: the
+    /// window never waits for nothing.
+    pub(crate) fn spawn(
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+        failed: impl Fn() -> T + Send + Sync + 'static,
+    ) -> Self {
         let slot = Arc::new(Mutex::new(None));
         let done = slot.clone();
         let wake = imaginarium_ui::window_waker();
+        let failed = Arc::new(failed);
+        let failed_here = failed.clone();
         let spawned = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                let result = work();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .unwrap_or_else(|_| failed());
                 if let Ok(mut done) = done.lock() {
                     *done = Some(result);
                 }
@@ -77,7 +85,7 @@ impl<T: Send + 'static> Pending<T> {
         if spawned.is_err()
             && let Ok(mut slot) = slot.lock()
         {
-            *slot = Some(failed);
+            *slot = Some(failed_here());
         }
         Self { slot }
     }
@@ -85,6 +93,22 @@ impl<T: Send + 'static> Pending<T> {
     /// The result, once it is there (taken once).
     pub(crate) fn take(&self) -> Option<T> {
         self.slot.lock().ok()?.take()
+    }
+
+    /// Waits for the result (on a thread that may wait: a closed window's
+    /// work finishing).
+    pub(crate) fn wait(self) -> Option<T> {
+        loop {
+            match self.slot.lock() {
+                Ok(mut slot) => {
+                    if let Some(result) = slot.take() {
+                        return Some(result);
+                    }
+                }
+                Err(_) => return None,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -255,15 +279,36 @@ fn check_free(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Syncs the folder holding `path`, so a rename in it is on the disk
+/// (Unix; Windows has no such call, and its renames are durable).
+fn sync_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(folder) = path.parent() {
+        std::fs::File::open(folder)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Copies `from` to `to` (replacing it atomically), then removes `from`.
 fn copy_then_remove(from: &Path, to: &Path) -> Result<(), String> {
     let name = to.file_name().map(ToOwned::to_owned).unwrap_or_default();
     let mut temp = name.clone();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = to.with_file_name(format!(".{}", temp.to_string_lossy()));
+    // Synced through a handle that may write (Windows flushes no other),
+    // and the folder after the rename (Unix), before the old one goes: two
+    // file systems keep their journals apart.
     let copied = std::fs::copy(from, &temp)
-        .and_then(|_| std::fs::File::open(&temp)?.sync_all())
-        .and_then(|()| std::fs::rename(&temp, to));
+        .and_then(|_| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)?
+                .sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temp, to))
+        .and_then(|()| sync_folder(to));
     if let Err(err) = copied {
         let _ = std::fs::remove_file(&temp);
         return Err(err.to_string());

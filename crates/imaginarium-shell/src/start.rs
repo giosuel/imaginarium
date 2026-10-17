@@ -175,6 +175,12 @@ impl StartWindow {
         self.ui.set_children(self.right, &children);
     }
 
+    /// Whether a board is being chosen or opened.
+    #[cfg(test)]
+    pub(crate) fn is_opening(&self) -> bool {
+        self.opening.is_some()
+    }
+
     /// Asks for a board file to open, on a thread of its own (once at a
     /// time).
     pub fn open_file(&mut self) {
@@ -185,7 +191,7 @@ impl StartWindow {
         self.opening = Some(crate::files::Pending::spawn(
             "open-dialog",
             move || dialogs.open_board().map(crate::files::open_file),
-            Some(Err("no thread to open with".into())),
+            || Some(Err("no thread to open with".into())),
         ));
     }
 
