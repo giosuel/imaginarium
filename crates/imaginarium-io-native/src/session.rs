@@ -59,9 +59,10 @@ enum Lock {
     /// An advisory lock on the file's own handle (Unix), or nothing to
     /// lock: storage that isn't a file, or a file system that can't.
     Handle,
-    /// A locked file next to it, removed with the lock (Windows).
+    /// A locked file next to it, removed with the lock (Windows). The
+    /// file is only held: its lock lasts as long as it is open.
     #[cfg_attr(not(windows), allow(dead_code))]
-    Beside(File, PathBuf),
+    Beside(#[allow(dead_code)] File, PathBuf),
 }
 
 impl Drop for Lock {
