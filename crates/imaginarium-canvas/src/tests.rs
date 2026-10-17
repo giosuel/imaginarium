@@ -492,3 +492,23 @@ fn grid_lines_are_one_device_pixel_and_plain_draws_nothing() {
     let first = plain.data()[0];
     assert!(plain.data().iter().all(|pixel| *pixel == first));
 }
+
+#[test]
+fn the_interface_size_leaves_the_board_as_big_as_it_was() {
+    let mut board = BoardCanvas::new(crate::demo::launch_plan().unwrap());
+    board.set_view(Point::ZERO, 1.0);
+    let bounds = imaginarium_render::kurbo::Rect::new(0.0, 0.0, 800.0, 600.0);
+    // Logical pixels 25 % bigger: a point covers 0.8 of them, so it is
+    // still one system pixel.
+    imaginarium_ui::set_interface_scale(1.25);
+    let at = board.to_document(bounds, Point::new(80.0, 40.0));
+    assert!(
+        (at.x - 100.0).abs() < 1e-9 && (at.y - 50.0).abs() < 1e-9,
+        "{at:?}"
+    );
+    // The zoom shown is the board's: still 100 %.
+    assert_eq!(board.zoom(), 1.0);
+    imaginarium_ui::set_interface_scale(1.0);
+    let at = board.to_document(bounds, Point::new(80.0, 40.0));
+    assert!((at.x - 80.0).abs() < 1e-9, "{at:?}");
+}

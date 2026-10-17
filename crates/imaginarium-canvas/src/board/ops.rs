@@ -423,12 +423,18 @@ impl BoardCanvas {
         }
         let room = (bounds.width() - 2.0 * FIT_MARGIN).max(1.0) / area.width().max(1.0);
         let room = room.min((bounds.height() - 2.0 * FIT_MARGIN).max(1.0) / area.height().max(1.0));
-        let zoom = room.min(1.0).clamp(crate::MIN_ZOOM, crate::MAX_ZOOM);
+        // `room` is in logical pixels per point, as drawn; the zoom shown
+        // is that times the interface size, at most 100 %.
+        let interface = imaginarium_ui::interface_scale();
+        let zoom = (room * interface)
+            .min(1.0)
+            .clamp(crate::MIN_ZOOM, crate::MAX_ZOOM);
+        let drawn = zoom / interface;
         let middle = area.center();
         self.set_view(
             Point::new(
-                middle.x - bounds.width() / 2.0 / zoom,
-                middle.y - bounds.height() / 2.0 / zoom,
+                middle.x - bounds.width() / 2.0 / drawn,
+                middle.y - bounds.height() / 2.0 / drawn,
             ),
             zoom,
         );

@@ -523,7 +523,7 @@ impl BoardCanvas {
                 }
             }
             Gesture::Pan { last, pointer } => {
-                self.origin -= (pointer - last) / self.zoom;
+                self.origin -= (pointer - last) / self.view_zoom();
                 self.gesture = Some(Gesture::Pan {
                     last: pointer,
                     pointer,
@@ -997,7 +997,14 @@ impl BoardCanvas {
     /// The document point under `screen` (logical pixels in the window),
     /// for a board whose box is `bounds`.
     pub fn to_document(&self, bounds: Rect, screen: Point) -> Point {
-        self.origin + (screen - bounds.origin()) / self.zoom
+        self.origin + (screen - bounds.origin()) / self.view_zoom()
+    }
+
+    /// Logical pixels per point as drawn: the zoom, divided by the
+    /// interface size (which scales the panels, not the board: at 100 % a
+    /// point is still a system pixel).
+    pub(crate) fn view_zoom(&self) -> f64 {
+        self.zoom / imaginarium_ui::interface_scale()
     }
 
     /// Zooms by `factor` keeping the document point under `anchor` in place.
@@ -1011,7 +1018,7 @@ impl BoardCanvas {
     fn viewport(&self, bounds: Rect) -> Viewport {
         Viewport {
             origin: self.origin,
-            zoom: self.zoom,
+            zoom: self.view_zoom(),
             screen: bounds,
             scale_factor: imaginarium_ui::scale_factor(),
         }
@@ -1020,7 +1027,7 @@ impl BoardCanvas {
     /// The camera: document points to the window's logical pixels.
     fn camera(&self, bounds: Rect) -> Affine {
         Affine::translate(bounds.origin().to_vec2())
-            * Affine::scale(self.zoom)
+            * Affine::scale(self.view_zoom())
             * Affine::translate(-self.origin.to_vec2())
     }
 
@@ -1293,7 +1300,7 @@ impl BoardCanvas {
                 .then(|| hit::selectable(view, *frame, self.entered));
         }
         let point = self.to_document(self.bounds, screen);
-        let tolerance = hit::TOLERANCE_PIXELS / self.zoom;
+        let tolerance = hit::TOLERANCE_PIXELS / self.view_zoom();
         // Items within the tolerance count: a thin line's bounds are
         // narrower than it.
         let near = Rect::from_center_size(point, (2.0 * tolerance, 2.0 * tolerance));
@@ -1668,14 +1675,15 @@ impl BoardCanvas {
         // At least this far apart on screen, so a screenful stays a few
         // thousand dots.
         let mut pitch = DOT_PITCH;
-        while pitch * self.zoom < 16.0 {
+        let zoom = self.view_zoom();
+        while pitch * zoom < 16.0 {
             pitch *= 2.0;
         }
-        let step = pitch * self.zoom;
+        let step = pitch * zoom;
         let start = self.origin;
         let first = Point::new(
-            bounds.x0 + ((start.x / pitch).ceil() * pitch - start.x) * self.zoom,
-            bounds.y0 + ((start.y / pitch).ceil() * pitch - start.y) * self.zoom,
+            bounds.x0 + ((start.x / pitch).ceil() * pitch - start.x) * zoom,
+            bounds.y0 + ((start.y / pitch).ceil() * pitch - start.y) * zoom,
         );
         // One path of every dot (or line), built again only when the view
         // moves.
@@ -1839,7 +1847,7 @@ impl Widget for BoardCanvas {
                     let factor = (delta.y / 240.0).exp();
                     self.zoom_about(cx.bounds(), factor, *position);
                 } else {
-                    self.origin -= *delta / self.zoom;
+                    self.origin -= *delta / self.view_zoom();
                 }
                 cx.request_paint();
                 true
@@ -1851,7 +1859,7 @@ impl Widget for BoardCanvas {
     fn wake_at(&self) -> Option<Instant> {
         let canvas = self.canvas.wake_at(&Viewport {
             origin: self.origin,
-            zoom: self.zoom,
+            zoom: self.view_zoom(),
             screen: Rect::ZERO,
             scale_factor: imaginarium_ui::scale_factor(),
         });
