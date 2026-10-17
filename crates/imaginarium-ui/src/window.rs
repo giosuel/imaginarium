@@ -460,6 +460,25 @@ enum UserEvent {
     Access(accesskit_winit::Event),
     /// The clipboard's thread read a text.
     Pasted,
+    /// Another thread asked for frames ([`frame_waker`]).
+    Wake,
+}
+
+/// Wakes the event loop from another thread.
+type Waker = Box<dyn Fn() + Send>;
+static FRAME_WAKER: std::sync::Mutex<Option<Waker>> = std::sync::Mutex::new(None);
+
+/// Something another thread can call to have every window draw again (a
+/// file saved on its thread, so the document pill shows it). Safe to call
+/// before the event loop runs (it does nothing then) or after it ended.
+pub fn frame_waker() -> impl Fn() + Send + Sync + Clone + 'static {
+    || {
+        if let Ok(waker) = FRAME_WAKER.lock()
+            && let Some(wake) = waker.as_ref()
+        {
+            wake();
+        }
+    }
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -656,6 +675,12 @@ pub fn run_with_gpu<'v>(
     crate::clipboard::set_waker(move || {
         let _ = waker.send_event(UserEvent::Pasted);
     });
+    let frames = proxy.clone();
+    if let Ok(mut slot) = FRAME_WAKER.lock() {
+        *slot = Some(Box::new(move || {
+            let _ = frames.send_event(UserEvent::Wake);
+        }));
+    }
     let mut shell = Shell {
         windows: std::collections::HashMap::new(),
         pending: vec![(options, Box::new(view) as Box<dyn View + 'v>)],
@@ -1062,6 +1087,12 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::Access(event) => event,
+            UserEvent::Wake => {
+                for state in self.windows.values_mut() {
+                    state.request_redraw(Cause::Request);
+                }
+                return;
+            }
             UserEvent::Pasted => {
                 // Pasted text goes to the window that asked, else where
                 // the keys are.

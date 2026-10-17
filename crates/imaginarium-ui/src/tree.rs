@@ -607,6 +607,12 @@ impl Ui {
         id
     }
 
+    /// The children of `parent` (none if it is gone).
+    pub fn children(&self, parent: WidgetId) -> &[WidgetId] {
+        self.node(parent)
+            .map_or(&[], |node| node.children.as_slice())
+    }
+
     /// Replaces `parent`'s children. Children it had before that aren't in
     /// `children` are detached, not removed.
     pub fn set_children(&mut self, parent: WidgetId, children: &[WidgetId]) {
