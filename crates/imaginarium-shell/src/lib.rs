@@ -48,6 +48,7 @@ mod commands;
 mod contextbar;
 mod files;
 mod inspector;
+pub mod look;
 mod menu;
 mod palette;
 mod recent;
@@ -68,5 +69,10 @@ pub use window::BoardWindow;
 
 /// The shell's settings, for the app to register (the board's are
 /// [`imaginarium_canvas::SETTINGS`]).
-pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] =
-    &[&TOOLBAR_POSITION, &SHOW_START_WINDOW];
+pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] = &[
+    &look::THEME,
+    &look::ACCENT,
+    &look::REDUCE_MOTION,
+    &TOOLBAR_POSITION,
+    &SHOW_START_WINDOW,
+];

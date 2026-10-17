@@ -70,9 +70,6 @@ fn main() -> anyhow::Result<()> {
     // The GPU's drivers load on a thread of their own while the fonts are
     // scanned and the first window is built (PLAN §10: 400 ms).
     let gpu = GpuStart::spawn(&GpuOptions::default());
-    if flag("--light") {
-        set_theme(Theme::light(DEFAULT_ACCENT));
-    }
     let mut settings = Registry::new();
     settings
         .register_all(imaginarium_shell::SETTINGS)
@@ -120,6 +117,11 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // The theme, accent and motion the settings ask for, from now on.
+    imaginarium_shell::look::follow(&mut settings);
+    if flag("--light") {
+        set_theme(Theme::light(DEFAULT_ACCENT));
+    }
     let workers = TileWorkers::new(TileWorkers::default_threads(), CpuMode::Fast);
     let app = App::new(
         Fonts::new(),
