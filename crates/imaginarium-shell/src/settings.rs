@@ -131,6 +131,14 @@ pub struct SettingsWindow {
     subscription: SubscriptionId,
     /// The notice about saving shown now, to rebuild when it changes.
     notice: Option<String>,
+    /// The sidebar's and the content's widgets, removed at a rebuild.
+    built: Vec<WidgetId>,
+    /// The control to give the keys back to after the next layout: its
+    /// label, and which of the controls with that label it is.
+    restore: Option<(String, usize)>,
+    /// A change from elsewhere came while a field was being typed in: the
+    /// rebuild waits until the field is left.
+    deferred: bool,
     requests: Vec<WindowRequest>,
     close_after: Option<u64>,
     frames: u64,
@@ -220,6 +228,9 @@ impl SettingsWindow {
             changed,
             subscription,
             notice: None,
+            built: Vec::new(),
+            restore: None,
+            deferred: false,
             requests: Vec::new(),
             close_after: None,
             frames: 0,
@@ -276,17 +287,33 @@ impl SettingsWindow {
                 rebuild |= self.handle(ask);
             }
         }
+        // Changes from elsewhere don't rebuild a field being typed in (its
+        // draft would be lost): they wait until it is left.
+        let mut external = std::mem::take(&mut self.deferred);
         if self.changed.swap(false, Ordering::Relaxed) {
-            rebuild = true;
+            external = true;
         }
-        let notice = self.app.save_notice();
-        if notice != self.notice {
-            rebuild = true;
+        if self.app.save_notice() != self.notice {
+            external = true;
+        }
+        if external && !rebuild {
+            if self.typing() {
+                self.deferred = true;
+            } else {
+                rebuild = true;
+            }
         }
         if rebuild {
             self.rebuild();
         }
         any || rebuild
+    }
+
+    /// Whether a settings field (not the search) has the keys.
+    fn typing(&self) -> bool {
+        self.ui.focused().is_some_and(|focused| {
+            focused != self.search && self.ui.widget::<TextInput>(focused).is_some()
+        })
     }
 
     /// Does `ask`; whether the window must be rebuilt.
@@ -314,13 +341,18 @@ impl SettingsWindow {
                 let Ok(declaration) = declaration else {
                     return false;
                 };
+                let error = self.errors.get(key).cloned();
+                let before = settings.borrow().value(key).ok();
                 match parse(declaration, &text) {
                     Ok(value) => self.set(key, value),
                     Err(reason) => {
                         self.errors.insert(key, reason);
                     }
                 }
-                true
+                // Only a new value or a new error is worth a rebuild (a
+                // rebuild moves the keys, which could commit again).
+                settings.borrow().value(key).ok() != before
+                    || self.errors.get(key) != error.as_ref()
             }
             Ask::Reset(key) => {
                 self.errors.remove(key);
@@ -364,7 +396,7 @@ impl SettingsWindow {
         let rows: Vec<WidgetId> = choices(declaration)
             .into_iter()
             .map(|(value, name)| {
-                let checked = value == current;
+                let checked = same(&value, &current);
                 let check = self.ui.add(Icon::named(
                     "check",
                     16.0,
@@ -389,7 +421,7 @@ impl SettingsWindow {
                 .gap(8.0)
                 .start()
                 .radius(7.0)
-                .role(Role::MenuItem)
+                .role(Role::MenuItemRadio)
                 .selected(move || checked)
                 .add_to(&mut self.ui, &[check, text])
             })
@@ -416,7 +448,15 @@ impl SettingsWindow {
     /// keys in the control that had them.
     fn rebuild(&mut self) {
         self.close_menu();
-        let focused = self.focused_label();
+        self.deferred = false;
+        if let Some(focused) = self.focused_identity() {
+            self.restore = Some(focused);
+        }
+        // Detaching isn't removing: the old widgets (and their effects)
+        // would stay.
+        for widget in std::mem::take(&mut self.built) {
+            self.ui.remove(widget);
+        }
         self.notice = self.app.save_notice();
         let searching = !self.query.trim().is_empty();
         let buttons: Vec<WidgetId> = SECTIONS
@@ -424,6 +464,7 @@ impl SettingsWindow {
             .map(|&section| self.section_button(section, !searching && section == self.section))
             .collect();
         self.ui.set_children(self.sidebar, &buttons);
+        self.built.extend(&buttons);
         let mut children = Vec::new();
         if let Some(notice) = self.notice.clone() {
             children.push(notice_box(&mut self.ui, &notice));
@@ -434,15 +475,24 @@ impl SettingsWindow {
             children.extend(self.section_content(self.section));
         }
         self.ui.set_children(self.content, &children);
-        if let Some(label) = focused
-            && let Some(widget) = self.ui.find_by_label(&mut self.fonts, &label)
-        {
+        self.built.extend(&children);
+    }
+
+    /// Gives the keys back to the control that had them before a rebuild,
+    /// once the new controls are laid out.
+    fn restore_focus(&mut self) {
+        let Some((label, nth)) = self.restore.take() else {
+            return;
+        };
+        if let Some(&widget) = self.ui.find_all_by_label(&mut self.fonts, &label).get(nth) {
             self.ui.set_focus(&mut self.fonts, Some(widget));
         }
     }
 
-    /// The access label of the focused control, unless it is the search.
-    fn focused_label(&mut self) -> Option<String> {
+    /// The focused control (unless it is the search, which stays) as its
+    /// label and which of the controls with that label it is: controls
+    /// share names ("On" in two settings).
+    fn focused_identity(&mut self) -> Option<(String, usize)> {
         let focused = self.ui.focused()?;
         if focused == self.search {
             return None;
@@ -450,10 +500,17 @@ impl SettingsWindow {
         let mut tree = AccessTree::default();
         self.ui.access(&mut self.fonts, &mut tree);
         let base = focused.access_base();
-        tree.nodes()
+        let label = tree
+            .nodes()
             .iter()
             .find(|(id, _)| *id == accesskit::NodeId(base))
-            .and_then(|(_, node)| node.label().map(str::to_owned))
+            .and_then(|(_, node)| node.label().map(str::to_owned))?;
+        let nth = self
+            .ui
+            .find_all_by_label(&mut self.fonts, &label)
+            .iter()
+            .position(|&widget| widget == focused)?;
+        Some((label, nth))
     }
 
     fn section_button(&mut self, section: Section, selected: bool) -> WidgetId {
@@ -624,9 +681,13 @@ impl SettingsWindow {
             .add(Label::new(meta.description, TextStyle::new(13.0)).color(Token::TextMuted));
         let mut text = vec![title_row, description];
         if let Some(error) = self.errors.get(key).cloned() {
+            // An alert, so a screen reader says why the value was refused.
+            let label = self
+                .ui
+                .add(Label::new(error.clone(), TextStyle::new(12.0)).color(Token::Danger));
             text.push(
                 self.ui
-                    .add(Label::new(error, TextStyle::new(12.0)).color(Token::Danger)),
+                    .add_with_children(Flex::column().role(Role::Alert, error), &[label]),
             );
         }
         let text = self.ui.add_with_children(
@@ -746,7 +807,7 @@ impl SettingsWindow {
         let key = declaration.key();
         let name = choices(declaration)
             .into_iter()
-            .find(|(choice, _)| choice == value)
+            .find(|(choice, _)| same(choice, value))
             .map_or_else(|| format_value(value), |(_, name)| name);
         let asks = self.asks.clone();
         let anchor = Rc::new(std::cell::Cell::new(None));
@@ -771,16 +832,18 @@ impl SettingsWindow {
     fn field(&mut self, key: &'static str, label: &str, text: &str, width: f32) -> WidgetId {
         let submit = self.asks.clone();
         let blur = self.asks.clone();
+        // Leaving a field that wasn't edited keeps the value as it is (its
+        // text may show it rounded).
+        let shown = text.to_owned();
         let input = self.ui.add(
             TextInput::new(label, "", TextStyle::new(13.0), InputColors::themed())
                 .on_submit(move |text| {
-                    submit
-                        .borrow_mut()
-                        .push(Ask::Typed(key, text.trim().to_owned()));
+                    submit.borrow_mut().push(Ask::Typed(key, text.to_owned()));
                 })
                 .on_blur(move |text| {
-                    blur.borrow_mut()
-                        .push(Ask::Typed(key, text.trim().to_owned()));
+                    if text != shown {
+                        blur.borrow_mut().push(Ask::Typed(key, text.to_owned()));
+                    }
                 }),
         );
         if let Some(widget) = self.ui.widget_mut::<TextInput>(input) {
@@ -808,13 +871,19 @@ impl SettingsWindow {
                     .map(|command| (command.id().as_str(), *command.meta())),
             );
         for (id, meta) in metas {
-            let keys: Vec<String> = keymaps
-                .iter()
-                .filter_map(|keymap| crate::toolbar::shortcut(keymap, id))
-                .collect();
-            let Some(keys) = keys.first().cloned() else {
+            let mut keys: Vec<String> = Vec::new();
+            for keymap in &keymaps {
+                for shortcut in keymap.shortcuts_for(imaginarium_commands::CommandId::new(id)) {
+                    let text = shortcut.display(keymap.platform());
+                    if !keys.contains(&text) {
+                        keys.push(text);
+                    }
+                }
+            }
+            if keys.is_empty() {
                 continue;
-            };
+            }
+            let keys = keys.join("  ");
             if found.is_some_and(|found| {
                 !found(&format!("{} {} {}", meta.title, meta.description, keys))
             }) {
@@ -934,10 +1003,17 @@ pub(crate) fn choices(declaration: &dyn AnySetting) -> Vec<(Value, String)> {
             if step <= 0.0 || (max - min) / step > 15.0 + 1e-9 {
                 return Vec::new();
             }
-            let count = ((max - min) / step).round() as i64;
+            // Whole steps that fit (a last one past `max` is left out), on
+            // the step's decimals: 0.1 · 4 is 0.4, not 0.40000000000000002.
+            let count = ((max - min) / step + 1e-9).floor() as i64;
+            let decimals = format!("{step}")
+                .split_once('.')
+                .map_or(0, |(_, fraction)| fraction.len()) as i32;
+            let scale = 10f64.powi(decimals);
             (0..=count)
                 .map(|at| {
-                    let value = min + step * at as f64;
+                    let value = ((min + step * at as f64) * scale).round() / scale;
+                    let value = value.min(max);
                     let value = if kind == ValueKind::Int {
                         Value::Int(value.round() as i64)
                     } else {
@@ -957,10 +1033,8 @@ pub(crate) fn format_value(value: &Value) -> String {
     match value {
         Value::Bool(on) => on.to_string(),
         Value::Int(n) => n.to_string(),
-        Value::Float(x) => {
-            let text = format!("{x:.3}");
-            text.trim_end_matches('0').trim_end_matches('.').to_owned()
-        }
+        // Exactly: a field shows what it would store again.
+        Value::Float(x) => format!("{x}"),
         Value::String(text) | Value::Enum(text) => text.clone(),
         Value::Color(color) => color.to_string(),
         Value::Path(path) => path.display().to_string(),
@@ -975,8 +1049,10 @@ pub(crate) fn format_value(value: &Value) -> String {
 
 /// Typed `text` as a value of `declaration`'s kind, or why it isn't one.
 pub(crate) fn parse(declaration: &dyn AnySetting, text: &str) -> Result<Value, String> {
-    let one = |kind: ValueKind, text: &str| -> Result<Value, String> {
-        let text = text.trim();
+    let one = |kind: ValueKind, raw: &str| -> Result<Value, String> {
+        // Text and paths are kept as typed; numbers and the like may have
+        // spaces around them.
+        let text = raw.trim();
         match kind {
             ValueKind::Bool => match text.to_lowercase().as_str() {
                 "true" | "on" | "yes" => Ok(Value::Bool(true)),
@@ -994,13 +1070,13 @@ pub(crate) fn parse(declaration: &dyn AnySetting, text: &str) -> Result<Value, S
                 .filter(|x| x.is_finite())
                 .map(Value::Float)
                 .ok_or_else(|| "Type a number.".to_owned()),
-            ValueKind::String => Ok(Value::String(text.to_owned())),
+            ValueKind::String => Ok(Value::String(raw.to_owned())),
             ValueKind::Enum => Ok(Value::Enum(text.to_owned())),
             ValueKind::Color => text
                 .parse::<Rgba>()
                 .map(Value::Color)
                 .map_err(|_| "Type a color like #3a4bd6.".to_owned()),
-            ValueKind::Path => Ok(Value::Path(text.into())),
+            ValueKind::Path => Ok(Value::Path(raw.into())),
             ValueKind::SecretRef | ValueKind::List(_) => {
                 Err("This can't be typed here.".to_owned())
             }
@@ -1027,16 +1103,43 @@ pub(crate) fn parse(declaration: &dyn AnySetting, text: &str) -> Result<Value, S
         }
         kind => one(kind, text)?,
     };
+    // The limits in words, not as the registry writes them (`5..=600`).
+    let number = |x: f64| format_value(&Value::Float(x));
+    match (declaration.constraint(), &value) {
+        (Constraint::Range { min, max, .. }, Value::Int(n))
+            if !(min..=max).contains(&(*n as f64)) =>
+        {
+            return Err(format!(
+                "Must be between {} and {}.",
+                number(min),
+                number(max)
+            ));
+        }
+        (Constraint::Range { min, max, .. }, Value::Float(x)) if !(min..=max).contains(x) => {
+            return Err(format!(
+                "Must be between {} and {}.",
+                number(min),
+                number(max)
+            ));
+        }
+        (Constraint::MaxLen(max), Value::String(text)) if text.chars().count() > max => {
+            return Err(format!("At most {max} characters."));
+        }
+        _ => {}
+    }
     declaration
         .validate(&value)
         .map(|()| value)
         .map_err(|err| reason_of(&err.to_string()))
 }
 
-/// The user-facing part of a validation error ("`files.x`: must be at
-/// most 600" → "Must be at most 600.").
+/// The user-facing part of a validation error: what follows the key
+/// ("invalid `files.x`: not a folder" → "Not a folder.").
 fn reason_of(error: &str) -> String {
-    let reason = error.rsplit(": ").next().unwrap_or(error).trim();
+    let reason = error
+        .split_once(": ")
+        .map_or(error, |(_, reason)| reason)
+        .trim();
     let mut chars = reason.chars();
     let mut text: String = chars
         .next()
@@ -1048,6 +1151,14 @@ fn reason_of(error: &str) -> String {
     text
 }
 
+/// Whether two values are the same, numbers within rounding.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Float(a), Value::Float(b)) => (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+        (a, b) => a == b,
+    }
+}
+
 fn color_of(color: Rgba) -> Color {
     Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
@@ -1055,12 +1166,32 @@ fn color_of(color: Rgba) -> Color {
 impl View for SettingsWindow {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         self.handle_asks();
-        self.ui
-            .layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
+        let area = Rect::from_origin_size((0.0, 0.0), size);
+        self.ui.layout(&mut self.fonts, area);
+        if self.restore.is_some() {
+            self.restore_focus();
+            self.ui.layout(&mut self.fonts, area);
+        }
         self.ui.paint(&mut self.fonts, scene);
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        // Ctrl+W closes it, as it closes a board.
+        if let Input::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = input
+            && let Some(press) = imaginarium_canvas::keys::key_press(key, *modifiers)
+            && crate::commands::shell_keymap(Platform::current())
+                .command_for_press(press)
+                .is_some_and(|command| command.as_str() == "window.close")
+        {
+            self.requests.push(WindowRequest::Close);
+            return true;
+        }
         let handled = self.ui.input(&mut self.fonts, input);
         self.handle_asks() || handled
     }
@@ -1159,9 +1290,10 @@ mod tests {
     #[test]
     fn typed_values_are_parsed_for_their_kind_and_checked() {
         assert_eq!(parse(&SECONDS, " 60 "), Ok(Value::Int(60)));
-        let below = parse(&SECONDS, "1").unwrap_err();
-        assert!(below.contains('5') && below.ends_with('.'), "{below}");
-        assert!(!below.contains("files.autosave_seconds"), "{below}");
+        assert_eq!(
+            parse(&SECONDS, "1"),
+            Err("Must be between 5 and 600.".to_owned())
+        );
         assert!(parse(&SECONDS, "soon").is_err());
         assert_eq!(parse(&SIZE, "1,5"), Ok(Value::Float(1.5)));
         assert_eq!(
@@ -1178,6 +1310,12 @@ mod tests {
         let sizes = choices(&SIZE);
         assert_eq!(sizes.len(), 13);
         assert_eq!(sizes[2].1, "1");
+        // Clean steps: 1.2, not 1.2000000000000002, and none past the end.
+        assert_eq!(sizes[4].0, Value::Float(1.2));
+        assert_eq!(sizes[12].0, Value::Float(2.0));
+        for (value, _) in &sizes {
+            assert!(SIZE.validate(value).is_ok(), "{value:?}");
+        }
         // A wide range (or one without a step) is typed.
         assert!(choices(&SECONDS).is_empty());
     }

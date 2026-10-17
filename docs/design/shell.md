@@ -424,14 +424,18 @@ open it), one at a time:
   (an enum of up to three values), a dropdown (more values, or a numeric
   range of at most 16 steps), a text field (numbers, text, paths, lists
   as comma-separated items; it keeps its value on Enter or when the focus
-  leaves, and says why a value was refused), a swatch and hex field
+  leaves after an edit, Esc puts the old text back, and a refused value
+  says why as an alert), a swatch and hex field
   (colors), and the keychain entry's name (secrets, edited with M6).
   Changes apply at once and are saved (above); a change from elsewhere
-  (the palette, another window) shows at once.
+  (the palette, another window) shows at once, except in a field being
+  typed in, which is rebuilt when it is left. After a change the keys
+  stay on the control that made it.
 - **Search:** every word in the title, description, synonyms or key;
   the results are grouped by section, shortcuts included.
 - **Keyboard shortcuts** lists the board's and the windows' commands with
-  their keys; changing them comes later.
+  all their keys; changing them comes later.
+- `Ctrl+W` closes the window.
 - A notice above the settings when saving fails or the file was
   unreadable.
 - **Not yet:** the scope tabs For me and This board (part 4), the

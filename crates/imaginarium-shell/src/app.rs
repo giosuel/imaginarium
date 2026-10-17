@@ -196,9 +196,19 @@ mod tests {
 
     use super::*;
 
+    static SECONDS: imaginarium_settings::Setting<i64> = imaginarium_settings::Setting::new(
+        "files.autosave_seconds",
+        || 30,
+        imaginarium_settings::Scope::App,
+        "Autosave interval",
+        "How often to save, in seconds.",
+    )
+    .range(5, 600);
+
     fn app() -> Rc<App> {
         let mut registry = Registry::new();
         registry.register_all(crate::SETTINGS).unwrap();
+        registry.register(&SECONDS).unwrap();
         App::new(
             Fonts::bundled_only(),
             Rc::new(RefCell::new(registry)),
@@ -587,5 +597,134 @@ mod tests {
             .find(|(_, node)| node.label() == Some("Show at startup") && node.toggled().is_some())
             .and_then(|(_, node)| node.toggled());
         assert_eq!(toggled, Some(accesskit::Toggled::False));
+    }
+
+    fn key(window: &mut crate::settings::SettingsWindow, key: Key, text: Option<&str>) {
+        window.input(&Input::Key {
+            key,
+            text: text.map(str::to_owned),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+        settings_frame(window);
+    }
+
+    fn type_into(window: &mut crate::settings::SettingsWindow, text: &str) {
+        for c in text.chars() {
+            key(window, Key::Character(c.to_string()), Some(&c.to_string()));
+        }
+    }
+
+    fn focused_label(window: &mut crate::settings::SettingsWindow) -> Option<String> {
+        let (ui, fonts) = window.ui();
+        let focused = ui.focused()?;
+        let mut tree = imaginarium_ui::AccessTree::default();
+        ui.access(fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .find(|(id, _)| *id == accesskit::NodeId(focused.access_base()))
+            .and_then(|(_, node)| node.label().map(str::to_owned))
+    }
+
+    #[test]
+    fn the_keys_stay_on_a_control_after_it_changes_a_setting() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        // Tab to the switch (past the search and the sections), Space.
+        let label = "Show the start window at startup";
+        for _ in 0..20 {
+            if focused_label(&mut window).as_deref() == Some(label) {
+                break;
+            }
+            key(&mut window, Key::Tab, None);
+        }
+        assert_eq!(focused_label(&mut window).as_deref(), Some(label));
+        key(&mut window, Key::Character(" ".into()), Some(" "));
+        assert!(!app.shows_start_window());
+        settings_frame(&mut window);
+        assert_eq!(focused_label(&mut window).as_deref(), Some(label));
+    }
+
+    #[test]
+    fn rebuilding_doesnt_keep_the_old_widgets() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        let before = window.ui().0.stats().widgets;
+        press(&mut window, "Search settings");
+        type_into(&mut window, "dockx");
+        for _ in 0..5 {
+            key(&mut window, Key::Backspace, None);
+        }
+        settings_frame(&mut window);
+        let after = window.ui().0.stats().widgets;
+        assert!(after <= before + 2, "{before} widgets, then {after}");
+    }
+
+    #[test]
+    fn a_field_keeps_a_typed_value_and_esc_takes_it_back() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Files and saving");
+        press(&mut window, "Autosave interval");
+        key(&mut window, Key::End, None);
+        type_into(&mut window, "0");
+        key(&mut window, Key::Escape, None);
+        assert_eq!(app.settings().borrow().get(&SECONDS).unwrap(), 30);
+        // The field shows the value again, and leaving it changes nothing.
+        press(&mut window, "Autosave interval");
+        key(&mut window, Key::Tab, None);
+        assert_eq!(app.settings().borrow().get(&SECONDS).unwrap(), 30);
+        // Enter keeps a typed value.
+        press(&mut window, "Autosave interval");
+        key(&mut window, Key::End, None);
+        type_into(&mut window, "0");
+        key(&mut window, Key::Enter, None);
+        assert_eq!(app.settings().borrow().get(&SECONDS).unwrap(), 300);
+        // Out of range: said in words.
+        press(&mut window, "Autosave interval");
+        key(&mut window, Key::End, None);
+        type_into(&mut window, "0");
+        key(&mut window, Key::Enter, None);
+        assert_eq!(app.settings().borrow().get(&SECONDS).unwrap(), 300);
+        assert!(has(&mut window, "Must be between 5 and 600."));
+    }
+
+    #[test]
+    fn a_failed_save_shows_while_settings_is_open() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        // A file where the settings folder should be: saving fails.
+        let blocked =
+            std::env::temp_dir().join(format!("imaginarium-shell-{}", std::process::id()));
+        std::fs::write(&blocked, "").unwrap();
+        let writer = imaginarium_settings::FileWriter::new(blocked.join("settings.toml"));
+        let status = writer.status();
+        let mut sink = writer.sink();
+        sink("a = 1\n".to_owned());
+        assert!(writer.finish().is_some());
+        app.report_saving(Some(status), None);
+        settings_frame(&mut window);
+        let (ui, fonts) = window.ui();
+        let mut tree = imaginarium_ui::AccessTree::default();
+        ui.access(fonts, &mut tree);
+        assert!(tree.nodes().iter().any(|(_, node)| {
+            node.label()
+                .is_some_and(|label| label.starts_with("Settings can't be saved"))
+        }));
+        std::fs::remove_file(&blocked).unwrap();
+    }
+
+    #[test]
+    fn ctrl_w_closes_settings() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        window.input(&ctrl("w"));
+        assert_eq!(names(&window.take_requests()), ["Close"]);
     }
 }
