@@ -71,7 +71,8 @@ pub use layers::{Align, Anchor, LayerId, LayerKind, LayerOptions, Placement};
 pub use scroll::{RowBuilder, Scroll, VirtualList};
 pub use tree::{ACCESS_LOCAL_IDS, Cx, TOOLTIP_DELAY, TreeStats, Ui, Widget, WidgetId, invalidate};
 pub use widgets::{
-    Button, ButtonBox, ButtonColors, Flex, Icon, IconButton, InputColors, Label, TextInput, label,
+    Button, ButtonBox, ButtonColors, Flex, Icon, IconButton, InputColors, Label, Switch, TextInput,
+    label,
 };
 
 pub use access::{AccessTree, ROOT, rect as access_rect};

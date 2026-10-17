@@ -76,6 +76,8 @@ pub struct LayerOptions {
     pub(crate) initial_focus: Option<WidgetId>,
     pub(crate) dismissable: bool,
     pub(crate) on_close: Option<Box<dyn FnMut()>>,
+    /// A dialog's dimming, if not the theme's ([`LayerOptions::scrim`]).
+    pub(crate) scrim: Option<f32>,
 }
 
 impl LayerOptions {
@@ -92,6 +94,7 @@ impl LayerOptions {
             initial_focus: None,
             dismissable: true,
             on_close: None,
+            scrim: None,
         }
     }
 
@@ -107,6 +110,7 @@ impl LayerOptions {
             initial_focus: None,
             dismissable: true,
             on_close: None,
+            scrim: None,
         }
     }
 
@@ -122,6 +126,7 @@ impl LayerOptions {
             initial_focus: None,
             dismissable: false,
             on_close: None,
+            scrim: None,
         }
     }
 
@@ -169,6 +174,14 @@ impl LayerOptions {
     /// its state here).
     pub fn on_close(mut self, on_close: impl FnMut() + 'static) -> Self {
         self.on_close = Some(Box::new(on_close));
+        self
+    }
+
+    /// Dims the window behind a dialog this much (0 to 1) instead of the
+    /// theme's [`Token::Scrim`](crate::Token::Scrim): the command palette
+    /// dims less than a question does.
+    pub fn scrim(mut self, alpha: f32) -> Self {
+        self.scrim = Some(alpha.clamp(0.0, 1.0));
         self
     }
 }

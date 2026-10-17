@@ -255,6 +255,10 @@ pub struct Label {
     /// Never wraps (a status line); otherwise it wraps down to its
     /// longest word when its box gets narrow, as text in CSS does.
     single_line: bool,
+    /// Stretches drawn in another weight and color (a search's matches),
+    /// as byte ranges.
+    highlights: Vec<std::ops::Range<usize>>,
+    highlight: (f32, Paint),
 }
 
 impl Label {
@@ -267,7 +271,22 @@ impl Label {
             block: None,
             layout: Style::default(),
             single_line: false,
+            highlights: Vec::new(),
+            highlight: (600.0, Paint::Token(crate::theme::Token::AccentInk)),
         }
+    }
+
+    /// Draws the byte `ranges` of its text in `weight` and `paint` (the
+    /// letters a search matched).
+    pub fn highlight(
+        mut self,
+        ranges: Vec<std::ops::Range<usize>>,
+        weight: f32,
+        paint: impl Into<Paint>,
+    ) -> Self {
+        self.highlights = ranges;
+        self.highlight = (weight, paint.into());
+        self
     }
 
     /// Keeps the text on one line, however narrow the box (its parent
@@ -336,7 +355,22 @@ impl Label {
             }
             _ => {
                 let style = self.style.color(color);
-                let block = TextBlock::new(cx.fonts(), &text, &style, width);
+                let block = if self.highlights.is_empty() {
+                    TextBlock::new(cx.fonts(), &text, &style, width)
+                } else {
+                    let (weight, paint) = self.highlight;
+                    let color = Some(paint.current());
+                    let spans: Vec<imaginarium_text::Span> = self
+                        .highlights
+                        .iter()
+                        .map(|range| imaginarium_text::Span {
+                            range: range.clone(),
+                            weight: Some(weight),
+                            color,
+                        })
+                        .collect();
+                    TextBlock::with_spans(cx.fonts(), &text, &style, &spans, width)
+                };
                 self.block = Some((text, width, color, block));
             }
         }
@@ -369,6 +403,8 @@ pub fn label(
         block: None,
         layout: Style::default(),
         single_line: false,
+        highlights: Vec::new(),
+        highlight: (600.0, Paint::Token(crate::theme::Token::AccentInk)),
     });
     ui.watch(id, true, move || {
         text();
@@ -701,6 +737,7 @@ pub struct ButtonBox {
     label: String,
     tooltip: Option<(String, crate::layers::Placement)>,
     focus_on_click: bool,
+    selected: Option<Flag>,
     action: Box<dyn FnMut()>,
     pressed: bool,
     /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
@@ -733,6 +770,7 @@ impl ButtonBox {
             label: label.into(),
             tooltip: None,
             focus_on_click: true,
+            selected: None,
             action: Box::new(action),
             pressed: false,
             tone: crate::animation::Transition::new(0.0),
@@ -803,6 +841,27 @@ impl ButtonBox {
         self
     }
 
+    /// Filled with [`Token::ControlActive`](crate::Token::ControlActive)
+    /// while `selected` is true (the palette's active row). It may read
+    /// signals: [`ButtonBox::add_to`] repaints when they change.
+    pub fn selected(mut self, selected: impl Fn() -> bool + 'static) -> Self {
+        self.selected = Some(Rc::new(selected));
+        self
+    }
+
+    /// Adds the button with `children` to `ui`, repainting it when the
+    /// signals its selected state reads change.
+    pub fn add_to(self, ui: &mut Ui, children: &[WidgetId]) -> WidgetId {
+        let selected = self.selected.clone();
+        let id = ui.add_with_children(self, children);
+        if let Some(selected) = selected {
+            ui.watch(id, false, move || {
+                selected();
+            });
+        }
+        id
+    }
+
     fn retone(&mut self, hovered: bool) {
         use crate::animation::{Easing, durations};
         let target = if self.pressed {
@@ -833,11 +892,17 @@ impl Widget for ButtonBox {
             paint_shadow(scene, bounds, self.radius, &theme);
         }
         let tone = self.tone.value();
-        let (rest, hover, pressed) = (
-            self.colors.background.resolve(&theme),
-            self.colors.hover.resolve(&theme),
-            self.colors.pressed.resolve(&theme),
-        );
+        let selected = self.selected.as_ref().is_some_and(|selected| selected());
+        let (rest, hover, pressed) = if selected {
+            let active = theme.color(crate::theme::Token::ControlActive);
+            (active, active, active)
+        } else {
+            (
+                self.colors.background.resolve(&theme),
+                self.colors.hover.resolve(&theme),
+                self.colors.pressed.resolve(&theme),
+            )
+        };
         let background = if tone <= 1.0 {
             crate::theme::mix(rest, hover, tone as f32)
         } else {
@@ -1299,6 +1364,165 @@ impl Widget for IconButton {
     }
 }
 
+/// An on/off switch (a boolean setting): click, Enter or Space runs its
+/// action, which flips what `on` reads.
+///
+/// ```
+/// # use imaginarium_ui::{Switch, Ui};
+/// # use imaginarium_reactive::signal;
+/// let mut ui = Ui::new();
+/// let snap = signal(true);
+/// let switch = Switch::new("Snap to whole pixels", move || snap.get(), move || {
+///     snap.update(|on| *on = !*on)
+/// })
+/// .add_to(&mut ui);
+/// # let _ = switch;
+/// ```
+pub struct Switch {
+    label: String,
+    on: Flag,
+    action: Box<dyn FnMut()>,
+    pressed: bool,
+}
+
+impl Switch {
+    /// A 34×20 switch named `label`, showing `on`, that runs `action`.
+    pub fn new(
+        label: impl Into<String>,
+        on: impl Fn() -> bool + 'static,
+        action: impl FnMut() + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            on: Rc::new(on),
+            action: Box::new(action),
+            pressed: false,
+        }
+    }
+
+    /// Adds the switch to `ui`, repainting it when what `on` reads
+    /// changes.
+    pub fn add_to(self, ui: &mut Ui) -> WidgetId {
+        let on = self.on.clone();
+        let id = ui.add(self);
+        ui.watch(id, false, move || {
+            on();
+        });
+        id
+    }
+}
+
+impl Widget for Switch {
+    fn style(&self) -> Style {
+        Style {
+            size: taffy::Size {
+                width: length(34.0),
+                height: length(20.0),
+            },
+            flex_shrink: 0.0,
+            ..Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        use crate::theme::Token;
+        let bounds = cx.bounds();
+        let theme = theme();
+        let on = (self.on)();
+        let track = RoundedRect::from_rect(bounds, bounds.height() / 2.0);
+        let (fill, knob) = if on {
+            (theme.color(Token::Accent), theme.color(Token::OnAccent))
+        } else {
+            (
+                theme.color(Token::ControlBorder),
+                theme.color(Token::TextMuted),
+            )
+        };
+        scene.fill(&track, fill);
+        let radius = bounds.height() / 2.0 - 2.0;
+        let x = if on {
+            bounds.x1 - 2.0 - radius
+        } else {
+            bounds.x0 + 2.0 + radius
+        };
+        scene.fill(
+            &imaginarium_render::kurbo::Circle::new((x, bounds.center().y), radius),
+            knob,
+        );
+        if cx.is_focus_visible() {
+            scene.stroke(
+                &RoundedRect::from_rect(bounds.inflate(2.0, 2.0), bounds.height() / 2.0 + 2.0),
+                2.0,
+                theme.color(Token::AccentInk),
+            );
+        }
+    }
+
+    fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        match input {
+            Input::PointerButton {
+                primary: true,
+                pressed,
+                position,
+                ..
+            } => {
+                if *pressed {
+                    self.pressed = true;
+                } else if std::mem::take(&mut self.pressed) && cx.bounds().contains(*position) {
+                    (self.action)();
+                    cx.request_paint();
+                }
+                true
+            }
+            Input::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                ..
+            } if *key == Key::Enter || *key == Key::Character(" ".into()) => {
+                (self.action)();
+                cx.request_paint();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn capture_lost(&mut self, _cx: &mut Cx<'_>) {
+        self.pressed = false;
+    }
+
+    fn focusable(&self) -> bool {
+        true
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        let mut node = Node::new(Role::Switch);
+        node.set_label(self.label.clone());
+        node.set_toggled(if (self.on)() {
+            accesskit::Toggled::True
+        } else {
+            accesskit::Toggled::False
+        });
+        node.set_bounds(access_rect(cx.bounds()));
+        node.add_action(Action::Click);
+        Some(node)
+    }
+
+    fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
+        if request.action == Action::Click {
+            (self.action)();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Callbacks of a [`TextInput`].
 type TextCallback = Box<dyn FnMut(&str)>;
 
@@ -1311,6 +1535,8 @@ pub struct TextInput {
     on_submit: TextCallback,
     /// Keys the field leaves to its ancestors (a list's ↑/↓, Escape).
     passes: Vec<Key>,
+    /// Drawn without its box and focus line (the palette's field).
+    bare: bool,
     colors: InputColors,
     height: f32,
 }
@@ -1361,6 +1587,7 @@ impl TextInput {
             on_change: Box::new(|_| {}),
             on_submit: Box::new(|_| {}),
             passes: Vec::new(),
+            bare: false,
             colors,
             height: (style.size * style.line_height + 2.0 * padding as f32).ceil(),
         }
@@ -1375,6 +1602,13 @@ impl TextInput {
     /// Called with the text on Enter.
     pub fn on_submit(mut self, action: impl FnMut(&str) + 'static) -> Self {
         self.on_submit = Box::new(action);
+        self
+    }
+
+    /// Without its box and focus line: the field of a panel that is the
+    /// box itself (the command palette).
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
         self
     }
 
@@ -1416,12 +1650,14 @@ impl Widget for TextInput {
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
         let theme = theme();
-        let shape = RoundedRect::from_rect(bounds, theme.control_radius);
-        scene.fill(&shape, self.colors.background.resolve(&theme));
-        if cx.is_focused() {
-            scene.stroke(&shape, 2.0, self.colors.accent.resolve(&theme));
-        } else {
-            scene.stroke(&shape, 1.0, self.colors.border.resolve(&theme));
+        if !self.bare {
+            let shape = RoundedRect::from_rect(bounds, theme.control_radius);
+            scene.fill(&shape, self.colors.background.resolve(&theme));
+            if cx.is_focused() {
+                scene.stroke(&shape, 2.0, self.colors.accent.resolve(&theme));
+            } else {
+                scene.stroke(&shape, 1.0, self.colors.border.resolve(&theme));
+            }
         }
         self.field
             .editor()

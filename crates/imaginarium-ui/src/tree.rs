@@ -1604,20 +1604,21 @@ impl Ui {
         if let Some(root) = self.root {
             self.paint_node(fonts, root, scene);
         }
-        let layers: Vec<(WidgetId, LayerKind, f64)> = self
+        let layers: Vec<(WidgetId, LayerKind, f64, Option<f32>)> = self
             .layers
             .iter()
             .map(|layer| {
                 let appear = layer.appear.value();
-                (layer.root, layer.options.kind, appear)
+                (layer.root, layer.options.kind, appear, layer.options.scrim)
             })
             .collect();
-        for (root, kind, appear) in layers {
+        for (root, kind, appear, dim) in layers {
             // Layers fade in as they open; the scrim with its dialog.
             let alpha = appear.clamp(0.0, 1.0) as f32;
             if kind == LayerKind::Modal {
                 let scrim = crate::theme::theme().color(crate::theme::Token::Scrim);
-                let scrim = scrim.with_alpha(scrim.components[3] * alpha);
+                let strength = dim.unwrap_or(scrim.components[3]);
+                let scrim = scrim.with_alpha(strength * alpha);
                 scene.fill(&self.area, scrim);
             }
             if alpha < 1.0 {

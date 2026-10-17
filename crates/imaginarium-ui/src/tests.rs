@@ -1967,3 +1967,61 @@ fn a_press_lost_with_the_focus_does_not_click_on_a_later_release() {
     ui.input(&mut fonts, &pointer(at, true, false));
     assert_eq!(clicks.get(), 0);
 }
+
+#[test]
+fn a_switch_flips_on_click_and_key_and_says_so() {
+    use crate::widgets::Switch;
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let on = signal(false);
+    let switch =
+        Switch::new("Snap", move || on.get(), move || on.update(|on| *on = !*on)).add_to(&mut ui);
+    let root = ui.add_with_children(Flex::row().fill().padding(10.0, 10.0), &[switch]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let toggled = |ui: &mut Ui, fonts: &mut Fonts| {
+        check_access(ui, fonts)
+            .nodes
+            .into_iter()
+            .find(|(id, _)| *id == NodeId(switch.access_base()))
+            .and_then(|(_, node)| node.toggled())
+    };
+    assert_eq!(
+        toggled(&mut ui, &mut fonts),
+        Some(accesskit::Toggled::False)
+    );
+    let at = ui.bounds(switch).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    frame(&mut ui, &mut fonts);
+    assert!(on.get_untracked());
+    assert_eq!(toggled(&mut ui, &mut fonts), Some(accesskit::Toggled::True));
+    ui.input(&mut fonts, &key(Key::Enter));
+    assert!(!on.get_untracked());
+}
+
+#[test]
+fn highlighted_letters_are_drawn_bolder() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let plain = ui.add(Label::new("Group", TextStyle::new(14.0)).single_line());
+    let marked = ui.add(
+        Label::new("Group", TextStyle::new(14.0))
+            .single_line()
+            .highlight(std::iter::once(1..4).collect(), 700.0, Token::AccentInk),
+    );
+    let root = ui.add_with_children(
+        Flex::column().fill().style(|style| {
+            style.align_items = taffy::AlignItems::FLEX_START;
+        }),
+        &[plain, marked],
+    );
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let (plain, marked) = (
+        ui.bounds(plain).unwrap().width(),
+        ui.bounds(marked).unwrap().width(),
+    );
+    assert!(marked > plain, "{marked} > {plain}");
+}
