@@ -509,6 +509,12 @@ Decided (2026-10-16):
 - **Frame names are drawn on top of the tiles** (2026-10-16, canvas.md
   §11): they keep the interface's size at every zoom, like the
   selection.
+- **M3.4, the shell, starts** (2026-10-17): "1) yes, lets go". The
+  board window comes first, then the palette, the contextual toolbar,
+  the context menu, the inspector and the start window.
+- **The arrow shortcuts for z-order stay** (2026-10-17): "2) yes".
+  Mod+Shift+Up/Down (to front, to back) and Mod+Up/Down (forward,
+  backward) keep working next to Mod+] and Mod+[.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
