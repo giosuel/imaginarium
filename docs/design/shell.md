@@ -340,9 +340,19 @@ when the last board closes.
 - **One window per document:** `imaginarium-ui` runs several windows in
   one event loop. Views ask for windows (`View::take_requests`) and hear
   the close button (`View::close_requested`); the run ends with the last
-  window. The second and later windows share the first one's GPU device
-  (`WindowRenderer::sibling`) and the app's fonts (`Fonts::share`, one
-  scan of the system's fonts), settings and tile workers (`App`).
+  window. The windows share one GPU device (`SharedGpu`), the app's
+  fonts (`Fonts::share`, one scan of the system's fonts), settings and
+  tile workers (`App`). The next window's Vello renderer is built on a
+  thread ahead of time, or is the one a closed window left (the start
+  window's goes to the board it opens).
+- **Per window:** a frame asked for by a view (`request_frame`) draws
+  only its window; a signal change draws the window whose widget tree
+  watches it, wherever the change came from; the scale factor, input
+  method resets and pasted text are the window's own. A window that
+  fails (no surface, no GPU) closes alone, listed in
+  `RunStats::window_errors`; the run fails only if it was the last.
+- **Held keys:** `Ctrl+N` and `Ctrl+W` act once while held, and the
+  start window opens one board however often New board is pressed.
 - **Closing:** `Ctrl+W` (`window.close`) or the close button. A board
   stops counting as open as soon as it starts closing, so boards closed
   together still bring the start window back once. Closing the start
@@ -353,9 +363,10 @@ when the last board closes.
   frame of the start window 240–255 ms after `main` starts (about 55 ms
   of setup, mostly the font scan, while the GPU opens on its thread; then
   about 150 ms waiting for the GPU), under PLAN §10's 400 ms. A new board
-  window draws its first frame about 245 ms after `Ctrl+N`, 130 ms of
-  which build its own Vello renderer (the pipelines are compiled per
-  window); sharing them between windows is a follow-up.
+  window draws its first frame 75 ms after `Ctrl+N` in the start window
+  and 137 ms after it in a board (its renderer is ready: 2 ms instead of
+  the 130 ms its pipelines take to compile). Two idle board windows use
+  no CPU.
 
 ## 5. Settings
 

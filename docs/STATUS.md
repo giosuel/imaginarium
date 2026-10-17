@@ -1162,10 +1162,6 @@ What M3 builds on:
 
 ## Known issues and notes
 
-- **A new window builds its own Vello renderer** (M3.4 part 6): about
-  130 ms of the 245 ms from `Ctrl+N` to the new board's first frame on
-  llvmpipe go into compiling its pipelines. Sharing one renderer's
-  pipelines between windows would cut that.
 - **Two render tests are timing-sensitive**: `canvas::tests::
   the_budget_owes_tiles_and_stand_ins_fill_them` and
   `uploads_follow_what_they_cost` failed once in a full workspace run
