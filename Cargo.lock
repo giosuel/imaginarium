@@ -2120,7 +2120,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "imaginarium-canvas",
- "imaginarium-model",
  "imaginarium-render",
  "imaginarium-settings",
  "imaginarium-shell",

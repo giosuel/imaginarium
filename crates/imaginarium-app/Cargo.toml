@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 imaginarium-canvas.workspace = true
-imaginarium-model.workspace = true
 imaginarium-render.workspace = true
 imaginarium-settings.workspace = true
 imaginarium-shell.workspace = true
