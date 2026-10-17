@@ -1572,3 +1572,215 @@ fn a_focused_row_scrolled_away_leaves_the_focus_with_its_list() {
     assert!(ui.bounds(row_button).is_none(), "the row is gone");
     assert_eq!(ui.focused(), Some(list), "keys still reach the list");
 }
+
+/// A row of two icon buttons, the first with a shortcut.
+fn icon_buttons(ui: &mut Ui, clicks: &Rc<Cell<u32>>) -> (WidgetId, WidgetId) {
+    use crate::widgets::IconButton;
+    let counter = clicks.clone();
+    let zoom = IconButton::new("plus", "Zoom in", move || counter.set(counter.get() + 1))
+        .shortcut("Ctrl +")
+        .add_to(ui);
+    let fit = IconButton::new("scan", "Zoom to fit", || {}).add_to(ui);
+    let root = ui.add_with_children(
+        Flex::row().fill().gap(20.0).padding(10.0, 10.0),
+        &[zoom, fit],
+    );
+    ui.set_root(root);
+    (zoom, fit)
+}
+
+#[test]
+fn a_tooltip_shows_after_the_pointer_rests_and_goes_when_it_moves_or_presses() {
+    use crate::animation::set_clock_for_tests;
+    use crate::tree::TOOLTIP_DELAY;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let (zoom, fit) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let over_zoom = ui.bounds(zoom).unwrap().center();
+    let over_fit = ui.bounds(fit).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(over_zoom));
+    frame(&mut ui, &mut fonts);
+    // Not at once, nor a moment before the delay is over; the window is
+    // woken for it.
+    step_frames(
+        &mut ui,
+        &mut fonts,
+        start + TOOLTIP_DELAY - std::time::Duration::from_millis(1),
+    );
+    assert_eq!(ui.tip_for_tests(), None);
+    assert_eq!(ui.wake_at(), Some(start + TOOLTIP_DELAY));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert_eq!(
+        ui.tip_for_tests(),
+        Some((zoom, "Zoom in · Ctrl +".to_owned()))
+    );
+    // Moving within the button keeps it; moving to the next starts over.
+    ui.input(&mut fonts, &Input::PointerMoved(over_zoom + (2.0, 2.0)));
+    assert!(ui.tip_for_tests().is_some());
+    let moved = start + TOOLTIP_DELAY * 2;
+    set_clock_for_tests(Some(moved));
+    ui.input(&mut fonts, &Input::PointerMoved(over_fit));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.tip_for_tests(), None);
+    step_frames(&mut ui, &mut fonts, moved + TOOLTIP_DELAY);
+    assert_eq!(ui.tip_for_tests(), Some((fit, "Zoom to fit".to_owned())));
+    // A press hides it, and it doesn't come back while the pointer stays.
+    ui.input(&mut fonts, &pointer(over_fit, true, true));
+    ui.input(&mut fonts, &pointer(over_fit, true, false));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.tip_for_tests(), None);
+    step_frames(&mut ui, &mut fonts, moved + TOOLTIP_DELAY * 4);
+    assert_eq!(ui.tip_for_tests(), None);
+    // Leaving the window before the delay shows nothing.
+    let later = moved + TOOLTIP_DELAY * 5;
+    set_clock_for_tests(Some(later));
+    ui.input(&mut fonts, &Input::PointerMoved(over_zoom));
+    ui.input(&mut fonts, &Input::PointerLeft);
+    step_frames(&mut ui, &mut fonts, later + TOOLTIP_DELAY * 2);
+    assert_eq!(ui.tip_for_tests(), None);
+    set_clock_for_tests(None);
+}
+
+#[test]
+fn a_removed_widget_takes_its_tooltip_along() {
+    use crate::animation::set_clock_for_tests;
+    use crate::tree::TOOLTIP_DELAY;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let (zoom, _) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let over_zoom = ui.bounds(zoom).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(over_zoom));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert!(ui.tip_for_tests().is_some());
+    ui.remove(zoom);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.tip_for_tests(), None);
+    check_access(&mut ui, &mut fonts);
+    set_clock_for_tests(None);
+}
+
+#[test]
+fn a_disabled_icon_button_does_nothing_until_enabled() {
+    use crate::widgets::IconButton;
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let can_redo = signal(false);
+    let counter = clicks.clone();
+    let redo = IconButton::new("redo-2", "Redo", move || counter.set(counter.get() + 1))
+        .enabled(move || can_redo.get())
+        .add_to(&mut ui);
+    let root = ui.add_with_children(Flex::row().fill().padding(10.0, 10.0), &[redo]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(redo).unwrap().center();
+    let click = |ui: &mut Ui, fonts: &mut Fonts| {
+        ui.input(fonts, &pointer(at, true, true));
+        ui.input(fonts, &pointer(at, true, false));
+        frame(ui, fonts);
+    };
+    let node = |ui: &mut Ui, fonts: &mut Fonts| {
+        let update = check_access(ui, fonts);
+        update
+            .nodes
+            .into_iter()
+            .find(|(id, _)| *id == NodeId(redo.access_base()))
+            .map(|(_, node)| node)
+            .unwrap()
+    };
+    click(&mut ui, &mut fonts);
+    ui.set_focus(&mut fonts, Some(redo));
+    ui.input(&mut fonts, &key(Key::Enter));
+    let request = ActionRequest {
+        action: Action::Click,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: NodeId(redo.access_base()),
+        data: None,
+    };
+    ui.access_action(&mut fonts, &request);
+    assert_eq!(clicks.get(), 0);
+    assert!(node(&mut ui, &mut fonts).is_disabled());
+    // The signal turns it on: the screen reader hears so, a click works.
+    can_redo.set(true);
+    frame(&mut ui, &mut fonts);
+    assert!(!node(&mut ui, &mut fonts).is_disabled());
+    click(&mut ui, &mut fonts);
+    assert_eq!(clicks.get(), 1);
+}
+
+#[test]
+fn a_selected_icon_button_is_toggled_and_tinted() {
+    use crate::widgets::IconButton;
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let tool = signal("select");
+    let rectangle = IconButton::new("rectangle-horizontal", "Rectangle", move || {
+        tool.set("rectangle")
+    })
+    .shortcut("R")
+    .size(40.0, 40.0, 10.0, 20.0)
+    .selected(move || tool.get() == "rectangle")
+    .add_to(&mut ui);
+    let root = ui.add_with_children(Flex::row().fill().padding(10.0, 10.0), &[rectangle]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(
+        ui.bounds(rectangle).map(|b| b.size()),
+        Some(Size::new(40.0, 40.0))
+    );
+    let toggled = |ui: &mut Ui, fonts: &mut Fonts| {
+        check_access(ui, fonts)
+            .nodes
+            .into_iter()
+            .find(|(id, _)| *id == NodeId(rectangle.access_base()))
+            .and_then(|(_, node)| node.toggled())
+    };
+    assert_eq!(
+        toggled(&mut ui, &mut fonts),
+        Some(accesskit::Toggled::False)
+    );
+    let at = ui.bounds(rectangle).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(tool.get_untracked(), "rectangle");
+    assert_eq!(toggled(&mut ui, &mut fonts), Some(accesskit::Toggled::True));
+}
+
+#[test]
+fn hiding_a_tooltip_leaves_a_popover_opened_after_it() {
+    use crate::animation::set_clock_for_tests;
+    use crate::layers::{Anchor, LayerOptions};
+    use crate::tree::TOOLTIP_DELAY;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let (zoom, _) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let over_zoom = ui.bounds(zoom).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(over_zoom));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert!(ui.tip_for_tests().is_some());
+    // A shortcut opens a menu while the tooltip shows.
+    let (content, _, _) = menu(&mut ui, &clicks);
+    let popover = ui.open_layer(content, LayerOptions::popover(Anchor::Widget(zoom)));
+    frame(&mut ui, &mut fonts);
+    ui.input(&mut fonts, &Input::PointerLeft);
+    frame(&mut ui, &mut fonts);
+    assert_eq!(ui.tip_for_tests(), None);
+    assert!(ui.is_layer_open(popover));
+    check_access(&mut ui, &mut fonts);
+    set_clock_for_tests(None);
+}

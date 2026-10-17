@@ -168,6 +168,14 @@ pub trait Widget: Any {
         None
     }
 
+    /// What a tooltip says when the pointer rests on it (its name and its
+    /// key, "Rectangle · R"). The tree shows it after a moment
+    /// ([`TOOLTIP_DELAY`]) and hides it when the pointer moves on or
+    /// presses.
+    fn tooltip(&self) -> Option<String> {
+        None
+    }
+
     /// A screen reader's request aimed at one of its nodes. `true` if it
     /// did something. (Focus is handled by the tree, which gives the widget
     /// the keyboard focus; a focus on one of the widget's own nodes then
@@ -337,6 +345,10 @@ thread_local! {
     static PENDING: RefCell<Vec<(WidgetId, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// How long the pointer rests on a widget before its tooltip shows
+/// (`shell.md` §3.3).
+pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Marks `id` for repainting (and re-layout if `layout`), and asks for a
 /// frame. Effects call this; it is safe while the tree is borrowed.
 pub fn invalidate(id: WidgetId, layout: bool) {
@@ -417,6 +429,10 @@ pub struct Ui {
     root: Option<WidgetId>,
     focus: Option<WidgetId>,
     hover: Option<WidgetId>,
+    /// A widget with a tooltip under the pointer since then.
+    tip_wait: Option<(WidgetId, Instant)>,
+    /// The tooltip shown, and the widget it is for.
+    tip: Option<(WidgetId, LayerId)>,
     capture: Option<WidgetId>,
     /// The press that started a capture (implicit capture ends once every
     /// button is up).
@@ -464,6 +480,8 @@ impl Ui {
             root: None,
             focus: None,
             hover: None,
+            tip_wait: None,
+            tip: None,
             capture: None,
             implicit_capture: false,
             buttons_held: 0,
@@ -1075,6 +1093,17 @@ impl Ui {
     /// asking for a frame (content that shows per-frame data, like timings).
     pub fn refresh(&mut self, id: WidgetId) {
         self.mark(id, true);
+    }
+
+    /// The widget whose tooltip shows, and the tooltip's text.
+    #[cfg(test)]
+    pub(crate) fn tip_for_tests(&self) -> Option<(WidgetId, String)> {
+        let (widget, layer) = self.tip?;
+        if !self.is_layer_open(layer) {
+            return None;
+        }
+        let text = self.node(widget)?.widget.tooltip()?;
+        Some((widget, text))
     }
 
     /// The children of `id`, for tests.
@@ -1723,6 +1752,7 @@ impl Ui {
                     if let Some(new) = target {
                         self.call(fonts, new, |widget, cx| widget.hover_changed(cx, true));
                     }
+                    self.hover_tip(fonts, target);
                 }
                 match self.capture.or(target) {
                     Some(target) => self.bubble(fonts, target, input),
@@ -1733,6 +1763,7 @@ impl Ui {
                 if let Some(old) = self.hover.take() {
                     self.call(fonts, old, |widget, cx| widget.hover_changed(cx, false));
                 }
+                self.hover_tip(fonts, None);
                 match self.capture.or(self.focus) {
                     Some(target) => self.bubble(fonts, target, input),
                     None => false,
@@ -1743,6 +1774,9 @@ impl Ui {
             } => {
                 if *pressed {
                     self.set_keyboard(false);
+                    // A press hides the tooltip until the pointer moves on.
+                    self.close_tip(fonts);
+                    self.tip_wait = None;
                 }
                 self.buttons_held = if *pressed {
                     self.buttons_held.saturating_add(1)
@@ -1902,12 +1936,86 @@ impl Ui {
             .layers
             .iter()
             .filter_map(|layer| layer.appear.wake_at());
-        widgets.chain(layers).min()
+        let tip = self.tip_wait.map(|(_, since)| since + TOOLTIP_DELAY);
+        widgets.chain(layers).chain(tip).min()
+    }
+
+    /// The pointer is over `target` now: a tooltip shown for another
+    /// widget goes, and one of `target`'s waits.
+    fn hover_tip(&mut self, fonts: &mut Fonts, target: Option<WidgetId>) {
+        if self.tip.is_some_and(|(widget, _)| Some(widget) != target) {
+            self.close_tip(fonts);
+        }
+        self.tip_wait = target
+            .filter(|id| self.tip.is_none_or(|(widget, _)| widget != *id))
+            .filter(|id| {
+                self.node(*id)
+                    .is_some_and(|node| node.widget.tooltip().is_some())
+            })
+            .map(|id| (id, crate::animation::now()));
+    }
+
+    /// Hides the tooltip, and only it: `close_layer` would also close
+    /// what opened after it (a popover from a shortcut).
+    fn close_tip(&mut self, fonts: &mut Fonts) {
+        let Some((_, layer)) = self.tip.take() else {
+            return;
+        };
+        match self.layers.iter().position(|open| open.id == layer) {
+            Some(index) if index + 1 == self.layers.len() => {
+                self.close_layer(fonts, layer);
+            }
+            Some(index) => {
+                let tip = self.layers.remove(index);
+                self.remove(tip.root);
+                self.layout_dirty = true;
+                request_frame();
+            }
+            None => {}
+        }
+    }
+
+    /// Shows the waiting tooltip when its time came and the pointer is
+    /// still there.
+    fn show_tip(&mut self, now: Instant) {
+        let Some((widget, since)) = self.tip_wait else {
+            return;
+        };
+        if since + TOOLTIP_DELAY > now {
+            return;
+        }
+        self.tip_wait = None;
+        if self.hover != Some(widget) {
+            return;
+        }
+        let Some(text) = self.node(widget).and_then(|node| node.widget.tooltip()) else {
+            return;
+        };
+        let label = self.add(
+            crate::widgets::Label::new(text.clone(), imaginarium_text::TextStyle::new(12.0))
+                .color(crate::theme::Token::OnAccent)
+                .single_line(),
+        );
+        let content = self.add_with_children(
+            crate::widgets::Flex::row()
+                .padding(10.0, 5.0)
+                .background(crate::theme::Token::TooltipBg)
+                .radius(7.0)
+                .role(accesskit::Role::Tooltip, &text),
+            &[label],
+        );
+        let layer = self.open_layer(
+            content,
+            crate::layers::LayerOptions::tooltip(crate::layers::Anchor::Widget(widget)),
+        );
+        self.tip = Some((widget, layer));
+        request_frame();
     }
 
     /// Wakes the widgets whose time came, and draws the next frame of
     /// layers fading in.
     pub fn wake(&mut self, fonts: &mut Fonts, now: Instant) {
+        self.show_tip(now);
         for layer in &mut self.layers {
             if layer.appear.wake_at().is_some_and(|at| at <= now) {
                 layer.appear.advance();

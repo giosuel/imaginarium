@@ -652,6 +652,319 @@ impl Widget for Button {
     }
 }
 
+/// A state an [`IconButton`] reads from signals (selected, enabled).
+type Flag = Rc<dyn Fn() -> bool>;
+
+/// A square button showing an icon: tool bars, zoom controls. Its label
+/// names it for screen readers and, with its shortcut, in a tooltip
+/// ("Rectangle · R"). Quiet: no fill until hovered; a selected button (the
+/// active tool) has the accent's tint and its icon in [`Token::AccentInk`];
+/// a disabled one is drawn in [`Token::Disabled`] and does nothing.
+///
+/// [`Token::AccentInk`]: crate::theme::Token::AccentInk
+/// [`Token::Disabled`]: crate::theme::Token::Disabled
+///
+/// ```
+/// # use imaginarium_ui::{IconButton, Ui};
+/// # use imaginarium_reactive::signal;
+/// let mut ui = Ui::new();
+/// let can_redo = signal(false);
+/// let redo = IconButton::new("redo-2", "Redo", || {})
+///     .shortcut("Ctrl Shift Z")
+///     .enabled(move || can_redo.get())
+///     .add_to(&mut ui);
+/// # let _ = redo;
+/// ```
+pub struct IconButton {
+    paths: Vec<BezPath>,
+    icon_size: f64,
+    size: (f64, f64),
+    radius: f64,
+    label: String,
+    shortcut: Option<String>,
+    action: Box<dyn FnMut()>,
+    selected: Option<Flag>,
+    enabled: Option<Flag>,
+    pressed: bool,
+    /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
+    tone: crate::animation::Transition,
+}
+
+impl IconButton {
+    /// A 36×36 button with the vendored Lucide icon `icon` at 18 px (the
+    /// mockups' zoom and undo controls), named `label`, that runs `action`.
+    /// An unknown icon name panics in debug builds, as [`Icon::named`] does.
+    pub fn new(icon: &str, label: impl Into<String>, action: impl FnMut() + 'static) -> Self {
+        let paths = crate::icons::icon_paths(icon);
+        debug_assert!(paths.is_some(), "the icon `{icon}` isn't vendored");
+        Self::with_paths(paths.unwrap_or(&[]), label, action)
+    }
+
+    /// A button with an icon from its paths' `d` strings, for icons that
+    /// aren't Lucide's (the tool bar's diamond and triangle).
+    pub fn with_paths(
+        paths: &[&str],
+        label: impl Into<String>,
+        action: impl FnMut() + 'static,
+    ) -> Self {
+        Self {
+            paths: paths
+                .iter()
+                .filter_map(|data| BezPath::from_svg(data).ok())
+                .collect(),
+            icon_size: 18.0,
+            size: (36.0, 36.0),
+            radius: 8.0,
+            label: label.into(),
+            shortcut: None,
+            action: Box::new(action),
+            selected: None,
+            enabled: None,
+            pressed: false,
+            tone: crate::animation::Transition::new(0.0),
+        }
+    }
+
+    /// The button's size and corner radius, and the icon's size: 40×40,
+    /// radius 10 and 20 for the tool bar.
+    pub fn size(mut self, width: f64, height: f64, radius: f64, icon: f64) -> Self {
+        self.size = (width, height);
+        self.radius = radius;
+        self.icon_size = icon;
+        self
+    }
+
+    /// The shortcut the tooltip shows after the label, as the user types
+    /// it ("Shift T").
+    pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    /// Shown as selected while `selected` is true (the active tool). It
+    /// may read signals: [`IconButton::add_to`] repaints when they change.
+    pub fn selected(mut self, selected: impl Fn() -> bool + 'static) -> Self {
+        self.selected = Some(Rc::new(selected));
+        self
+    }
+
+    /// Usable only while `enabled` is true (redo with something to redo).
+    /// It may read signals, as [`IconButton::selected`] does.
+    pub fn enabled(mut self, enabled: impl Fn() -> bool + 'static) -> Self {
+        self.enabled = Some(Rc::new(enabled));
+        self
+    }
+
+    /// Adds the button to `ui`, repainting it when the signals its
+    /// selected and enabled states read change.
+    pub fn add_to(self, ui: &mut Ui) -> WidgetId {
+        let flags: Vec<Flag> = [self.selected.clone(), self.enabled.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let id = ui.add(self);
+        if !flags.is_empty() {
+            ui.watch(id, false, move || {
+                for flag in &flags {
+                    flag();
+                }
+            });
+        }
+        id
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected.as_ref().is_some_and(|selected| selected())
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.as_ref().is_none_or(|enabled| enabled())
+    }
+
+    /// Heads the background for its state.
+    fn retone(&mut self, hovered: bool) {
+        use crate::animation::{Easing, durations};
+        let target = if !self.is_enabled() {
+            0.0
+        } else if self.pressed {
+            2.0
+        } else if hovered {
+            1.0
+        } else {
+            0.0
+        };
+        self.tone.to(target, durations::HOVER, Easing::EaseOut);
+    }
+
+    fn run(&mut self) {
+        if self.is_enabled() {
+            (self.action)();
+        }
+    }
+}
+
+impl Widget for IconButton {
+    fn style(&self) -> Style {
+        Style {
+            size: taffy::Size {
+                width: length(self.size.0 as f32),
+                height: length(self.size.1 as f32),
+            },
+            flex_shrink: 0.0,
+            ..Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        use crate::theme::{Token, mix};
+        let bounds = cx.bounds();
+        let theme = theme();
+        let (selected, enabled) = (self.is_selected(), self.is_enabled());
+        // The selected tint is the resting fill; hover and press darken
+        // from there, as on a quiet button from nothing.
+        let rest = if selected {
+            theme.color(Token::ControlActive)
+        } else {
+            theme.color(Token::ControlHover).with_alpha(0.0)
+        };
+        let (hover, pressed) = if selected {
+            (rest, rest)
+        } else {
+            (
+                theme.color(Token::ControlHover),
+                theme.color(Token::ControlActive),
+            )
+        };
+        let tone = self.tone.value();
+        let background = if tone <= 1.0 {
+            mix(rest, hover, tone as f32)
+        } else {
+            mix(hover, pressed, (tone - 1.0) as f32)
+        };
+        let shape = RoundedRect::from_rect(bounds, self.radius);
+        scene.fill(&shape, background);
+        if cx.is_focus_visible() {
+            scene.stroke(
+                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), self.radius + 1.5),
+                2.0,
+                theme.color(Token::AccentInk),
+            );
+        }
+        let color = theme.color(if !enabled {
+            Token::Disabled
+        } else if selected {
+            Token::AccentInk
+        } else {
+            Token::TextSecondary
+        });
+        let scale = self.icon_size / 24.0;
+        let corner = bounds.center() - Vec2::splat(self.icon_size / 2.0);
+        let transform = Affine::translate(corner.to_vec2()) * Affine::scale(scale);
+        let stroke = Stroke::new(1.75 * scale)
+            .with_caps(Cap::Round)
+            .with_join(Join::Round);
+        for path in &self.paths {
+            scene.stroke_with(&(transform * path.clone()), &stroke, color);
+        }
+    }
+
+    fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        match input {
+            Input::PointerButton {
+                primary: true,
+                pressed,
+                position,
+                ..
+            } => {
+                let inside = cx.bounds().contains(*position);
+                if *pressed {
+                    self.pressed = true;
+                } else {
+                    if self.pressed && inside {
+                        self.run();
+                    }
+                    self.pressed = false;
+                }
+                self.retone(cx.is_hovered() && inside);
+                cx.request_paint();
+                true
+            }
+            Input::Key {
+                key,
+                pressed: true,
+                repeat,
+                ..
+            } if *key == Key::Enter || *key == Key::Character(" ".into()) => {
+                if !repeat {
+                    self.run();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn focusable(&self) -> bool {
+        self.is_enabled()
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+        self.retone(hovered);
+        cx.request_paint();
+    }
+
+    fn tooltip(&self) -> Option<String> {
+        Some(match &self.shortcut {
+            Some(shortcut) => format!("{} · {shortcut}", self.label),
+            None => self.label.clone(),
+        })
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.tone.wake_at()
+    }
+
+    fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+        self.tone.advance();
+        cx.request_paint();
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        let mut node = Node::new(Role::Button);
+        node.set_label(self.label.clone());
+        if let Some(shortcut) = &self.shortcut {
+            node.set_keyboard_shortcut(shortcut.clone());
+        }
+        node.set_bounds(access_rect(cx.bounds()));
+        if self.selected.is_some() {
+            node.set_toggled(if self.is_selected() {
+                accesskit::Toggled::True
+            } else {
+                accesskit::Toggled::False
+            });
+        }
+        if self.is_enabled() {
+            node.add_action(Action::Click);
+        } else {
+            node.set_disabled();
+        }
+        Some(node)
+    }
+
+    fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
+        if request.action == Action::Click && self.is_enabled() {
+            self.run();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Callbacks of a [`TextInput`].
 type TextCallback = Box<dyn FnMut(&str)>;
 
