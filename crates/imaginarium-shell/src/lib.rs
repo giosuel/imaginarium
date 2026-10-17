@@ -33,6 +33,7 @@
 //! - [`Dock`]: where the tool bar is.
 
 mod chrome;
+mod commands;
 mod toolbar;
 mod window;
 

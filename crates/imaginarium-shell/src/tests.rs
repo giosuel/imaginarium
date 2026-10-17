@@ -24,6 +24,7 @@ const SIZE: Size = Size::new(1440.0, 900.0);
 struct Harness {
     window: BoardWindow,
     settings: Rc<RefCell<Registry>>,
+    size: Size,
 }
 
 impl Harness {
@@ -42,14 +43,24 @@ impl Harness {
             Fonts::bundled_only(),
             settings.clone(),
         );
-        let mut harness = Self { window, settings };
+        let mut harness = Self {
+            window,
+            settings,
+            size: SIZE,
+        };
         harness.frame();
         harness
     }
 
+    fn resize(&mut self, size: Size) {
+        self.size = size;
+        self.frame();
+        self.frame();
+    }
+
     fn frame(&mut self) {
         let mut scene = Scene::new();
-        self.window.draw(&mut scene, SIZE);
+        self.window.draw(&mut scene, self.size);
     }
 
     fn input(&mut self, input: Input) {
@@ -320,4 +331,196 @@ fn esc_closes_a_note_and_the_next_click_works() {
     let at = window.bounds(zoom_in).center();
     window.click(at);
     assert!(window.board().zoom() > 1.0);
+}
+
+/// The tool bar's grip and the bar.
+fn grip_and_bar(window: &mut Harness) -> (WidgetId, WidgetId) {
+    (
+        window.named("Move the tool bar: drag it to an edge"),
+        window.named("Tools"),
+    )
+}
+
+fn key_input(key: imaginarium_ui::Key, text: Option<&str>) -> Input {
+    Input::Key {
+        key,
+        text: text.map(str::to_owned),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::default(),
+    }
+}
+
+#[test]
+fn a_click_on_a_floating_bars_grip_leaves_it_and_a_double_click_docks_it_left() {
+    let mut window = Harness::new();
+    let (grip, bar) = grip_and_bar(&mut window);
+    // Float it near the left edge, with Shift.
+    let from = window.bounds(grip).center();
+    window.drag(from, Point::new(60.0, 450.0), true);
+    assert_eq!(window.window.dock(), Dock::Floating);
+    let floating = window.bounds(bar);
+    // A click (with a pixel of jitter) changes nothing, near the edge too.
+    let at = window.bounds(grip).center();
+    window.input(Input::PointerMoved(at));
+    window.press(at, true, 1, false);
+    window.input(Input::PointerMoved(at + (1.0, 0.5)));
+    window.press(at + (1.0, 0.5), false, 1, false);
+    assert_eq!(window.window.dock(), Dock::Floating);
+    assert_eq!(window.bounds(bar), floating);
+    // The second click of a double-click lands on the grip: docked left.
+    window.press(at, true, 2, false);
+    window.press(at, false, 2, false);
+    assert_eq!(window.window.dock(), Dock::Left);
+}
+
+#[test]
+fn a_drag_cut_short_by_losing_the_focus_puts_the_bar_back() {
+    let mut window = Harness::new();
+    let (grip, bar) = grip_and_bar(&mut window);
+    let docked = window.bounds(bar);
+    let from = window.bounds(grip).center();
+    window.input(Input::PointerMoved(from));
+    window.press(from, true, 1, false);
+    window.input(Input::PointerMoved(Point::new(600.0, 400.0)));
+    assert_eq!(window.window.dock(), Dock::Floating);
+    window.input(Input::WindowFocus(false));
+    window.input(Input::WindowFocus(true));
+    assert_eq!(window.window.dock(), Dock::Left);
+    assert_eq!(window.bounds(bar), docked);
+    // Moving over the grip without a button drags nothing, and the hint
+    // is gone.
+    let at = window.bounds(grip).center();
+    window.input(Input::PointerMoved(at));
+    window.input(Input::PointerMoved(at + (40.0, 40.0)));
+    assert_eq!(window.bounds(bar), docked);
+    assert!(
+        !window
+            .texts()
+            .iter()
+            .any(|text| text.starts_with("Release"))
+    );
+}
+
+#[test]
+fn esc_closes_a_note_and_keeps_the_selection() {
+    let mut window = Harness::with(imaginarium_canvas::demo::launch_plan().unwrap());
+    let card = window.board().node_at(Point::new(1230.0, 518.0)).unwrap();
+    window.click(Point::new(1230.0, 518.0));
+    assert_eq!(window.board().selection().get_untracked(), vec![card]);
+    let share = window.named("Share");
+    let at = window.bounds(share).center();
+    window.click(at);
+    assert!(window.texts().iter().any(|text| text.contains("Hub in M8")));
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    assert!(!window.texts().iter().any(|text| text.contains("Hub in M8")));
+    assert_eq!(window.board().selection().get_untracked(), vec![card]);
+}
+
+#[test]
+fn keys_on_a_focused_panel_button_reach_the_board() {
+    let mut window = Harness::new();
+    // Tab moves the keys from the board to the first panel button.
+    window.input(key_input(imaginarium_ui::Key::Tab, None));
+    let board = window.window.board_widget();
+    let focused = window.window.ui().0.focused();
+    assert!(focused.is_some() && focused != Some(board));
+    // R is still the rectangle tool.
+    window.input(key_input(
+        imaginarium_ui::Key::Character("r".into()),
+        Some("r"),
+    ));
+    assert_eq!(
+        window.board().tool().get_untracked(),
+        Tool::Shape(Preset::Rectangle)
+    );
+    // Esc on a panel goes back to the board.
+    window.input(key_input(imaginarium_ui::Key::Tab, None));
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    let board = window.window.board_widget();
+    assert_eq!(window.window.ui().0.focused(), Some(board));
+}
+
+#[test]
+fn a_docked_bar_keeps_clear_of_the_corner_panels() {
+    let mut window = Harness::new();
+    let (grip, bar) = grip_and_bar(&mut window);
+    let undo = window.named("Undo");
+    let help = window.named("Help and shortcuts");
+    // Half of a 1920 screen, docked at the bottom.
+    window.resize(Size::new(960.0, 1000.0));
+    let from = window.bounds(grip).center();
+    window.drag(from, Point::new(480.0, 990.0), false);
+    assert_eq!(window.window.dock(), Dock::Bottom);
+    window.resize(Size::new(960.0, 1000.0));
+    let (bar_box, undo_box, help_box) =
+        (window.bounds(bar), window.bounds(undo), window.bounds(help));
+    let overlap = |a: Rect, b: Rect| a.intersect(b).area() > 0.0;
+    assert!(
+        !overlap(bar_box, undo_box) && !overlap(bar_box, help_box),
+        "{bar_box:?}"
+    );
+    // A short window: docked left, the grip stays in reach.
+    window
+        .window
+        .execute(
+            "view.dock_toolbar",
+            &imaginarium_commands::Args::new().with(
+                "edge",
+                imaginarium_commands::ArgValue::String("left".into()),
+            ),
+        )
+        .unwrap();
+    window.resize(Size::new(1000.0, 380.0));
+    let grip_box = window.bounds(grip);
+    assert!(grip_box.y0 >= 0.0 && grip_box.y1 <= 380.0, "{grip_box:?}");
+}
+
+#[test]
+fn the_bar_follows_its_setting_and_a_command() {
+    let mut window = Harness::new();
+    let (_, bar) = grip_and_bar(&mut window);
+    window
+        .window
+        .execute(
+            "view.dock_toolbar",
+            &imaginarium_commands::Args::new().with(
+                "edge",
+                imaginarium_commands::ArgValue::String("right".into()),
+            ),
+        )
+        .unwrap();
+    window.frame();
+    assert_eq!(window.window.dock(), Dock::Right);
+    assert!(window.bounds(bar).x1 > SIZE.width - 20.0);
+    // Changed elsewhere (Settings, another window): the bar follows.
+    window
+        .settings
+        .borrow_mut()
+        .set(&TOOLBAR_POSITION, Dock::Top)
+        .unwrap();
+    window.frame();
+    window.frame();
+    assert_eq!(window.window.dock(), Dock::Top);
+    assert!(window.bounds(bar).y0 < 20.0);
+}
+
+#[test]
+fn a_floating_setting_survives_the_start() {
+    let mut registry = Registry::new();
+    registry.register_all(crate::SETTINGS).unwrap();
+    registry.set(&TOOLBAR_POSITION, Dock::Floating).unwrap();
+    let settings = Rc::new(RefCell::new(registry));
+    let board = BoardCanvas::new(Document::new(DocumentKind::Board).unwrap());
+    let window = BoardWindow::new(
+        board,
+        "Untitled board",
+        Fonts::bundled_only(),
+        settings.clone(),
+    );
+    assert_eq!(window.dock(), Dock::Floating);
+    assert_eq!(
+        settings.borrow().get(&TOOLBAR_POSITION).unwrap(),
+        Dock::Floating
+    );
 }

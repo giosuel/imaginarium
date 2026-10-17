@@ -323,7 +323,7 @@ impl Widget for Grip {
             } => {
                 if *clicks >= 2 {
                     self.held = false;
-                    self.asks.borrow_mut().push(Ask::ResetBar);
+                    self.asks.borrow_mut().push(Ask::Dock(Dock::Left));
                 } else {
                     self.held = true;
                     self.asks.borrow_mut().push(Ask::Grab(*position));
@@ -352,6 +352,14 @@ impl Widget for Grip {
         }
     }
 
+    fn capture_lost(&mut self, _cx: &mut Cx<'_>) {
+        // The release went elsewhere (the window lost the focus): the drag
+        // is off, and the bar goes back.
+        if std::mem::take(&mut self.held) {
+            self.asks.borrow_mut().push(Ask::CancelDrag);
+        }
+    }
+
     fn tooltip(&self) -> Option<String> {
         Some("Drag to move · snaps to the edges".into())
     }
@@ -361,7 +369,9 @@ impl Widget for Grip {
     }
 
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
-        let mut node = Node::new(Role::Button);
+        // Not a button: it does nothing on its own. Keyboard and screen
+        // reader users move the bar with "Move the tool bar" (the palette).
+        let mut node = Node::new(Role::Image);
         node.set_label("Move the tool bar: drag it to an edge");
         let bounds = cx.bounds();
         node.set_bounds(accesskit::Rect {

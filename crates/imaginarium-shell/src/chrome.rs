@@ -83,6 +83,9 @@ pub(crate) struct Chrome {
     pub(crate) anchors: HashMap<Placeholder, WidgetId>,
     /// The zoom percentage, which opens the zoom menu.
     pub(crate) zoom: WidgetId,
+    /// The panels in the corners, which a docked tool bar keeps clear of:
+    /// top left, top right, bottom left, bottom right.
+    pub(crate) corners: [WidgetId; 4],
 }
 
 fn body() -> TextStyle {
@@ -267,6 +270,7 @@ pub(crate) fn chrome(
         overlay,
         anchors,
         zoom,
+        corners: [pill, top_right, bottom_left, help],
     }
 }
 
