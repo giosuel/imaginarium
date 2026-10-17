@@ -11,13 +11,14 @@ Last updated: 2026-10-16
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.3 Commands and keymaps** (the board's commands
-  for inserting, deleting, duplicating, the clipboard, order, groups,
-  undo and zoom, and shortcuts from the keymaps), then M3.4. M3.2 is
-  done (2026-10-16/17): `imaginarium-canvas` shows and edits a board
-  (painting, updates from change sets, selection, transform handles,
-  text in place, benchmarks), each part reviewed by a fresh agent; its
-  PRs are stacked on M3.1's (https://github.com/giosuel/imaginarium/pull/44).
+- **Next step:** **M3.4 The shell** (`imaginarium-shell`,
+  `imaginarium-app`): the window around the board, built from the
+  mockups. M3.3 is done (2026-10-17): the board's commands, tools and
+  clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
+  `imaginarium-canvas` shows and edits a board. Each part was reviewed by
+  a fresh agent; the PRs are stacked on M3.1's
+  (https://github.com/giosuel/imaginarium/pull/44), M3.2's on
+  https://github.com/giosuel/imaginarium/pull/45 to /52, M3.3's after.
   - **The component gallery** (owner, 2026-10-16): every component in its
     states, dark and light, before the shell uses it
     (`crates/imaginarium-ui/examples/gallery.rs`). New components get a
@@ -1037,7 +1038,11 @@ What M3 builds on:
     - a 10,000-node board from the model: opening, the first frame, drag
       latency, `ChangeSet` to tiles;
     - opening such a board took 339 ms in M1; read the nodes in bulk.
-- [ ] **M3.3 Commands and keymaps:**
+- [x] **M3.3 Commands and keymaps** (done 2026-10-17, in
+  `imaginarium-canvas`: 46 commands in `commands::board_commands()`,
+  the default keymap in `keys.rs`, tools, copy and paste; `canvas.md`
+  "As built" notes. **File commands moved to M3.6**, which builds files:
+  they need the window and its dialogs):
   - **Board commands:**
     - insert each shape and text;
     - delete, duplicate, copy, cut and paste nodes;
