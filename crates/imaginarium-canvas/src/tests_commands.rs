@@ -20,7 +20,6 @@ fn chord(board: &mut Harness, key: Key, shift: bool, alt: bool) {
         meta: mac,
         shift,
         alt,
-        ..Modifiers::default()
     };
     board.ui.input(
         &mut board.fonts,
