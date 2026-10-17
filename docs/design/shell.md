@@ -214,6 +214,10 @@ Search button opens it as a lightly dimmed dialog.
   and closes the palette, or changes a setting in place; Tab changes a
   setting's value (an enum steps to its next value); Esc or a click
   beside it closes it, and the keys go back to the board.
+- **Cost.** Rows are built once per open and reused: a keystroke
+  reorders them and updates the changed highlights (2.2 ms with its
+  frame in release, 44 entries). Their signals live in a scope disposed
+  when the palette closes. It follows the window's size.
 - **Not yet:** arguments typed inline (`Set corner radius` › `12 px`):
   commands with required arguments aren't listed. Templates, help and
   AI actions come with their milestones.
