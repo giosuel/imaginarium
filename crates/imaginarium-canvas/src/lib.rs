@@ -26,6 +26,7 @@
 mod board;
 pub mod clipboard;
 pub mod commands;
+pub mod commands_style;
 mod copy;
 pub mod demo;
 mod gesture;
@@ -51,6 +52,8 @@ mod tests_commands;
 mod tests_gesture;
 #[cfg(test)]
 mod tests_select;
+#[cfg(test)]
+mod tests_style;
 #[cfg(test)]
 mod tests_text;
 #[cfg(test)]

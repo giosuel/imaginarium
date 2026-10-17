@@ -237,6 +237,22 @@ impl BoardCanvas {
         self.selection
     }
 
+    /// The straight box around the selection in window coordinates (a
+    /// turned node's box, turned, then boxed), as the last layout placed
+    /// the board, for panels that float next to it (the contextual
+    /// toolbar). `None` without a selection.
+    pub fn selection_on_screen(&self) -> Option<Rect> {
+        let selection = self.selection_box()?;
+        let shape = Rect::from_origin_size(Point::ZERO, selection.size);
+        Some((self.camera(self.bounds) * selection.world).transform_rect_bbox(shape))
+    }
+
+    /// Whether the pointer is moving, resizing, turning or drawing
+    /// something now (panels next to the selection step aside).
+    pub fn is_gesturing(&self) -> bool {
+        self.gesture.is_some() && self.armed.is_none()
+    }
+
     /// The zoom and whether undo and redo can run, for the window's
     /// controls. Brought up to date whenever the board paints or takes
     /// input, so a change shows in the next frame.
