@@ -189,6 +189,12 @@ pub trait Widget: Any {
         None
     }
 
+    /// Which side of it its tooltip shows on (below by default; above for
+    /// controls at the window's bottom).
+    fn tooltip_placement(&self) -> crate::layers::Placement {
+        crate::layers::Placement::Below
+    }
+
     /// A screen reader's request aimed at one of its nodes. `true` if it
     /// did something. (Focus is handled by the tree, which gives the widget
     /// the keyboard focus; a focus on one of the widget's own nodes then
@@ -2023,9 +2029,15 @@ impl Ui {
                 .role(accesskit::Role::Tooltip, &text),
             &[label],
         );
+        let placement = self
+            .node(widget)
+            .map_or(crate::layers::Placement::Below, |node| {
+                node.widget.tooltip_placement()
+            });
         let layer = self.open_layer(
             content,
-            crate::layers::LayerOptions::tooltip(crate::layers::Anchor::Widget(widget)),
+            crate::layers::LayerOptions::tooltip(crate::layers::Anchor::Widget(widget))
+                .placement(placement),
         );
         self.tip = Some((widget, layer));
         request_frame();

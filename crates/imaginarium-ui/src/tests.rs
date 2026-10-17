@@ -1846,7 +1846,7 @@ fn a_button_box_takes_clicks_on_its_children_and_shows_its_tooltip() {
             counter.set(counter.get() + 1)
         })
         .size(176.0, 44.0)
-        .tooltip("Search · Ctrl K"),
+        .tooltip("Search · Ctrl K", crate::layers::Placement::Below),
         &[text],
     );
     let root = ui.add_with_children(Flex::row().fill().padding(10.0, 10.0), &[search]);

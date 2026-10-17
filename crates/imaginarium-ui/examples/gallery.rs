@@ -444,7 +444,7 @@ fn main() -> Result<(), UiError> {
             .size(44.0, 44.0)
             .radius(12.0)
             .shadow()
-            .tooltip("AI assistant · Ctrl J"),
+            .tooltip("AI assistant · Ctrl J", imaginarium_ui::Placement::Below),
         &[sparkles],
     );
     let users = ui.add(Icon::named("users", 17.0, Token::OnAccent));

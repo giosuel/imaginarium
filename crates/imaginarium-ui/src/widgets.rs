@@ -699,7 +699,7 @@ pub struct ButtonBox {
     radius: f64,
     shadow: bool,
     label: String,
-    tooltip: Option<String>,
+    tooltip: Option<(String, crate::layers::Placement)>,
     focus_on_click: bool,
     action: Box<dyn FnMut()>,
     pressed: bool,
@@ -786,9 +786,14 @@ impl ButtonBox {
         self
     }
 
-    /// A tooltip shown when the pointer rests on it.
-    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
-        self.tooltip = Some(tooltip.into());
+    /// A tooltip shown when the pointer rests on it, on the `placement`
+    /// side.
+    pub fn tooltip(
+        mut self,
+        tooltip: impl Into<String>,
+        placement: crate::layers::Placement,
+    ) -> Self {
+        self.tooltip = Some((tooltip.into(), placement));
         self
     }
 
@@ -906,7 +911,13 @@ impl Widget for ButtonBox {
     }
 
     fn tooltip(&self) -> Option<String> {
-        self.tooltip.clone()
+        self.tooltip.as_ref().map(|(text, _)| text.clone())
+    }
+
+    fn tooltip_placement(&self) -> crate::layers::Placement {
+        self.tooltip
+            .as_ref()
+            .map_or(crate::layers::Placement::Below, |(_, placement)| *placement)
     }
 
     fn wake_at(&self) -> Option<Instant> {
@@ -970,6 +981,7 @@ pub struct IconButton {
     action: Box<dyn FnMut()>,
     selected: Option<Flag>,
     enabled: Option<Flag>,
+    tooltip_placement: crate::layers::Placement,
     pressed: bool,
     /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
     tone: crate::animation::Transition,
@@ -1005,6 +1017,7 @@ impl IconButton {
             action: Box::new(action),
             selected: None,
             enabled: None,
+            tooltip_placement: crate::layers::Placement::Below,
             pressed: false,
             tone: crate::animation::Transition::new(0.0),
         }
@@ -1038,6 +1051,18 @@ impl IconButton {
     pub fn enabled(mut self, enabled: impl Fn() -> bool + 'static) -> Self {
         self.enabled = Some(Rc::new(enabled));
         self
+    }
+
+    /// Which side the tooltip shows on (below by default).
+    pub fn tooltip_placement(mut self, placement: crate::layers::Placement) -> Self {
+        self.tooltip_placement = placement;
+        self
+    }
+
+    /// Changes the tooltip's side after it was added (a tool bar moved to
+    /// another edge).
+    pub fn set_tooltip_placement(&mut self, placement: crate::layers::Placement) {
+        self.tooltip_placement = placement;
     }
 
     /// Adds the button to `ui`, repainting it when the signals its
@@ -1211,6 +1236,10 @@ impl Widget for IconButton {
             Some(shortcut) => format!("{} · {shortcut}", self.label),
             None => self.label.clone(),
         })
+    }
+
+    fn tooltip_placement(&self) -> crate::layers::Placement {
+        self.tooltip_placement
     }
 
     fn wake_at(&self) -> Option<Instant> {
