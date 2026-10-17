@@ -179,6 +179,19 @@ impl Flex {
     }
 }
 
+/// A panel's shadow under `bounds`, as strong as `theme` says: layers of
+/// black from the widest to the tightest.
+fn paint_shadow(scene: &mut Scene, bounds: Rect, radius: f64, theme: &crate::theme::Theme) {
+    for layer in theme.shadow {
+        let spread = layer.spread;
+        let shadow = RoundedRect::from_rect(
+            bounds.inflate(spread, spread) + Vec2::new(0.0, spread / 2.0),
+            radius + spread,
+        );
+        scene.fill(&shadow, Color::BLACK.with_alpha(layer.alpha));
+    }
+}
+
 impl Widget for Flex {
     fn style(&self) -> Style {
         self.style.clone()
@@ -192,14 +205,7 @@ impl Widget for Flex {
         let bounds = cx.bounds();
         let theme = theme();
         if self.shadow {
-            for layer in theme.shadow {
-                let spread = layer.spread;
-                let shadow = RoundedRect::from_rect(
-                    bounds.inflate(spread, spread) + Vec2::new(0.0, spread / 2.0),
-                    self.radius + spread,
-                );
-                scene.fill(&shadow, Color::BLACK.with_alpha(layer.alpha));
-            }
+            paint_shadow(scene, bounds, self.radius, &theme);
         }
         let shape = RoundedRect::from_rect(bounds, self.radius);
         if let Some(background) = self.background {
@@ -656,6 +662,265 @@ impl Widget for Button {
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         let mut node = Node::new(Role::Button);
         node.set_label(self.label.text());
+        node.set_bounds(access_rect(cx.bounds()));
+        node.add_action(Action::Click);
+        Some(node)
+    }
+
+    fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
+        if request.action == Action::Click {
+            (self.action)();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A button holding other widgets, laid out as a [`Flex`] row: the search
+/// field with its key, a button with an icon and a label. Click, Enter or
+/// Space runs its action; it takes the pointer over its whole box, so the
+/// widgets in it only show.
+///
+/// ```
+/// # use imaginarium_ui::{ButtonBox, ButtonColors, Icon, Ui, Token};
+/// let mut ui = Ui::new();
+/// let icon = ui.add(Icon::named("search", 16.0, Token::TextMuted));
+/// let search = ui.add_with_children(
+///     ButtonBox::new("Search commands and settings", ButtonColors::quiet(), || {})
+///         .size(176.0, 44.0),
+///     &[icon],
+/// );
+/// # let _ = search;
+/// ```
+pub struct ButtonBox {
+    style: Style,
+    colors: ButtonColors,
+    radius: f64,
+    shadow: bool,
+    label: String,
+    tooltip: Option<String>,
+    focus_on_click: bool,
+    action: Box<dyn FnMut()>,
+    pressed: bool,
+    /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
+    tone: crate::animation::Transition,
+}
+
+impl ButtonBox {
+    /// A button named `label` (for screen readers) that runs `action`; its
+    /// children are centered in a row, 8 apart.
+    pub fn new(
+        label: impl Into<String>,
+        colors: ButtonColors,
+        action: impl FnMut() + 'static,
+    ) -> Self {
+        Self {
+            style: Style {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::CENTER,
+                justify_content: JustifyContent::CENTER,
+                gap: taffy::Size {
+                    width: length(8.0),
+                    height: length(0.0),
+                },
+                flex_shrink: 0.0,
+                ..Style::default()
+            },
+            colors,
+            radius: 8.0,
+            shadow: false,
+            label: label.into(),
+            tooltip: None,
+            focus_on_click: true,
+            action: Box::new(action),
+            pressed: false,
+            tone: crate::animation::Transition::new(0.0),
+        }
+    }
+
+    /// A fixed size.
+    pub fn size(mut self, width: f64, height: f64) -> Self {
+        self.style.size = taffy::Size {
+            width: length(width as f32),
+            height: length(height as f32),
+        };
+        self
+    }
+
+    /// A fixed height; the width follows the children.
+    pub fn height(mut self, height: f64) -> Self {
+        self.style.size.height = length(height as f32);
+        self
+    }
+
+    /// Space around the children: left, right.
+    pub fn padding(mut self, left: f64, right: f64) -> Self {
+        self.style.padding.left = length(left as f32);
+        self.style.padding.right = length(right as f32);
+        self
+    }
+
+    /// Children start at the left (the search field's text) instead of
+    /// being centered.
+    pub fn start(mut self) -> Self {
+        self.style.justify_content = JustifyContent::FLEX_START;
+        self
+    }
+
+    /// Space between the children.
+    pub fn gap(mut self, gap: f64) -> Self {
+        self.style.gap.width = length(gap as f32);
+        self
+    }
+
+    /// The corner radius (8 by default; 12 for a button that is a panel).
+    pub fn radius(mut self, radius: f64) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    /// A panel's shadow under it (a button floating over the board).
+    pub fn shadow(mut self) -> Self {
+        self.shadow = true;
+        self
+    }
+
+    /// A tooltip shown when the pointer rests on it.
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    /// A click leaves the focus where it was ([`Widget::focus_on_click`]).
+    pub fn keep_focus(mut self) -> Self {
+        self.focus_on_click = false;
+        self
+    }
+
+    fn retone(&mut self, hovered: bool) {
+        use crate::animation::{Easing, durations};
+        let target = if self.pressed {
+            2.0
+        } else if hovered {
+            1.0
+        } else {
+            0.0
+        };
+        self.tone.to(target, durations::HOVER, Easing::EaseOut);
+    }
+}
+
+impl Widget for ButtonBox {
+    fn style(&self) -> Style {
+        self.style.clone()
+    }
+
+    fn claims(&self, _bounds: Rect, _content: Size, _point: Point) -> bool {
+        true
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        let bounds = cx.bounds();
+        let theme = theme();
+        let shape = RoundedRect::from_rect(bounds, self.radius);
+        if self.shadow {
+            paint_shadow(scene, bounds, self.radius, &theme);
+        }
+        let tone = self.tone.value();
+        let (rest, hover, pressed) = (
+            self.colors.background.resolve(&theme),
+            self.colors.hover.resolve(&theme),
+            self.colors.pressed.resolve(&theme),
+        );
+        let background = if tone <= 1.0 {
+            crate::theme::mix(rest, hover, tone as f32)
+        } else {
+            crate::theme::mix(hover, pressed, (tone - 1.0) as f32)
+        };
+        scene.fill(&shape, background);
+        if let Some(border) = self.colors.border {
+            let inset = RoundedRect::from_rect(bounds.inset(-0.5), self.radius - 0.5);
+            scene.stroke(&inset, 1.0, border.resolve(&theme));
+        }
+        if cx.is_focus_visible() {
+            scene.stroke(
+                &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), self.radius + 1.5),
+                2.0,
+                self.colors.focus.resolve(&theme),
+            );
+        }
+    }
+
+    fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        match input {
+            Input::PointerButton {
+                primary: true,
+                pressed,
+                position,
+                ..
+            } => {
+                let inside = cx.bounds().contains(*position);
+                if *pressed {
+                    self.pressed = true;
+                } else {
+                    if self.pressed && inside {
+                        (self.action)();
+                    }
+                    self.pressed = false;
+                }
+                self.retone(cx.is_hovered() && inside);
+                cx.request_paint();
+                true
+            }
+            Input::Key {
+                key,
+                pressed: true,
+                repeat,
+                ..
+            } if *key == Key::Enter || *key == Key::Character(" ".into()) => {
+                if !repeat {
+                    (self.action)();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn focusable(&self) -> bool {
+        true
+    }
+
+    fn focus_on_click(&self) -> bool {
+        self.focus_on_click
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+        self.retone(hovered);
+        cx.request_paint();
+    }
+
+    fn tooltip(&self) -> Option<String> {
+        self.tooltip.clone()
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.tone.wake_at()
+    }
+
+    fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+        self.tone.advance();
+        cx.request_paint();
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        let mut node = Node::new(Role::Button);
+        node.set_label(self.label.clone());
         node.set_bounds(access_rect(cx.bounds()));
         node.add_action(Action::Click);
         Some(node)

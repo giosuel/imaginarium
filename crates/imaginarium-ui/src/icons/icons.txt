@@ -46,6 +46,7 @@ triangle-alert
 lock
 search
 share-2
+users
 minus
 plus
 undo-2

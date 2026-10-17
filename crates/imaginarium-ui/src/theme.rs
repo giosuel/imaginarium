@@ -55,6 +55,8 @@ pub enum Token {
     AccentPressed,
     /// Accent text and icons on panels (the active tool, links).
     AccentInk,
+    /// An accent outline on a panel (the pill's Save… button).
+    AccentLine,
     /// Text and icons on an [`Token::Accent`] fill.
     OnAccent,
     /// Destructive actions and errors.
@@ -73,7 +75,7 @@ pub enum Token {
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 25] = [
+    pub const ALL: [Token; 26] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -92,6 +94,7 @@ impl Token {
         Token::AccentHover,
         Token::AccentPressed,
         Token::AccentInk,
+        Token::AccentLine,
         Token::OnAccent,
         Token::Danger,
         Token::Warning,
@@ -177,6 +180,7 @@ impl Theme {
                 (Token::AccentHover, mix(accent, Color::BLACK, 0.14)),
                 (Token::AccentPressed, mix(accent, Color::BLACK, 0.26)),
                 (Token::AccentInk, mix(accent, Color::WHITE, 0.45)),
+                (Token::AccentLine, mix(accent, panel, 0.35)),
                 (Token::OnAccent, Color::WHITE),
                 (Token::Danger, rgb(0xf87171)),
                 (Token::Warning, rgb(0xf5a524)),
@@ -217,6 +221,7 @@ impl Theme {
                 // A little darker, so accent text keeps 4.5:1 on the
                 // active tool's tint too (orange missed it by a hair).
                 (Token::AccentInk, mix(accent, Color::BLACK, 0.15)),
+                (Token::AccentLine, mix(accent, panel, 0.6)),
                 (Token::OnAccent, Color::WHITE),
                 (Token::Danger, rgb(0xb91c1c)),
                 (Token::Warning, rgb(0xb45309)),

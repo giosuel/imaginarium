@@ -1828,3 +1828,41 @@ fn an_overlay_passes_the_pointer_through_except_over_its_panels() {
     assert_eq!((clicks.get(), tool_clicks.get()), (1, 1));
     assert_eq!(ui.focused(), Some(go), "a click on a tool keeps the focus");
 }
+
+#[test]
+fn a_button_box_takes_clicks_on_its_children_and_shows_its_tooltip() {
+    use crate::animation::set_clock_for_tests;
+    use crate::tree::TOOLTIP_DELAY;
+    use crate::widgets::ButtonBox;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let text = ui.add(Label::new("Search", TextStyle::new(13.0)));
+    let counter = clicks.clone();
+    let search = ui.add_with_children(
+        ButtonBox::new("Search commands", ButtonColors::quiet(), move || {
+            counter.set(counter.get() + 1)
+        })
+        .size(176.0, 44.0)
+        .tooltip("Search · Ctrl K"),
+        &[text],
+    );
+    let root = ui.add_with_children(Flex::row().fill().padding(10.0, 10.0), &[search]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let on_text = ui.bounds(text).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(on_text));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert_eq!(
+        ui.tip_for_tests(),
+        Some((search, "Search · Ctrl K".to_owned()))
+    );
+    ui.input(&mut fonts, &pointer(on_text, true, true));
+    ui.input(&mut fonts, &pointer(on_text, true, false));
+    assert_eq!(clicks.get(), 1);
+    ui.input(&mut fonts, &key(Key::Enter));
+    assert_eq!(clicks.get(), 2);
+    set_clock_for_tests(None);
+}
