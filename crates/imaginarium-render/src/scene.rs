@@ -219,6 +219,16 @@ impl Scene {
         });
     }
 
+    /// Strokes the outline of `shape` with a full stroke style (caps,
+    /// joins, dashes), as line icons need.
+    pub fn stroke_with(&mut self, shape: &impl Shape, style: &Stroke, color: impl Into<Color>) {
+        self.commands.push(Command::Stroke {
+            path: shape.to_path(PATH_TOLERANCE),
+            style: style.clone(),
+            color: color.into(),
+        });
+    }
+
     /// Fills a run of glyphs. Positions are in the scene's units: `x` along
     /// the line, `y` the baseline (down is positive).
     pub fn glyphs(&mut self, run: GlyphRun<'_>, glyphs: impl IntoIterator<Item = Glyph>) {

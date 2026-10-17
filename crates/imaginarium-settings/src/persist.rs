@@ -74,6 +74,17 @@ impl Registry {
     /// Only a syntactically broken document is an error. Bad entries are
     /// reported in the [`LoadReport`].
     pub fn load_toml(&mut self, scope: Scope, text: &str) -> Result<LoadReport, SettingsError> {
+        // Saved once, when it is all loaded (and its unknown entries kept).
+        self.persist_paused = true;
+        let loaded = self.load_toml_now(scope, text);
+        self.persist_paused = false;
+        for scope in std::mem::take(&mut self.persist_pending) {
+            self.persist(scope);
+        }
+        loaded
+    }
+
+    fn load_toml_now(&mut self, scope: Scope, text: &str) -> Result<LoadReport, SettingsError> {
         let root: Table = text
             .parse()
             .map_err(|err: toml::de::Error| SettingsError::Parse(err.to_string()))?;
@@ -134,18 +145,234 @@ impl Registry {
     /// it, flush it to disk, then rename it over the target. A crash never
     /// leaves a half-written settings file.
     pub fn save_file(&self, scope: Scope, path: &Path) -> Result<(), SettingsError> {
-        let io = |err: std::io::Error| SettingsError::Io(format!("{}: {err}", path.display()));
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(io)?;
-        }
-        let mut temp = path.as_os_str().to_owned();
-        temp.push(".tmp");
-        let temp = PathBuf::from(temp);
-        let mut file = fs::File::create(&temp).map_err(io)?;
-        file.write_all(self.to_toml(scope).as_bytes()).map_err(io)?;
-        file.sync_all().map_err(io)?;
+        write_atomically(path, &self.to_toml(scope))
+    }
+}
+
+/// Writes `text` to `path` atomically: a temporary file next to it, flushed
+/// to disk, then renamed over the target. A crash never leaves a
+/// half-written file. A symbolic link (a dotfiles manager's) stays a link:
+/// its target is written.
+///
+/// # Errors
+/// If the folder can't be made or the file written; the temporary file is
+/// removed then.
+pub fn write_atomically(path: &Path, text: &str) -> Result<(), SettingsError> {
+    let io = |err: std::io::Error| SettingsError::Io(format!("{}: {err}", path.display()));
+    let target = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(path).map_err(io)?,
+        _ => path.to_owned(),
+    };
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(io)?;
+    }
+    // Its own name: another writer (a second instance) never writes into
+    // the same temporary file.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut temp = target.as_os_str().to_owned();
+    temp.push(format!(".{}-{write}.tmp", std::process::id()));
+    let temp = PathBuf::from(temp);
+    let written = (|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
         drop(file);
-        fs::rename(&temp, path).map_err(io)
+        fs::rename(&temp, &target)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written.map_err(io)
+}
+
+/// What came of reading a settings file at startup ([`Registry::open_file`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileOpened {
+    /// What was applied, kept and left out.
+    pub report: LoadReport,
+    /// The file couldn't be read (broken TOML, not UTF-8, no permission):
+    /// why.
+    pub unreadable: Option<String>,
+    /// Where the unreadable file was moved, so saving doesn't overwrite it.
+    pub set_aside: Option<PathBuf>,
+    /// Whether changes can be saved to the file: not when an unreadable
+    /// file couldn't be moved aside (it would be overwritten).
+    pub saving: bool,
+}
+
+impl Registry {
+    /// Reads `scope` from the settings file at `path` at startup. A missing
+    /// file means the defaults. An unreadable one is moved aside (to
+    /// `settings.toml.unreadable-<seconds>`) so the first change doesn't
+    /// overwrite the user's settings with the defaults; if it can't be
+    /// moved, nothing is saved this session ([`FileOpened::saving`]).
+    pub fn open_file(&mut self, scope: Scope, path: &Path) -> FileOpened {
+        let unreadable = match self.load_file(scope, path) {
+            Ok(report) => {
+                return FileOpened {
+                    report,
+                    saving: true,
+                    ..FileOpened::default()
+                };
+            }
+            Err(err) => err.to_string(),
+        };
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(format!(".unreadable-{seconds}"));
+        let aside = PathBuf::from(aside);
+        let moved = fs::rename(path, &aside).is_ok();
+        FileOpened {
+            report: LoadReport::default(),
+            unreadable: Some(unreadable),
+            set_aside: moved.then_some(aside),
+            saving: moved,
+        }
+    }
+}
+
+/// What the writer thread is sent.
+enum Message {
+    Text(String),
+    Stop,
+}
+
+/// Whether the settings file could be saved, shared with the UI (Settings
+/// shows it).
+#[derive(Clone, Debug, Default)]
+pub struct SaveStatus(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl SaveStatus {
+    /// Why the last save failed, if it did (a later one that works clears
+    /// it).
+    pub fn error(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    fn set(&self, error: Option<String>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = error;
+        }
+    }
+}
+
+/// Writes a settings file on a thread of its own, so the UI never waits for
+/// the disk (MAINTAINERS.md invariant 3). Texts sent while a write is
+/// running are coalesced: only the newest is written. [`FileWriter::finish`]
+/// (or dropping it) writes what is pending, then stops; that waits for the
+/// disk, which a hung network home folder can make long.
+///
+/// Two instances of the app write the same file: the last save wins.
+///
+/// ```
+/// # let dir = std::env::temp_dir().join(format!("imaginarium-doc-{}", std::process::id()));
+/// use imaginarium_settings::FileWriter;
+///
+/// let path = dir.join("settings.toml");
+/// let writer = FileWriter::new(path.clone());
+/// let mut sink = writer.sink();
+/// sink("[ui]\ntheme = \"dark\"\n".to_owned());
+/// assert_eq!(writer.finish(), None);
+/// assert!(std::fs::read_to_string(&path)?.contains("dark"));
+/// # std::fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub struct FileWriter {
+    sender: std::sync::mpsc::Sender<Message>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    status: SaveStatus,
+}
+
+impl FileWriter {
+    /// A writer of `path`.
+    pub fn new(path: PathBuf) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+        let status = SaveStatus::default();
+        let failed = status.clone();
+        let thread = std::thread::Builder::new()
+            .name("settings-writer".into())
+            .spawn(move || {
+                while let Ok(first) = receiver.recv() {
+                    // The newest text wins; a stop ends after writing it.
+                    let mut latest = None;
+                    let mut stop = false;
+                    for message in std::iter::once(first).chain(receiver.try_iter()) {
+                        match message {
+                            Message::Text(text) => latest = Some(text),
+                            Message::Stop => stop = true,
+                        }
+                    }
+                    if let Some(text) = latest {
+                        failed.set(
+                            write_atomically(&path, &text)
+                                .err()
+                                .map(|err| err.to_string()),
+                        );
+                    }
+                    if stop {
+                        break;
+                    }
+                }
+            });
+        let thread = match thread {
+            Ok(thread) => Some(thread),
+            Err(err) => {
+                status.set(Some(format!("no thread to save settings: {err}")));
+                None
+            }
+        };
+        Self {
+            sender,
+            thread,
+            status,
+        }
+    }
+
+    /// Where to send texts to write: for [`Registry::persist_to`].
+    pub fn sink(&self) -> impl FnMut(String) + Send + 'static {
+        let sender = self.sender.clone();
+        move |text| {
+            let _ = sender.send(Message::Text(text));
+        }
+    }
+
+    /// Whether saving works, for the UI to show.
+    pub fn status(&self) -> SaveStatus {
+        self.status.clone()
+    }
+
+    /// Why the last write failed, if it did.
+    pub fn last_error(&self) -> Option<String> {
+        self.status.error()
+    }
+
+    /// Writes what is pending and stops; then why the last write failed,
+    /// if it did.
+    pub fn finish(mut self) -> Option<String> {
+        self.stop();
+        self.status.error()
+    }
+
+    fn stop(&mut self) {
+        let _ = self.sender.send(Message::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl std::fmt::Debug for FileWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileWriter").finish_non_exhaustive()
     }
 }
 
@@ -546,5 +773,172 @@ mod tests {
         fresh.load_file(Scope::App, &path).unwrap();
         assert_eq!(fresh.get(&THEME).unwrap(), Theme::Dark);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hook_gets_its_scope_after_each_change() {
+        let mut r = registry();
+        let saved: Arc<Mutex<Vec<String>>> = Arc::default();
+        let into = saved.clone();
+        r.persist_to(Scope::App, move |toml| into.lock().unwrap().push(toml));
+        r.set(&GRID, false).unwrap();
+        // Unchanged: nothing to save.
+        r.set(&GRID, false).unwrap();
+        // Another scope: not this file.
+        r.set(&USER_NAME, "Ada".to_owned()).unwrap();
+        r.reset(GRID.key()).unwrap();
+        let saved = saved.lock().unwrap();
+        assert_eq!(saved.len(), 2, "{saved:?}");
+        assert!(saved[0].contains("visible = false"), "{}", saved[0]);
+        assert!(!saved[1].contains("visible"), "{}", saved[1]);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "imaginarium-settings-{}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn the_writer_writes_the_newest_text_before_it_stops() {
+        let dir = scratch("writer");
+        let path = dir.join("settings.toml");
+        let writer = FileWriter::new(path.clone());
+        let mut sink = writer.sink();
+        for n in 0..50 {
+            sink(format!("n = {n}\n"));
+        }
+        assert_eq!(writer.finish(), None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "n = 49\n");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no temporary file left"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_writer_says_why_a_write_failed() {
+        // A file where its folder should be.
+        let blocker = scratch("blocked");
+        fs::write(&blocker, "").unwrap();
+        let writer = FileWriter::new(blocker.join("settings.toml"));
+        let mut sink = writer.sink();
+        sink("a = 1\n".to_owned());
+        let failed = (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            writer.last_error()
+        });
+        assert!(failed.is_some());
+        drop(writer);
+        fs::remove_file(&blocker).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_file_is_moved_aside_not_overwritten() {
+        let dir = scratch("unreadable");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        let broken = "[ui]\ntheme = \"dark\n";
+        fs::write(&path, broken).unwrap();
+        let mut r = registry();
+        let opened = r.open_file(Scope::App, &path);
+        assert!(opened.unreadable.is_some());
+        assert!(opened.saving);
+        let aside = opened.set_aside.unwrap();
+        assert_eq!(fs::read_to_string(&aside).unwrap(), broken);
+        // Saving now writes a new file; the user's is still there.
+        let writer = FileWriter::new(path.clone());
+        r.persist_to(Scope::App, writer.sink());
+        r.set(&GRID, false).unwrap();
+        assert_eq!(writer.finish(), None);
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("visible = false")
+        );
+        assert_eq!(fs::read_to_string(&aside).unwrap(), broken);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_that_cant_be_moved_turns_saving_off() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("stuck");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        fs::write(&path, "not = [toml").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let opened = registry().open_file(Scope::App, &path);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(opened.unreadable.is_some());
+        // (Root moves it anyway: then it is set aside.)
+        assert_eq!(opened.saving, opened.set_aside.is_some());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = scratch("failed");
+        // A folder where the file goes: the rename fails.
+        let path = dir.join("settings.toml");
+        fs::create_dir_all(&path).unwrap();
+        assert!(write_atomically(&path, "a = 1\n").is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_file_stays_a_link() {
+        let dir = scratch("link");
+        fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let real = dir.join("dotfiles/settings.toml");
+        fs::write(&real, "old = 1\n").unwrap();
+        let link = dir.join("settings.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomically(&link, "new = 2\n").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new = 2\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn loading_saves_once_with_what_it_kept() {
+        let mut r = registry();
+        let saved: Arc<Mutex<Vec<String>>> = Arc::default();
+        let into = saved.clone();
+        r.persist_to(Scope::App, move |toml| into.lock().unwrap().push(toml));
+        r.load_toml(
+            Scope::App,
+            "[canvas]\nzoom = 2.0\n[canvas.grid]\nvisible = false\n[future]\nthing = 1\n",
+        )
+        .unwrap();
+        let saved = saved.lock().unwrap();
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        assert!(saved[0].contains("thing = 1"), "{}", saved[0]);
+    }
+
+    #[test]
+    fn resetting_a_value_this_version_couldnt_read_saves() {
+        let mut r = registry();
+        // A theme a newer version knows: kept, the default shows.
+        r.load_toml(Scope::App, "[ui]\ntheme = \"sepia\"\n")
+            .unwrap();
+        let saved: Arc<Mutex<Vec<String>>> = Arc::default();
+        let into = saved.clone();
+        r.persist_to(Scope::App, move |toml| into.lock().unwrap().push(toml));
+        r.reset(THEME.key()).unwrap();
+        let saved = saved.lock().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(!saved[0].contains("sepia"), "{}", saved[0]);
     }
 }
