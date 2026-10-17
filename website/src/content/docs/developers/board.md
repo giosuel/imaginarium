@@ -96,6 +96,16 @@ text box where you click and starts editing it. What is drawn inside a
 frame goes into the frame. `board.insert_shape`, `insert_frame` and
 `insert_text` do the same from the palette or the AI.
 
+## The clipboard
+
+Ctrl+C copies the selection as HTML (its text, readable, and the nodes
+in a marked comment) with a plain-text version for other apps; Ctrl+V
+pastes nodes copied on any board, or text as a text box. A node keeps
+its place on the board when it comes out of a frame, and a style the
+board doesn't have comes along by value. Reading the clipboard never
+waits on the UI thread: the board asks, and the content arrives as an
+input.
+
 ## Editing text
 
 A double-click on a text box or shape, or Enter with one selected, puts

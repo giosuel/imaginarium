@@ -249,6 +249,18 @@ keeps its look). A paste creates new ids, offsets by 16 pt when pasting
 into the same place, and is one transaction. Pasted plain text becomes a
 text box; images come with M4.
 
+**As built (M3.3).** `board.copy`, `board.cut` and `board.paste`
+(Ctrl+C, X, V). A copy's top-level nodes have their boxes in board
+coordinates, so a node copied out of a frame pastes where it was, on
+the board; the HTML holds the nodes' text as paragraphs, then the
+marked comment. The commands only note the clipboard's work; the board
+hands it over on input (`Clipboard::set_html`, and `request_marked`,
+which gives back the board's HTML when the clipboard holds it and the
+text otherwise), and the answer arrives as `Input::Paste`. The same copy
+pasted again on the same board goes 16 pt further each time. Named
+styles the target board doesn't have become local overrides with their
+effective values. Text pastes as a text box in the middle of the view.
+
 ## 9. Accessibility
 
 Each item is an accessibility node below the canvas widget (as in the
