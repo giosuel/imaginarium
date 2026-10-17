@@ -65,6 +65,14 @@ pub enum Token {
     WarningSoft,
     /// Icons and text on [`Token::WarningSoft`].
     OnWarningSoft,
+    /// A notice's band (the start window's "closed unexpectedly").
+    Notice,
+    /// A notice's outline.
+    NoticeBorder,
+    /// Text and icons on [`Token::Notice`].
+    OnNotice,
+    /// The outline of a button on a notice.
+    NoticeControlBorder,
     /// Tooltips' background (their text is [`Token::OnAccent`]).
     TooltipBg,
     /// Dims the window behind a dialog.
@@ -73,7 +81,7 @@ pub enum Token {
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 26] = [
+    pub const ALL: [Token; 30] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -98,6 +106,10 @@ impl Token {
         Token::Warning,
         Token::WarningSoft,
         Token::OnWarningSoft,
+        Token::Notice,
+        Token::NoticeBorder,
+        Token::OnNotice,
+        Token::NoticeControlBorder,
         Token::TooltipBg,
         Token::Scrim,
     ];
@@ -184,6 +196,10 @@ impl Theme {
                 (Token::Warning, rgb(0xf5a524)),
                 (Token::WarningSoft, rgb(0x46380f)),
                 (Token::OnWarningSoft, rgb(0xfcd34d)),
+                (Token::Notice, rgb(0x2e2410)),
+                (Token::NoticeBorder, rgb(0x5c4515)),
+                (Token::OnNotice, rgb(0xfcd34d)),
+                (Token::NoticeControlBorder, rgb(0x7a5a1a)),
                 (Token::TooltipBg, rgb(0x3f3f46)),
                 (Token::Scrim, Color::BLACK.with_alpha(0.5)),
             ],
@@ -225,6 +241,10 @@ impl Theme {
                 (Token::Warning, rgb(0xb45309)),
                 (Token::WarningSoft, rgb(0xfef3c7)),
                 (Token::OnWarningSoft, rgb(0x92400e)),
+                (Token::Notice, rgb(0xfff7e6)),
+                (Token::NoticeBorder, rgb(0xfbe3b0)),
+                (Token::OnNotice, rgb(0x78350f)),
+                (Token::NoticeControlBorder, rgb(0xf3c677)),
                 (Token::TooltipBg, rgb(0x18181b)),
                 (Token::Scrim, rgb(0x18181b).with_alpha(0.22)),
             ],
@@ -398,12 +418,14 @@ mod tests {
     /// Text and the backgrounds it is drawn on, which must reach 4.5:1
     /// (WCAG AA for body text) in every theme and for every accent the
     /// settings offer.
-    const PAIRS: [(Token, Token); 21] = [
+    const PAIRS: [(Token, Token); 23] = [
         (Token::Danger, Token::ControlHover),
         (Token::Danger, Token::ControlActive),
         (Token::Text, Token::PanelBg),
         (Token::TextSecondary, Token::PanelBg),
         (Token::OnWarningSoft, Token::WarningSoft),
+        (Token::OnNotice, Token::Notice),
+        (Token::OnNotice, Token::PanelBg),
         (Token::Text, Token::BoardBg),
         (Token::Text, Token::ControlHover),
         (Token::Text, Token::ControlActive),
