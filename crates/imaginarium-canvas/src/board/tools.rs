@@ -81,7 +81,7 @@ impl BoardCanvas {
         self.tool
     }
 
-    /// Takes up `tool` (the tool bar, a shortcut). Editing text ends.
+    /// Takes up `tool` (the tool bar, a shortcut).
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool.set_if_changed(tool);
         if tool != Tool::Select {

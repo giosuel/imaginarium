@@ -298,8 +298,15 @@ fn tiles_paint_what_drawing_directly_paints() {
     let mut board = BoardCanvas::new(crate::demo::launch_plan().unwrap());
     board.set_view(Point::ZERO, 0.5);
     let direct = render_board(&mut board, &mut fonts);
-    // The second frame draws tiles (rendered in the frame, no workers).
-    let tiled = render_board(&mut board, &mut fonts);
+    // The next frames draw tiles (rendered in the frame, no workers),
+    // within the frame's time budget: on a busy machine over several.
+    let mut tiled = render_board(&mut board, &mut fonts);
+    for _ in 0..20 {
+        if board.stats().owed == 0 {
+            break;
+        }
+        tiled = render_board(&mut board, &mut fonts);
+    }
     assert!(board.stats().owed == 0, "every tile rendered");
     let differing = direct
         .data()

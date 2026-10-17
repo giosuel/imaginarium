@@ -233,3 +233,118 @@ fn insert_without_a_box_lands_in_the_middle_of_the_view() {
         .to_plain_string();
     assert_eq!(text, "Note\n");
 }
+
+#[test]
+fn a_quick_drag_released_before_a_paint_keeps_its_box() {
+    let mut board = focused();
+    press_key(&mut board, "r", false);
+    board.button((800.0, 700.0), true, 1, false);
+    board.ui.input(
+        &mut board.fonts,
+        &Input::PointerMoved(Point::new(900.0, 780.0)),
+    );
+    board.button((900.0, 780.0), false, 1, false);
+    board.frame();
+    let node = only_selected(&board);
+    assert_eq!(
+        geometry(&board, node),
+        Geometry::new(800.0, 700.0, 100.0, 80.0)
+    );
+}
+
+#[test]
+fn a_line_in_a_turned_frame_runs_where_it_was_dragged() {
+    let (mut board, frame) = {
+        let mut document =
+            imaginarium_model::Document::new(imaginarium_model::DocumentKind::Board).unwrap();
+        let (frame, _) = document
+            .transact(&Actor::User, |txn| {
+                let frame = txn.create_node(Parent::Root, None, &NodeKind::Frame)?;
+                txn.set_geometry(
+                    frame,
+                    Geometry {
+                        x: 200.0,
+                        y: 200.0,
+                        w: 600.0,
+                        h: 600.0,
+                        r: 30.0,
+                    },
+                )?;
+                Ok(frame)
+            })
+            .unwrap();
+        (Harness::new(document), frame)
+    };
+    board.click((1400.0, 850.0));
+    press_key(&mut board, "l", false);
+    drag(&mut board, (400.0, 500.0), (600.0, 500.0));
+    let node = only_selected(&board);
+    let view = board.board().document().view();
+    assert_eq!(view.node(node).unwrap().parent(), Parent::Node(frame));
+    // Its ends, on the board, are where the drag began and ended.
+    let canvas = board.board();
+    let item = &canvas.items_for_tests().by_node[&node];
+    let flip = view
+        .node(node)
+        .unwrap()
+        .prop("flip")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let size = item.size;
+    let x = |at_start: bool| {
+        if at_start != flip.contains('h') {
+            0.0
+        } else {
+            size.width
+        }
+    };
+    let y = |at_start: bool| {
+        if at_start != flip.contains('v') {
+            0.0
+        } else {
+            size.height
+        }
+    };
+    let start = item.world * Point::new(x(true), y(true));
+    let end = item.world * Point::new(x(false), y(false));
+    assert!(
+        (start - Point::new(400.0, 500.0)).hypot() < 1e-6,
+        "{start:?}"
+    );
+    assert!((end - Point::new(600.0, 500.0)).hypot() < 1e-6, "{end:?}");
+}
+
+#[test]
+fn esc_puts_the_tool_down_and_a_shape_dragged_to_nothing_goes() {
+    let mut board = focused();
+    press_key(&mut board, "r", false);
+    board.key(Key::Escape, false);
+    assert_eq!(board.board().tool().get_untracked(), Tool::Select);
+    let before = board.board().document().view().node_count();
+    press_key(&mut board, "r", false);
+    drag(&mut board, (800.0, 700.0), (800.0, 700.0));
+    // A press that travels and comes back: nothing left behind.
+    board.button((800.0, 700.0), true, 1, false);
+    for at in [(840.0, 740.0), (800.0, 700.0)] {
+        board
+            .ui
+            .input(&mut board.fonts, &Input::PointerMoved(Point::from(at)));
+        board.frame();
+    }
+    board.button((800.0, 700.0), false, 1, false);
+    board.frame();
+    // The click placed one shape; the drag back to nothing none.
+    assert_eq!(board.board().document().view().node_count(), before + 1);
+}
+
+#[test]
+fn the_text_tool_on_a_text_edits_it() {
+    let mut board = focused();
+    let note = board.node("Ship the beta to 50 teams by December. Two interviews left this week.");
+    let before = board.board().document().view().node_count();
+    press_key(&mut board, "t", false);
+    board.click((1150.0, 280.0));
+    assert!(board.board().is_editing(note));
+    assert_eq!(board.board().document().view().node_count(), before);
+}

@@ -388,22 +388,27 @@ impl BoardCanvas {
                             .as_ref()
                             .and_then(|items| items.parent_world(view, node))
                             .unwrap_or_default();
-                        let local = parent.inverse().transform_rect_bbox(area);
+                        let line = preset == Some(tools::Preset::Line);
+                        // A line runs between the drag's ends in the parent's
+                        // space (a turned frame turns it with it).
+                        let (start, end) = (parent.inverse() * origin, parent.inverse() * pointer);
+                        let local = if line {
+                            Rect::from_points(start, end)
+                        } else {
+                            parent.inverse().transform_rect_bbox(area)
+                        };
                         let geometry = imaginarium_model::Geometry::new(
                             local.x0,
                             local.y0,
                             local.width(),
                             local.height(),
                         );
-                        // A line runs from where the drag began to the pointer.
-                        let flip = (preset == Some(tools::Preset::Line)).then_some(
-                            match (pointer.x < origin.x, pointer.y < origin.y) {
-                                (false, false) => "",
-                                (true, false) => "h",
-                                (false, true) => "v",
-                                (true, true) => "hv",
-                            },
-                        );
+                        let flip = line.then_some(match (end.x < start.x, end.y < start.y) {
+                            (false, false) => "",
+                            (true, false) => "h",
+                            (false, true) => "v",
+                            (true, true) => "hv",
+                        });
                         let _ = commands::execute(
                             self,
                             "board.set_box",
@@ -488,13 +493,18 @@ impl BoardCanvas {
     /// Applies the gesture's last state and closes its undo step.
     fn end_gesture(&mut self) {
         if self.gesture.is_some() {
-            // A shape tool's click without a drag places the tool's size.
+            // A shape tool's click without a drag places the tool's size;
+            // a drag released before any paint inserts what was dragged.
+            if self.armed.is_none() {
+                self.flush_gesture();
+            }
             if let Some(Gesture::Draw {
                 preset,
                 origin,
                 node: None,
                 ..
             }) = self.gesture.clone()
+                && self.armed.is_some()
             {
                 let tool = preset.map_or(Tool::Frame, Tool::Shape);
                 let area = Self::click_area(tool, origin);
@@ -513,11 +523,27 @@ impl BoardCanvas {
                 });
                 self.armed = Some(origin);
             }
-            if matches!(self.gesture, Some(Gesture::Draw { .. })) {
-                // One shape, then Select returns.
-                self.set_tool(Tool::Select);
-            }
             self.flush_gesture();
+            if let Some(Gesture::Draw { preset, node, .. }) = self.gesture.clone() {
+                // A shape dragged back to nothing goes again.
+                if let Some(node) = node
+                    && self
+                        .document
+                        .view()
+                        .node(node)
+                        .and_then(|node| node.geometry())
+                        .is_some_and(|g| g.w < 1.0 && g.h < 1.0)
+                {
+                    let _ = self.transact(&Actor::User, |txn| txn.delete_node(node));
+                    self.selection.set_if_changed(Vec::new());
+                }
+                // One shape, then Select returns (unless another tool was
+                // picked meanwhile).
+                let drawing = preset.map_or(Tool::Frame, Tool::Shape);
+                if self.tool.get_untracked() == drawing {
+                    self.set_tool(Tool::Select);
+                }
+            }
             self.gesture = None;
             self.armed = None;
             if std::mem::take(&mut self.grouped) {
@@ -1179,6 +1205,18 @@ impl BoardCanvas {
                         return true;
                     }
                     Tool::Text => {
+                        // On a text box or a shape, the text tool edits it.
+                        if let Some(node) = self.hit_at(*position)
+                            && self.document.view().node(node).is_some_and(|node| {
+                                matches!(node.kind(), NodeKind::Text | NodeKind::Shape)
+                            })
+                        {
+                            self.set_tool(Tool::Select);
+                            cx.release_pointer();
+                            self.start_editing(cx.fonts(), node, Some((*position, 1)));
+                            cx.request_paint();
+                            return true;
+                        }
                         let args = commands::text_args(at);
                         let _ = commands::execute(self, "board.insert_text", &args);
                         self.set_tool(Tool::Select);
@@ -1333,7 +1371,11 @@ impl BoardCanvas {
                     cx.request_paint();
                     return true;
                 }
-                let hovered = self.hit_at(*position);
+                let hovered = if self.tool.get_untracked() == Tool::Select {
+                    self.hit_at(*position)
+                } else {
+                    None
+                };
                 if hovered != self.hovered {
                     self.hovered = hovered;
                     cx.request_paint();
@@ -1407,6 +1449,11 @@ impl BoardCanvas {
             return true;
         }
         match key {
+            Key::Escape if self.tool.get_untracked() != Tool::Select => {
+                self.set_tool(Tool::Select);
+                cx.request_paint();
+                true
+            }
             Key::Escape => {
                 let had = !self.selection.get_untracked().is_empty() || self.entered.is_some();
                 // Out of an entered group, with the group selected.
