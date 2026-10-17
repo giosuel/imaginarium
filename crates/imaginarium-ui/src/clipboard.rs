@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The system clipboard (text only, for now), on a thread of its own.
+//! The system clipboard (text, and HTML with a text version), on a thread
+//! of its own.
 //!
 //! Reading the clipboard can wait for another app: on X11 the app that
 //! copied is asked for the text and may not answer for seconds, and on
@@ -58,6 +59,15 @@ pub(crate) trait Backend {
     fn get(&mut self) -> Option<String>;
     /// Puts `text` on the clipboard.
     fn set(&mut self, text: &str);
+    /// The clipboard's HTML, if it has any. May block.
+    fn get_html(&mut self) -> Option<String> {
+        None
+    }
+    /// Puts `html` on the clipboard, with `text` for apps that take text.
+    fn set_html(&mut self, html: &str, text: &str) {
+        let _ = html;
+        self.set(text);
+    }
 }
 
 struct System(Option<arboard::Clipboard>);
@@ -76,11 +86,25 @@ impl Backend for System {
             let _ = clipboard.set_text(text);
         }
     }
+    fn get_html(&mut self) -> Option<String> {
+        self.0.as_mut()?.get().html().ok()
+    }
+    fn set_html(&mut self, html: &str, text: &str) {
+        if let Some(clipboard) = &mut self.0 {
+            let _ = clipboard.set_html(html, Some(text));
+        }
+    }
 }
 
 enum Request {
     Set(String),
     Get,
+    SetHtml {
+        html: String,
+        text: String,
+    },
+    /// The HTML if it holds `marker`, else the text.
+    GetMarked(String),
 }
 
 /// The system clipboard, opened on its thread on first use. Without one
@@ -148,6 +172,22 @@ impl Clipboard {
     pub fn request_text(&mut self) {
         self.send(Request::Get);
     }
+
+    /// Puts `html` on the clipboard, with `text` for apps that take only
+    /// text (a board's copied nodes, with their text).
+    pub fn set_html(&mut self, html: &str, text: &str) {
+        self.send(Request::SetHtml {
+            html: html.to_owned(),
+            text: text.to_owned(),
+        });
+    }
+
+    /// Asks for the clipboard's HTML when it holds `marker` (what this app
+    /// copied), else its text; either arrives as
+    /// [`Input::Paste`](crate::Input::Paste).
+    pub fn request_marked(&mut self, marker: &str) {
+        self.send(Request::GetMarked(marker.to_owned()));
+    }
 }
 
 /// The clipboard thread: requests in order, so a paste right after a copy
@@ -157,11 +197,38 @@ fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>, sink: Sink)
     // paste still work inside it. (With one, a read that fails pastes
     // nothing, not an older copy.)
     let mut fallback = String::new();
+    let mut fallback_html: Option<String> = None;
     for request in requests {
         match request {
             Request::Set(text) => {
                 backend.set(&text);
                 fallback = text;
+                fallback_html = None;
+            }
+            Request::SetHtml { html, text } => {
+                backend.set_html(&html, &text);
+                fallback = text;
+                fallback_html = Some(html);
+            }
+            Request::GetMarked(marker) => {
+                let (html, text) = if backend.available() {
+                    (backend.get_html(), None)
+                } else {
+                    (fallback_html.clone(), Some(fallback.clone()))
+                };
+                let text = match html.filter(|html| html.contains(&marker)) {
+                    Some(html) => Some(html),
+                    None => text.or_else(|| {
+                        if backend.available() {
+                            backend.get()
+                        } else {
+                            None
+                        }
+                    }),
+                };
+                if let Some(text) = text.filter(|text| !text.is_empty()) {
+                    sink(text);
+                }
             }
             Request::Get => {
                 let text = if backend.available() {
@@ -221,6 +288,60 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(100));
         let text = pasted.recv_timeout(Duration::from_secs(5));
         assert_eq!(text.as_deref(), Ok("slow"));
+    }
+
+    /// A clipboard that keeps both forms.
+    #[derive(Default)]
+    struct Both(Option<String>, Option<String>);
+
+    impl Backend for Both {
+        fn get(&mut self) -> Option<String> {
+            self.1.clone()
+        }
+        fn set(&mut self, text: &str) {
+            *self = Both(None, Some(text.into()));
+        }
+        fn get_html(&mut self) -> Option<String> {
+            self.0.clone()
+        }
+        fn set_html(&mut self, html: &str, text: &str) {
+            *self = Both(Some(html.into()), Some(text.into()));
+        }
+    }
+
+    #[test]
+    fn a_marked_paste_gets_the_html_only_when_it_is_the_apps() {
+        let (sink, pasted) = collector();
+        let mut clipboard = Clipboard::with_backend(|| Box::new(Both::default()), sink);
+        clipboard.set_html("<p>x</p><!--app:1-->", "x");
+        clipboard.request_marked("<!--app:");
+        assert_eq!(
+            pasted.recv_timeout(Duration::from_secs(5)).as_deref(),
+            Ok("<p>x</p><!--app:1-->")
+        );
+        // Another app's HTML: the text.
+        clipboard.set_html("<b>bold</b>", "bold");
+        clipboard.request_marked("<!--app:");
+        assert_eq!(
+            pasted.recv_timeout(Duration::from_secs(5)).as_deref(),
+            Ok("bold")
+        );
+        // A plain text paste of the app's copy is its text.
+        clipboard.set_html("<p>y</p><!--app:2-->", "y");
+        clipboard.request_text();
+        assert_eq!(
+            pasted.recv_timeout(Duration::from_secs(5)).as_deref(),
+            Ok("y")
+        );
+        // Headless: the app's own copy.
+        let (sink, pasted) = collector();
+        let mut headless = Clipboard::with_backend(|| Box::new(Failing(false)), sink);
+        headless.set_html("<!--app:3-->", "z");
+        headless.request_marked("<!--app:");
+        assert_eq!(
+            pasted.recv_timeout(Duration::from_secs(5)).as_deref(),
+            Ok("<!--app:3-->")
+        );
     }
 
     #[test]
