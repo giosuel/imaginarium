@@ -20,7 +20,11 @@ Last updated: 2026-10-17
   untitled boards (https://github.com/giosuel/imaginarium/pull/67), the
   open and save dialogs (https://github.com/giosuel/imaginarium/pull/68),
   the close dialog (https://github.com/giosuel/imaginarium/pull/69) and
-  recent boards. M3.5 is
+  recent boards (https://github.com/giosuel/imaginarium/pull/70). M3.7
+  parts 1 and 2: https://github.com/giosuel/imaginarium/pull/71 and
+  https://github.com/giosuel/imaginarium/pull/72. All stacked: merge in
+  order after https://github.com/giosuel/imaginarium/pull/65 (CI's deps
+  job fails until it is in: AccessKit's unmaintained zbus crates). M3.5 is
   done (2026-10-17), in four stacked parts, each reviewed
   by a fresh agent: the settings file
   (https://github.com/giosuel/imaginarium/pull/61), the Settings window
