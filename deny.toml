@@ -27,12 +27,15 @@ ignore = [
   { id = "RUSTSEC-2026-0247", reason = "bitmaps: unmaintained, only via im via loro-internal" },
   { id = "RUSTSEC-2026-0248", reason = "im: unmaintained, only via loro-internal" },
   { id = "RUSTSEC-2026-0251", reason = "sized-chunks: unmaintained, only via im via loro-internal" },
-  # `zbus_names` is unmaintained (2026-10-17), reached only through
-  # AccessKit's Linux screen-reader bridge (`accesskit_unix` → `atspi`),
-  # with no upgrade yet. An "unmaintained" notice, not a vulnerability.
-  # Remove it when AccessKit moves on, and re-check on every AccessKit
-  # update (STATUS, known issues).
-  { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained, only via atspi via accesskit_unix" },
+  # The zbus family (`zvariant`, `zvariant_derive`, `zbus_names`) is
+  # unmaintained (2026-10-17), reached only through AccessKit's Linux
+  # screen-reader bridge (`accesskit_unix` → `zbus`, `atspi`), with no
+  # upgrade yet. "Unmaintained" notices, not vulnerabilities. Remove them
+  # when AccessKit moves on, and re-check on every AccessKit update
+  # (STATUS, known issues).
+  { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained, only via zbus and atspi via accesskit_unix" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained, only via zbus and atspi via accesskit_unix" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained, only via zvariant via accesskit_unix" },
 ]
 
 [licenses]
