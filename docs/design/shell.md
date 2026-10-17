@@ -399,9 +399,16 @@ from the platform's configuration folder at startup
 `%APPDATA%\Imaginarium\` on Windows; `--settings PATH` for another file).
 After every change of an app setting the registry hands its TOML to a
 writer thread (`Registry::persist_to`, `FileWriter`), which writes the
-newest text atomically and finishes before the app exits; the UI never
-waits for the disk. A file that can't be read leaves the defaults, and
-entries this version can't read are kept (`persist.rs`).
+newest text atomically (a temporary file of its own per write, removed
+if the write fails; a symbolic link stays a link) and finishes before
+the app exits; the UI never waits for the disk. Entries this version
+can't read are kept (`persist.rs`). A file that can't be read at all
+(broken TOML, not UTF-8) is moved aside to
+`settings.toml.unreadable-<seconds>` and the defaults are used; if it
+can't be moved, nothing is saved that session, so the user's file is
+never overwritten (`Registry::open_file`). For now these notices go to
+standard error; the Settings window shows them (part 2). Two instances of
+the app write the same file: the last save wins.
 
 ## 6. Layers, popovers and focus
 

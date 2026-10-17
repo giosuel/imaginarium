@@ -11,9 +11,8 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.5, the Settings UI** (below): the window generated
-  from the registry, and saving the settings to a file (Show at startup
-  lasts only for the session until then). M3.4 is done (2026-10-17), in
+- **Next step:** **M3.5 part 2, the Settings window** (below). Part 1,
+  the settings file, is done (2026-10-17). M3.4 is done (2026-10-17), in
   six parts, each reviewed by a fresh agent and stacked: the board window
   (https://github.com/giosuel/imaginarium/pull/56), the command palette
   (https://github.com/giosuel/imaginarium/pull/57), the contextual
@@ -1103,7 +1102,15 @@ What M3 builds on:
   - one window per document;
   - the app's startup: settings, commands, fonts and the GPU in parallel,
     under 400 ms to an interactive empty board (PLAN §10).
-- [ ] **M3.5 Settings UI**, generated from the registry:
+- [ ] **M3.5 Settings UI**, generated from the registry, in parts:
+  - [x] **part 1, the settings file** (2026-10-17, `shell.md` §5 "As
+    built"): read at startup, written after every change on a thread of
+    its own, an unreadable file moved aside instead of overwritten;
+  - part 2, the Settings window (`Ctrl+,`): sections, search, an editor
+    for every kind of value, Changed and Reset;
+  - part 3, M3's settings applied at once (theme, accent, reduce motion,
+    board background) with the mockup's editors;
+  - part 4, the This board scope, stored in the document;
   - search, scopes and every kind of setting;
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
