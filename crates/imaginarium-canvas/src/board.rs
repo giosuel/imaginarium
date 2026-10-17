@@ -676,6 +676,11 @@ impl BoardCanvas {
         self.armed = Some(screen);
     }
 
+    /// The board's shortcuts (tooltips and menus show them).
+    pub fn keymap(&self) -> &imaginarium_commands::Keymap {
+        &self.keymap
+    }
+
     /// The board's shortcuts, to change them.
     pub fn keymap_mut(&mut self) -> &mut imaginarium_commands::Keymap {
         &mut self.keymap
