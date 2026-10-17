@@ -29,8 +29,9 @@ too. Turn off **Show at startup** to go straight to a new board.
 **Settings** (`Ctrl+,` / `⌘,`) has every setting by section, with a
 search across them; changes apply right away. Some settings, like the
 board's background, can also differ per board: pick **This board** to
-change them for the board you're working on only. Your settings are saved as
-you change them, in `settings.toml` in your
+change them for the board you're working on only. Under **Appearance** you pick the theme (follow the system, light or dark)
+and the accent color; they apply to every window at once. Your settings
+are saved as you change them, in `settings.toml` in your
 configuration folder (`~/.config/imaginarium/` on Linux,
 `~/Library/Application Support/Imaginarium/` on macOS,
 `%APPDATA%\Imaginarium\` on Windows). You never need to edit it.

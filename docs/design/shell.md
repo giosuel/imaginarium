@@ -668,6 +668,30 @@ always stores the palette color itself.
 Text meets 4.5:1 on its background (3:1 for 24 px and up) in every theme;
 a test checks the token pairs.
 
+**As built (M3.7 part 1, the theme and the accent).** Three settings,
+in Settings › Appearance in the mockup's order (Theme, Accent color,
+Board background, Reduce motion, then the tool bar):
+- **`ui.theme`** (System, Light, Dark) as the mockup's cards; **High
+  contrast**'s card shows, disabled, saying it comes with its own design
+  (its colors aren't designed yet). **`ui.accent`** as the mockup's
+  seven swatches (indigo, teal, orange, violet, pink, green, graphite;
+  the dark theme shows the darkest three lighter, as the dark mockup
+  does). **`ui.reduce_motion`** (Follow the system, On, Off) as the
+  mockup's dropdown.
+- **Live:** a change switches every window at once
+  (`imaginarium_ui::appearance::set_appearance`, from the settings'
+  subscription); the board's tiles, pictures and panels follow.
+- **Following the system** (`imaginarium_ui::appearance`): on Windows
+  and macOS the windows' theme (winit's `ThemeChanged`); on Linux the
+  desktop portal's `org.freedesktop.appearance color-scheme` and GNOME's
+  `enable-animations`, read over D-Bus (zbus, already in the tree) on a
+  thread the window loop starts, which hears changes too. Without a
+  portal, System is dark and motion full. Reduced motion follows the
+  system on Linux only so far.
+- **Shadows** are the mockups' (`shadow.panel` above), soft: blurred
+  rounded rectangles (`Scene::shadow`, Vello's), no longer stepped
+  layers, which showed as bands on light.
+
 ## 8. Icons
 
 **Lucide** (owner, 2026-10-16; ISC license, and MIT for the icons that
