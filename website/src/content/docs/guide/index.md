@@ -43,7 +43,11 @@ newer version), the board opens read-only and says why.
 A **new board** says **Not saved** until it has a place of its own, but it
 is kept anyway: if Imaginarium closes unexpectedly, the start window
 offers it the next time, with every change. Closing it yourself lets it
-go.
+go. **Save…** (`Ctrl+S` / `⌘S`) gives it a name and a folder; from then
+on it saves itself there. Click the board's name to **rename or move**
+it, and use **Save a copy…** (`Ctrl+Shift+S`) from the menu behind the
+logo to keep a copy elsewhere. **Open…** (`Ctrl+O` / `⌘O`) opens a board
+file.
 
 Every board has a **window of its own**. `Ctrl+N` in a board opens
 another one, and `Ctrl+W` / `⌘W` closes it; when the last board closes,

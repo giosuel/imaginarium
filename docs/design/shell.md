@@ -159,6 +159,40 @@ the board's place.
   the same files; the notice goes. When the start window is off, it
   shows when the last board closes.
 
+**As built (M3.6 part 3, the open and save dialogs).** The file commands
+(category File, in the palette and the main menu):
+- **Open…** (`Ctrl+O`, in boards and the start window): the system's
+  open dialog, filtered to `.imag`; the board opens in a window of its
+  own (the start window then closes, as with New board). A board open in
+  another window opens read-only and says so; a file that can't be
+  opened is said next to the board's name (in the start window, above
+  Recent).
+- **Save…** (`Ctrl+S`, the pill's Save…) gives an untitled board its
+  place, and **Rename or move…** (the pill's name, "Rename or move the
+  board") chooses a new name or folder for a board's file. Both **move
+  the file** (an untitled board's recovery file): its saving finishes,
+  the file is renamed (copied, then removed, across file systems) and
+  opened again there, so the board keeps its id and history; then saving
+  goes on from what the file holds. An untitled board that never changed
+  has no file yet and is written fresh. A file at the target that another
+  window or app has open is never replaced; on any failure the board
+  goes on saving where it was, and the reason shows next to its name.
+  The name in the pill and the window's title follow
+  (`WindowRequest::SetTitle`). Saving an already saved board is
+  disabled ("every change is already saved on its own").
+- **Save a copy…** (`Ctrl+Shift+S`): a new document (an id of its own)
+  from the board as it is; the window goes on where it was.
+- **The main menu** (the pill's app button): New board, Open…; Save…,
+  Rename or move…, Save a copy…; Settings; Close window, as rows of the
+  ContextMenu mockup's menu (its own contents had no mockup).
+- **Dialogs** are `rfd`'s (0.17.2): the desktop portal on Linux, so
+  Hyprland, GNOME, KDE and Flatpak alike, with zenity as its fallback
+  where no portal runs (which ignores the starting folder); the system's
+  own on Windows and macOS. They are not parented to the window yet. The
+  dialog, opening, moving and writing run on a thread of their own
+  (`crate::files::Pending`), which wakes the window when done; one at a
+  time per window.
+
 ### 3.2 Top right
 
 Search (opens the palette, `Ctrl+K`), AI (the assistant, a placeholder
