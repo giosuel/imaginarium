@@ -14,7 +14,7 @@
 //!
 //! What the system says is kept in atomics (any thread may learn it); the
 //! theme is switched on the UI thread, before the next frame
-//! ([`refresh`]).
+//! (`refresh`).
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
