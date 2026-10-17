@@ -135,3 +135,50 @@ fn html_from_other_apps_isnt_nodes() {
     assert!(clipboard::from_html("<b>bold</b>").is_none());
     assert!(clipboard::from_html(&format!("{MARKER}%%%-->")).is_none());
 }
+
+#[test]
+fn a_drawn_shape_pastes_unturned() {
+    let mut board = sample();
+    board.click((1435.0, 860.0));
+    let press = |board: &mut Harness, character: &str| {
+        board.ui.input(
+            &mut board.fonts,
+            &Input::Key {
+                key: imaginarium_ui::Key::Character(character.into()),
+                text: Some(character.into()),
+                pressed: true,
+                repeat: false,
+                modifiers: imaginarium_ui::Modifiers::default(),
+            },
+        );
+        board.frame();
+    };
+    press(&mut board, "d");
+    board.button((1180.0, 640.0), true, 1, false);
+    for at in [(1240.0, 700.0), (1300.0, 760.0)] {
+        board.ui.input(
+            &mut board.fonts,
+            &Input::PointerMoved(imaginarium_render::kurbo::Point::from(at)),
+        );
+        board.frame();
+    }
+    board.button((1300.0, 760.0), false, 1, false);
+    board.frame();
+    let [drawn] = board.selection()[..] else {
+        panic!()
+    };
+    let html = copy(&mut board);
+    paste(&mut board, &html);
+    let [pasted] = board.selection()[..] else {
+        panic!()
+    };
+    let view = board.board().document().view();
+    let (a, b) = (
+        view.node(drawn).unwrap().geometry().unwrap(),
+        view.node(pasted).unwrap().geometry().unwrap(),
+    );
+    assert_eq!(
+        (b.x - a.x, b.y - a.y, b.w, b.h, b.r),
+        (16.0, 16.0, a.w, a.h, 0.0)
+    );
+}
