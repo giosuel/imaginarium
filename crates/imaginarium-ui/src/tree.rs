@@ -2145,22 +2145,40 @@ impl Ui {
         }
     }
 
-    /// Routes a screen reader's request to the widget owning the node.
-    pub fn access_action(&mut self, fonts: &mut Fonts, request: &ActionRequest) -> bool {
-        let Some((index, generation)) = WidgetId::from_access(request.target_node.0) else {
-            return false;
-        };
-        let Some(slot) = self.slots.get(index as usize) else {
-            return false;
-        };
+    /// The widget whose accessibility node `node` is, if it is still there.
+    fn widget_of_access_node(&self, node: NodeId) -> Option<WidgetId> {
+        let (index, generation) = WidgetId::from_access(node.0)?;
+        let slot = self.slots.get(index as usize)?;
         // A late request about a removed widget names its old generation;
         // the slot's new widget doesn't answer it.
         if u64::from(slot.generation) & ACCESS_GENERATION_MASK != generation {
-            return false;
+            return None;
         }
-        let id = WidgetId {
+        Some(WidgetId {
             index,
             generation: slot.generation,
+        })
+    }
+
+    /// The widget a screen reader knows as `label`: the first in the tree
+    /// whose own node has that name. For scripted runs and tests of whole
+    /// windows, which find controls the way people with a screen reader
+    /// do.
+    pub fn find_by_label(&mut self, fonts: &mut Fonts, label: &str) -> Option<WidgetId> {
+        let mut tree = crate::access::AccessTree::default();
+        self.access(fonts, &mut tree);
+        let (node, _) = tree
+            .nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))?;
+        let id = self.widget_of_access_node(*node)?;
+        self.node(id).is_some().then_some(id)
+    }
+
+    /// Routes a screen reader's request to the widget owning the node.
+    pub fn access_action(&mut self, fonts: &mut Fonts, request: &ActionRequest) -> bool {
+        let Some(id) = self.widget_of_access_node(request.target_node) else {
+            return false;
         };
         // A screen reader can't click or focus what a dialog covers.
         if self.node(id).is_none() || !self.reachable(id) {
