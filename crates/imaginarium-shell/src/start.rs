@@ -788,7 +788,7 @@ fn recent_tile(
     );
     let asks = asks.clone();
     let path = board.path.clone();
-    ButtonBox::new(format!("Open {name}"), ButtonColors::quiet(), move || {
+    ButtonBox::new(format!("Open {name}"), tile_colors(), move || {
         asks.borrow_mut().push(StartAsk::OpenRecent(path.clone()));
     })
     .padding(0.0, 0.0)
@@ -808,13 +808,22 @@ fn open_tile(ui: &mut Ui, asks: &StartAsks) -> WidgetId {
     let tile = ui.add_with_children(crate::recent::DashedTile, &[icon, label]);
     let content = ui.add_with_children(Flex::column().grow(1.0), &[tile]);
     let asks = asks.clone();
-    ButtonBox::new("Open another board…", ButtonColors::quiet(), move || {
+    ButtonBox::new("Open another board…", tile_colors(), move || {
         asks.borrow_mut().push(StartAsk::Open);
     })
     .padding(0.0, 0.0)
     .radius(10.0)
     .role(Role::Link)
     .add_to(ui, &[content])
+}
+
+/// A tile's colors: on the window's background (the Start mockup), lit
+/// under the pointer.
+fn tile_colors() -> ButtonColors {
+    ButtonColors {
+        background: Token::BoardBg.into(),
+        ..ButtonColors::quiet()
+    }
 }
 
 /// `tiles` in rows of three equal columns, 14 px apart.
