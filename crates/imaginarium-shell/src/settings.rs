@@ -1102,7 +1102,17 @@ impl SettingsWindow {
         let name = choices(declaration)
             .into_iter()
             .find(|(choice, _)| same(choice, value))
-            .map_or_else(|| format_value(value), |(_, name)| name);
+            .map_or_else(
+                // Off the steps (a value from the file): as the steps read.
+                || {
+                    if key == crate::look::SCALE.key() {
+                        format!("{:.0} %", value_number(value) * 100.0)
+                    } else {
+                        format_value(value)
+                    }
+                },
+                |(_, name)| name,
+            );
         let asks = self.asks.clone();
         let anchor = Rc::new(std::cell::Cell::new(None));
         let at = anchor.clone();

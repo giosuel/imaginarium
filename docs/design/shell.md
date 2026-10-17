@@ -695,7 +695,10 @@ Board background, Reduce motion, then the tool bar):
   scale is the system's times it), and the board draws at its zoom
   divided by it (`view_zoom`), so at 100 % a point is still a system
   pixel and the zoom shown doesn't change. A window of a fixed size (the
-  start window) grows with it.
+  start window) opens and stays that much bigger; others keep their size
+  on screen (their content is larger in it). The input method's box is
+  placed in device pixels. A wheel notch pans the board by as many
+  logical pixels, so further at a bigger size (as panels scroll).
 - **Shadows** are the mockups' (`shadow.panel` above), soft: blurred
   rounded rectangles (`Scene::shadow`, Vello's), no longer stepped
   layers, which showed as bands on light.

@@ -154,6 +154,35 @@ fn the_selection_box_on_screen_follows_the_view() {
 }
 
 #[test]
+fn the_board_is_drawn_as_big_at_any_interface_size() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    let widget = board.board;
+    let canvas = board.ui.widget_mut::<BoardCanvas>(widget).unwrap();
+    canvas.select(&[interview]);
+    board.frame();
+    let at_100 = board.board().selection_on_screen().unwrap();
+    // Logical pixels 25 % bigger: the selection covers 0.8 as many, so the
+    // same on screen; the zoom shown stays.
+    imaginarium_ui::set_interface_scale(1.25);
+    board.frame();
+    let at_125 = board.board().selection_on_screen().unwrap();
+    assert!(
+        (at_125.width() - 0.8 * at_100.width()).abs() < 1e-6,
+        "{at_125:?}"
+    );
+    assert_eq!(board.board().zoom(), 1.0);
+    // Zoom to fit shows the board whole, at most 100 % shown.
+    let canvas = board.ui.widget_mut::<BoardCanvas>(widget).unwrap();
+    canvas
+        .execute("view.zoom_to_fit", &imaginarium_commands::Args::new())
+        .unwrap();
+    board.frame();
+    assert!(board.board().zoom() <= 1.0 + 1e-9);
+    imaginarium_ui::set_interface_scale(1.0);
+}
+
+#[test]
 fn opacity_keeps_each_nodes_own_color_and_old_uppercase_colors_count() {
     let mut board = sample();
     let interview = board.node("Interview 5 users");
