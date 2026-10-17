@@ -84,6 +84,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         settings_path(|name| std::env::var_os(name))
     };
+    let mut notice = None;
     let writer = match path {
         Some(path) => {
             let opened = settings.open_file(Scope::App, &path);
@@ -95,10 +96,14 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(reason) = &opened.unreadable {
                 eprintln!("imaginarium: {} can't be read: {reason}", path.display());
-                match &opened.set_aside {
-                    Some(aside) => eprintln!("imaginarium: it was moved to {}", aside.display()),
-                    None => eprintln!("imaginarium: settings won't be saved this time"),
-                }
+                let what = match &opened.set_aside {
+                    Some(aside) => format!("It was moved to {}.", aside.display()),
+                    None => "Changes won't be saved this time, so it stays as it is.".to_owned(),
+                };
+                eprintln!("imaginarium: {what}");
+                notice = Some(format!(
+                    "Your settings file couldn't be read, so the defaults are used. {what}"
+                ));
             }
             opened.saving.then(|| {
                 let writer = FileWriter::new(path);
@@ -115,6 +120,7 @@ fn main() -> anyhow::Result<()> {
         workers,
         VERSION,
     );
+    app.report_saving(writer.as_ref().map(FileWriter::status), notice);
     let frames: Option<u64> = value("--frames").and_then(|frames| frames.parse().ok());
     let (options, view): (WindowOptions, Box<dyn View>) = if flag("--demo") {
         let mut window = app.board_window(demo::launch_plan()?, "Launch plan");
