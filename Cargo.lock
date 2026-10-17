@@ -2119,6 +2119,22 @@ name = "imaginarium-app"
 version = "0.0.1"
 
 [[package]]
+name = "imaginarium-canvas"
+version = "0.0.1"
+dependencies = [
+ "accesskit",
+ "criterion",
+ "imaginarium-commands",
+ "imaginarium-model",
+ "imaginarium-reactive",
+ "imaginarium-render",
+ "imaginarium-text",
+ "imaginarium-ui",
+ "proptest",
+ "taffy",
+]
+
+[[package]]
 name = "imaginarium-cli"
 version = "0.0.1"
 dependencies = [
@@ -2287,6 +2303,7 @@ dependencies = [
  "accesskit_consumer",
  "accesskit_winit",
  "arboard",
+ "criterion",
  "imaginarium-reactive",
  "imaginarium-render",
  "imaginarium-text",
