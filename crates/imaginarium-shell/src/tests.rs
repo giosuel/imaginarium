@@ -123,6 +123,22 @@ impl Harness {
             .unwrap_or_else(|| panic!("no widget named {label:?}"))
     }
 
+    /// The middle of the node a screen reader knows as `label` with
+    /// `role` (two controls can share a name: the bar's Delete and the
+    /// menu's).
+    fn item_center(&mut self, label: &str, role: accesskit::Role) -> Point {
+        let (ui, fonts) = self.window.ui();
+        let mut tree = AccessTree::default();
+        ui.access(fonts, &mut tree);
+        let (_, node) = tree
+            .nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some(label) && node.role() == role)
+            .unwrap_or_else(|| panic!("no {role:?} named {label:?}"));
+        let bounds = node.bounds().unwrap();
+        Point::new((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0)
+    }
+
     /// Every label's text, as a screen reader reads them.
     fn texts(&mut self) -> Vec<String> {
         let (ui, fonts) = self.window.ui();
@@ -741,4 +757,175 @@ fn a_keystroke_costs_well_under_a_frame() {
         "keystroke + frame: average {:?}, worst {worst:?}",
         total / letters.len() as u32
     );
+}
+
+fn demo() -> Harness {
+    Harness::with(imaginarium_canvas::demo::launch_plan().unwrap())
+}
+
+fn shows(window: &mut Harness, label: &str) -> bool {
+    let (ui, fonts) = window.window.ui();
+    ui.find_by_label(fonts, label).is_some()
+}
+
+fn style(window: &Harness, node: imaginarium_model::NodeId, prop: &str) -> Option<String> {
+    window
+        .board()
+        .document()
+        .view()
+        .style_prop(node, prop)
+        .and_then(imaginarium_model::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The "Interview 5 users" card of the demo board, and a point on it.
+const CARD: Point = Point::new(330.0, 320.0);
+
+#[test]
+fn the_bar_comes_with_a_selection_above_it_and_fills_it() {
+    let mut window = demo();
+    assert!(!shows(&mut window, "Selection"), "no selection, no bar");
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    assert!(shows(&mut window, "Selection"));
+    let bar = window.named("Selection");
+    let (bar_box, selection) = (
+        window.bounds(bar),
+        window.board().selection_on_screen().unwrap(),
+    );
+    assert!(
+        bar_box.y1 <= selection.y0,
+        "above: {bar_box:?} {selection:?}"
+    );
+    assert!((bar_box.center().x - selection.center().x).abs() < 1.0);
+    // A rectangle: fill, outline, width, corner radius; no text color.
+    for control in [
+        "Fill",
+        "Outline",
+        "Outline width",
+        "Arrange",
+        "Duplicate",
+        "More",
+    ] {
+        assert!(shows(&mut window, control), "{control}");
+    }
+    assert!(!shows(&mut window, "Text color"));
+    // Fill › Amber.
+    let fill = window.named("Fill");
+    let at = window.bounds(fill).center();
+    window.click(at);
+    let amber = window.named("Amber");
+    let at = window.bounds(amber).center();
+    window.click(at);
+    assert_eq!(style(&window, card, "fill").as_deref(), Some("#fef3c7"));
+    // A typed color, with its opacity.
+    let fill = window.named("Fill");
+    let at = window.bounds(fill).center();
+    window.click(at);
+    let hex = window.named("Hex color");
+    let at = window.bounds(hex).center();
+    window.click(at);
+    type_text(&mut window, "16A34A");
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+    assert_eq!(style(&window, card, "fill").as_deref(), Some("#16a34a"));
+}
+
+#[test]
+fn widths_and_radii_come_from_their_popovers() {
+    let mut window = demo();
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    let width = window.named("Outline width");
+    let at = window.bounds(width).center();
+    window.click(at);
+    let bold = window.named("Bold · 3");
+    let at = window.bounds(bold).center();
+    window.click(at);
+    let view = window.board().document().view();
+    assert_eq!(
+        view.style_prop(card, "stroke_w"),
+        Some(&imaginarium_model::Value::Number(3.0))
+    );
+    // Corner radius › Round ends: half the card's shorter side.
+    let radius = window.named("Corner radius, 12");
+    let at = window.bounds(radius).center();
+    window.click(at);
+    let round = window.named("Round ends");
+    let at = window.bounds(round).center();
+    window.click(at);
+    let view = window.board().document().view();
+    let size = view.node(card).unwrap().geometry().unwrap();
+    assert_eq!(
+        view.style_prop(card, "radius"),
+        Some(&imaginarium_model::Value::Number(size.w.min(size.h) / 2.0))
+    );
+}
+
+#[test]
+fn the_bar_steps_aside_during_a_drag() {
+    let mut window = demo();
+    window.click(CARD);
+    assert!(shows(&mut window, "Selection"));
+    window.input(Input::PointerMoved(CARD));
+    window.press(CARD, true, 1, false);
+    for step in 1..=4 {
+        window.input(Input::PointerMoved(CARD + (10.0 * f64::from(step), 0.0)));
+    }
+    assert!(!shows(&mut window, "Selection"), "hidden while moving");
+    window.press(CARD + (40.0, 0.0), false, 1, false);
+    assert!(shows(&mut window, "Selection"), "back after");
+}
+
+#[test]
+fn a_text_box_gets_a_text_color_and_no_fill() {
+    let mut window = demo();
+    window.click(Point::new(1200.0, 300.0));
+    assert_eq!(window.board().selection().get_untracked().len(), 1);
+    assert!(shows(&mut window, "Text color"));
+    assert!(!shows(&mut window, "Fill"));
+}
+
+#[test]
+fn more_and_the_context_menu_run_the_selections_commands() {
+    let mut window = demo();
+    let before = window.board().document().view().node_count();
+    // A right-click on a card selects it and opens its menu.
+    window.input(Input::PointerMoved(CARD));
+    window.input(Input::PointerButton {
+        primary: false,
+        pressed: true,
+        position: CARD,
+        clicks: 1,
+        modifiers: Modifiers::default(),
+    });
+    window.frame();
+    assert_eq!(window.board().selection().get_untracked().len(), 1);
+    assert!(shows(&mut window, "Cut") && shows(&mut window, "Bring to front"));
+    // ↓ moves through the rows; Delete runs from its row (the menu's, not
+    // the bar's button of the same name).
+    window.input(key_input(imaginarium_ui::Key::ArrowDown, None));
+    let at = window.item_center("Delete", accesskit::Role::MenuItem);
+    window.click(at);
+    assert_eq!(window.board().document().view().node_count(), before - 1);
+    // On the empty board: the board's menu.
+    let empty = Point::new(900.0, 750.0);
+    window.input(Input::PointerMoved(empty));
+    window.input(Input::PointerButton {
+        primary: false,
+        pressed: true,
+        position: empty,
+        clicks: 1,
+        modifiers: Modifiers::default(),
+    });
+    window.frame();
+    assert!(shows(&mut window, "Select all"));
+    let all = window.named("Select all");
+    let at = window.bounds(all).center();
+    window.click(at);
+    assert!(window.board().selection().get_untracked().len() > 5);
+    // More on the bar lists the same commands.
+    let more = window.named("More");
+    let at = window.bounds(more).center();
+    window.click(at);
+    assert!(shows(&mut window, "Copy"));
 }

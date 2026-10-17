@@ -23,6 +23,7 @@ use taffy::prelude::length;
 
 use crate::chrome::{self, Chrome, Placeholder};
 use crate::commands::{ShellCx, shell_commands, shell_keymap};
+use crate::contextbar::{self, ContextBar, Control};
 use crate::palette::{self, Catalog, Kind, Palette, Sources};
 use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
 
@@ -62,6 +63,16 @@ pub(crate) enum Ask {
     PaletteTab(bool),
     /// The palette closed (Esc, a click outside, a command run).
     PaletteClosed,
+    /// Open a contextual toolbar control's popover.
+    BarOpen(crate::contextbar::Control),
+    /// Run a command with arguments (a color, a width).
+    RunWith(&'static str, Args),
+    /// A typed hex color for a color command.
+    BarColor(&'static str, String),
+    /// A typed opacity (percent) for a color command.
+    BarOpacity(&'static str, String),
+    /// Move the focus to the next (or previous) control: ↓ and ↑ in menus.
+    FocusStep(bool),
 }
 
 /// The queue of what the panels asked for.
@@ -115,6 +126,7 @@ pub struct BoardWindow {
     catalog: Catalog,
     usage: UsageStats,
     palette: Option<Palette>,
+    bar: ContextBar,
     /// Holds the tool bar; laid out for where it docks.
     stage: WidgetId,
     placing: Option<Placing>,
@@ -183,9 +195,10 @@ impl BoardWindow {
             }),
             &[tools.bar],
         );
+        let bar = ContextBar::new(&mut ui);
         let root = ui.add_with_children(
             Flex::column().fill(),
-            &[board, chrome.overlay, zones, stage, hint],
+            &[board, chrome.overlay, zones, stage, bar.panel, hint],
         );
         ui.set_root(root);
         let mut commands = Commands::new();
@@ -243,6 +256,7 @@ impl BoardWindow {
             catalog,
             usage: UsageStats::new(),
             palette: None,
+            bar,
             stage,
             placing: None,
             zones,
@@ -345,16 +359,48 @@ impl BoardWindow {
                 self.place_floating(clamped);
             }
         }
+        // The contextual toolbar follows the selection; it steps aside
+        // while the pointer moves something.
+        let bar_state = self.board().and_then(|board| {
+            (!board.is_gesturing())
+                .then(|| contextbar::state(board, &self.board_commands))
+                .flatten()
+        });
+        if bar_state != self.bar.state {
+            let keymap = self.board().map(|board| board.keymap().clone());
+            if let Some(keymap) = keymap {
+                self.bar
+                    .rebuild(&mut self.ui, bar_state, &keymap, &self.asks);
+            }
+        }
         let area = Rect::from_origin_size((0.0, 0.0), size);
         self.ui.layout(&mut self.fonts, area);
         // A docked bar keeps clear of the corner panels, which the first
         // layout measured; lay out again if that moves it.
+        let mut again = false;
         if self.dock != Dock::Floating {
             let placing = self.placing();
             if self.placing != Some(placing) {
                 self.apply_placing(placing);
-                self.ui.layout(&mut self.fonts, area);
+                again = true;
             }
+        }
+        let selection = self
+            .bar
+            .state
+            .as_ref()
+            .and_then(|_| self.board())
+            .and_then(BoardCanvas::selection_on_screen);
+        if again {
+            self.ui.layout(&mut self.fonts, area);
+        }
+        // A bar just rebuilt (or shown) was measured by the layout before:
+        // placed once with that size, laid out, placed again if it moved.
+        for _ in 0..2 {
+            if !self.bar.place(&mut self.ui, selection, size) {
+                break;
+            }
+            self.ui.layout(&mut self.fonts, area);
         }
         self.ui.paint(&mut self.fonts, scene);
     }
@@ -492,7 +538,122 @@ impl BoardWindow {
                     palette.dispose(&mut self.ui);
                 }
             }
+            Ask::BarOpen(control) => self.open_bar_popup(control),
+            Ask::RunWith(command, args) => {
+                let _ = self.execute(command, &args);
+            }
+            Ask::BarColor(command, text) => {
+                if let Some(color) = contextbar::typed_color(&text) {
+                    let args =
+                        Args::new().with("color", imaginarium_commands::ArgValue::String(color));
+                    let _ = self.execute(command, &args);
+                }
+            }
+            Ask::BarOpacity(command, text) => {
+                let stored = self.bar.stored_color(command);
+                if let (Ok(percent), Some(stored)) = (text.parse::<f64>(), stored)
+                    && let Some(color) = contextbar::with_opacity(&stored, percent)
+                {
+                    let args =
+                        Args::new().with("color", imaginarium_commands::ArgValue::String(color));
+                    let _ = self.execute(command, &args);
+                }
+            }
+            Ask::FocusStep(forward) => self.ui.focus_next(&mut self.fonts, forward),
         }
+    }
+
+    /// Opens the context menu at `at`: the selection's commands when the
+    /// pointer is on a node (selected first, as a click would), the
+    /// board's otherwise (`shell.md` §3.8).
+    fn context_menu(&mut self, at: Point) {
+        let Some(board) = self.ui.widget_mut::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let node = board.node_at(at);
+        let selected = board.selection().get_untracked();
+        match node {
+            Some(node) if !selected.contains(&node) => board.select(&[node]),
+            None if !selected.is_empty() => board.select(&[]),
+            _ => {}
+        }
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let keymap = board.keymap().clone();
+        let (label, groups) = if board.selection().get_untracked().is_empty() {
+            ("Board", crate::menu::BOARD)
+        } else {
+            ("Selection", crate::menu::SELECTION)
+        };
+        let entries = crate::menu::entries(groups, &self.board_commands, board, &keymap);
+        let content = crate::menu::menu(&mut self.ui, label, entries, &self.asks);
+        if let Some(popup) = self.popup.take() {
+            self.ui.close_layer(&mut self.fonts, popup);
+        }
+        let options = LayerOptions::popover(Anchor::Point(at)).placement(Placement::Below);
+        self.popup = Some(self.ui.open_layer(content, options));
+    }
+
+    /// Opens the popover of a contextual toolbar control.
+    fn open_bar_popup(&mut self, control: Control) {
+        let Some(anchor) = self.bar.button(control) else {
+            return;
+        };
+        let Some(state) = self.bar.state.clone() else {
+            return;
+        };
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let keymap = board.keymap().clone();
+        let entries = |groups| crate::menu::entries(groups, &self.board_commands, board, &keymap);
+        let content = match control {
+            Control::Fill | Control::Stroke | Control::TextColor => {
+                let (title, command) = match control {
+                    Control::Fill => ("Fill", "style.set_fill"),
+                    Control::Stroke => ("Outline", "style.set_stroke"),
+                    _ => ("Text color", "style.set_text_color"),
+                };
+                let current = self.bar.stored_color(command);
+                contextbar::color_popover(
+                    &mut self.ui,
+                    title,
+                    command,
+                    current.as_deref(),
+                    &self.asks,
+                )
+            }
+            Control::Width => contextbar::value_popover(
+                &mut self.ui,
+                "Outline width",
+                "style.set_stroke_width",
+                "width",
+                &contextbar::WIDTHS,
+                state.width(),
+                &self.asks,
+            ),
+            Control::Radius => contextbar::value_popover(
+                &mut self.ui,
+                "Corner radius",
+                "style.set_radius",
+                "radius",
+                &contextbar::RADII,
+                state.radius(),
+                &self.asks,
+            ),
+            Control::Arrange => {
+                let groups = entries(crate::menu::ARRANGE);
+                crate::menu::menu(&mut self.ui, "Arrange", groups, &self.asks)
+            }
+            Control::More => {
+                let groups = entries(crate::menu::SELECTION);
+                crate::menu::menu(&mut self.ui, "More", groups, &self.asks)
+            }
+            Control::Ai => chrome::note(&mut self.ui, Placeholder::Ai),
+            Control::Duplicate | Control::Delete => return,
+        };
+        self.open_popup(content, anchor, Placement::Below);
     }
 
     /// Opens the command palette, or puts the keys back in its field.
@@ -919,6 +1080,20 @@ impl View for BoardWindow {
         {
             self.ui.note_keyboard();
             let _ = self.execute(command.as_str(), &Args::new());
+            return true;
+        }
+        // A right-click on the board: the context menu of what it is on
+        // (the node under it, selected first, or the board).
+        if let Input::PointerButton {
+            primary: false,
+            pressed: true,
+            position,
+            ..
+        } = input
+            && self.palette.is_none()
+            && self.ui.widget_at(*position) == Some(self.board)
+        {
+            self.context_menu(*position);
             return true;
         }
         // A click beside the palette closes it, as Esc does.

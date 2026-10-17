@@ -27,8 +27,10 @@
 //! - Does NOT open, save or name files (M3.6), run the AI (M6) or share
 //!   (M8). Their buttons are placeholders that say what is coming when
 //!   clicked.
-//! - No contextual toolbar, inspector, context menu or start window yet
-//!   (later steps of M3.4).
+//! - The contextual toolbar above the selection, built from the commands
+//!   available for it.
+//! - No inspector, context menu or start window yet (later steps of
+//!   M3.4).
 //!
 //! # Key types
 //! - [`BoardWindow`]: a board window's view.
@@ -36,6 +38,8 @@
 
 mod chrome;
 mod commands;
+mod contextbar;
+mod menu;
 mod palette;
 mod toolbar;
 mod window;
