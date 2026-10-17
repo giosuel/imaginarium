@@ -28,6 +28,10 @@ pub enum NativeError {
     /// The index names a record that isn't there.
     #[error("the index refers to a missing record {0}")]
     MissingRecord(String),
+
+    /// Saving into this file isn't possible yet (an encrypted one).
+    #[error("can't save into this file: {0}")]
+    CantSave(&'static str),
 }
 
 /// Result alias for this crate.
