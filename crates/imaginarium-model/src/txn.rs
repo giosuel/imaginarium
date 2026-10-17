@@ -255,20 +255,29 @@ impl<'d> Transaction<'d> {
     /// the user's again. The value is a setting's stored form (an enum's
     /// id, a color's hex), which the settings layer checks.
     pub fn set_document_setting(&mut self, key: &str, value: Value) -> Result<()> {
+        // As the settings registry checks keys: dotted `snake_case`, each
+        // segment starting with a letter.
         let dotted = key.split('.').count() >= 2
             && key.split('.').all(|part| {
-                !part.is_empty()
-                    && part
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                let mut chars = part.chars();
+                chars.next().is_some_and(|c| c.is_ascii_lowercase())
+                    && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             });
         if !dotted {
             return Err(ModelError::Invalid(format!("`{key}` isn't a setting key")));
         }
-        if matches!(value, Value::Map(_) | Value::Binary(_)) {
+        if !matches!(
+            value,
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Number(_) | Value::String(_)
+        ) {
             return Err(ModelError::Invalid(format!(
-                "`{key}`: a setting's value is a plain value or a list"
+                "`{key}`: a setting's value is a plain value (bool, int, number or string)"
             )));
+        }
+        // Removing from a document without settings changes nothing.
+        let has_settings = self.meta_map().get(meta::SETTINGS).is_some();
+        if value == Value::Null && !has_settings {
+            return Ok(());
         }
         let settings = self.meta_map().ensure_mergeable_map(meta::SETTINGS)?;
         set_or_delete(&settings, key, &value)

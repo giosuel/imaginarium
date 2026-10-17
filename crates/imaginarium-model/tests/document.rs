@@ -958,15 +958,20 @@ fn a_document_keeps_its_own_settings_and_peers_merge_them() {
     let settings = a.view().meta().settings().clone();
     assert_eq!(settings.get("board.snap"), Some(&Value::Bool(true)));
     assert_eq!(settings.get("board.background"), None);
-    // Undo takes a setting back too.
-    assert!(a.can_undo(UndoScope::User));
     assert_consistent(&a);
 }
 
 #[test]
 fn document_settings_take_setting_keys_and_plain_values() {
     let mut a = board();
-    for key in ["background", "Board.background", "board..x", ""] {
+    for key in [
+        "background",
+        "Board.background",
+        "board..x",
+        "",
+        "_a.1",
+        "board.9x",
+    ] {
         assert!(
             a.transact(&Actor::User, |t| t
                 .set_document_setting(key, Value::Bool(true)))
@@ -980,4 +985,38 @@ fn document_settings_take_setting_keys_and_plain_values() {
         })
         .is_err()
     );
+    let list = Value::List(std::sync::Arc::from(vec![Value::Bool(true)]));
+    assert!(
+        a.transact(&Actor::User, |t| t.set_document_setting("board.x", list))
+            .is_err()
+    );
+    // Removing from a document without settings adds nothing to it.
+    let before = a.to_value();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.x", Value::Null)
+    })
+    .unwrap();
+    assert_eq!(a.to_value(), before);
+}
+
+#[test]
+fn undo_takes_a_document_setting_back() {
+    let mut a = board();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::String("grid".into()))
+    })
+    .unwrap();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::String("plain".into()))
+    })
+    .unwrap();
+    let undone = a.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(undone.meta);
+    assert_eq!(
+        a.view().meta().settings().get("board.background"),
+        Some(&Value::String("grid".into()))
+    );
+    a.undo(UndoScope::User, &Actor::User).unwrap();
+    assert_eq!(a.view().meta().settings().get("board.background"), None);
+    assert_consistent(&a);
 }
