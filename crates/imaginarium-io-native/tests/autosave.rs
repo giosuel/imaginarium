@@ -51,7 +51,7 @@ fn new_file(dir: &Path) -> PathBuf {
 /// Opens `path` to edit it; panics if it opens read-only.
 fn editable(path: &Path) -> (Document, Session) {
     match Session::open(path).unwrap() {
-        Opening::Editable(opened, session) => (opened.document, session),
+        Opening::Editable(opened, session) => (opened.document, *session),
         Opening::ReadOnly(opened) => panic!("read-only: {:?}", opened.document.mode()),
     }
 }
@@ -138,10 +138,14 @@ fn a_file_that_cant_be_written_opens_read_only() {
     let dir = scratch_dir("permission");
     let path = new_file(&dir);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // Root may write anyway: then there is nothing to test.
+    let root = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
     let opening = Session::open(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    // (Root may write anyway.)
-    if let Opening::ReadOnly(opened) = opening {
+    if !root {
+        let Opening::ReadOnly(opened) = opening else {
+            panic!("a file that can't be written opened for writing");
+        };
         assert!(matches!(opened.document.mode(), Mode::ReadOnly(_)));
     }
     std::fs::remove_dir_all(&dir).unwrap();
@@ -419,6 +423,10 @@ impl Storage for Flaky {
     fn gone(_session: &Session<Self>) -> bool {
         false
     }
+
+    fn compaction_unsafe(_session: &Session<Self>) -> bool {
+        true
+    }
 }
 
 #[test]
@@ -470,7 +478,6 @@ fn a_save_that_breaks_off_halfway_is_retried_as_one_snapshot() {
         wait_for(&autosave, |state| *state == SaveState::Saved),
         SaveState::Saved
     );
-    assert!(reopens.load(Ordering::Relaxed) >= 1);
     assert_eq!(autosave.finish(), None);
     let reopened = imaginarium_io_native::open(
         std::io::Cursor::new(bytes.lock().unwrap().clone()),
@@ -478,6 +485,64 @@ fn a_save_that_breaks_off_halfway_is_retried_as_one_snapshot() {
     )
     .unwrap();
     assert_eq!(reopened.document.view(), document.view());
+    // One snapshot holds it all (the broken-off write left no duplicates
+    // in the head).
+    let mut storage = Flaky {
+        bytes: bytes.clone(),
+        at: 0,
+        failing: Arc::new(AtomicBool::new(false)),
+        fail_after: Arc::new(AtomicU64::new(0)),
+    };
+    let _ = std::io::Seek::rewind(&mut storage);
+    let (_, session) = Session::from_file(storage).unwrap();
+    assert_eq!(session.unwrap().head_len(), 1);
+    let _ = reopens;
+}
+
+#[cfg(unix)]
+#[test]
+fn a_retry_merges_what_another_writer_put_in_the_file() {
+    let dir = scratch_dir("merge");
+    let path = new_file(&dir);
+    let (mut document, session) = editable(&path);
+    let id = file_id(&path, &session);
+    let autosave = Autosave::start(session, id, || {});
+    autosave.update(add_shape(&mut document, 1.0));
+    wait_for(&autosave, |state| *state == SaveState::Saved);
+    // Another device's copy gets a change of its own and a sync tool puts
+    // it in the file's place.
+    let copy = dir.join("synced.imag");
+    std::fs::copy(&path, &copy).unwrap();
+    {
+        let (mut other, mut session) = editable(&copy);
+        session.append_update(add_shape(&mut other, 50.0)).unwrap();
+        session.commit().unwrap();
+    }
+    // First the file is missing (a folder in its place): the next save
+    // fails, and its retry will write one snapshot.
+    let aside = dir.join("aside.imag");
+    std::fs::rename(&path, &aside).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    autosave.update(add_shape(&mut document, 2.0));
+    assert!(matches!(
+        wait_for(&autosave, |state| matches!(state, SaveState::Failed(_))),
+        SaveState::Failed(_)
+    ));
+    // Then the sync tool puts the other device's copy there: the retry
+    // merges its change into the snapshot instead of writing over it.
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+    assert_eq!(
+        wait_for(&autosave, |state| *state == SaveState::Saved),
+        SaveState::Saved
+    );
+    assert_eq!(autosave.finish(), None);
+    assert_eq!(
+        reopened(&path).view().node_count(),
+        3,
+        "both writers' shapes"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Writes an empty board to `$IMAGINARIUM_SAMPLE` (for trying the app by

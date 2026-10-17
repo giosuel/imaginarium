@@ -27,7 +27,7 @@ mod autosave;
 mod error;
 mod session;
 
-pub use autosave::{Autosave, RETRY_AFTER, SNAPSHOT_AFTER, SaveState, Storage};
+pub use autosave::{Autosave, Compact, RETRY_AFTER, SNAPSHOT_AFTER, SaveState, Storage};
 pub use error::{NativeError, Result};
 pub use session::{FileId, Opening, Session};
 
