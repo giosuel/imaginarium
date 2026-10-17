@@ -134,18 +134,125 @@ impl Registry {
     /// it, flush it to disk, then rename it over the target. A crash never
     /// leaves a half-written settings file.
     pub fn save_file(&self, scope: Scope, path: &Path) -> Result<(), SettingsError> {
-        let io = |err: std::io::Error| SettingsError::Io(format!("{}: {err}", path.display()));
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(io)?;
+        write_atomically(path, &self.to_toml(scope))
+    }
+}
+
+/// Writes `text` to `path` atomically: a temporary file next to it, flushed
+/// to disk, then renamed over the target. A crash never leaves a
+/// half-written file.
+///
+/// # Errors
+/// If the folder can't be made or the file written.
+pub fn write_atomically(path: &Path, text: &str) -> Result<(), SettingsError> {
+    let io = |err: std::io::Error| SettingsError::Io(format!("{}: {err}", path.display()));
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(io)?;
+    }
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = PathBuf::from(temp);
+    let mut file = fs::File::create(&temp).map_err(io)?;
+    file.write_all(text.as_bytes()).map_err(io)?;
+    file.sync_all().map_err(io)?;
+    drop(file);
+    fs::rename(&temp, path).map_err(io)
+}
+
+/// What the writer thread is sent.
+enum Message {
+    Text(String),
+    Stop,
+}
+
+/// Writes a settings file on a thread of its own, so the UI never waits for
+/// the disk (MAINTAINERS.md invariant 3). Texts sent while a write is
+/// running are coalesced: only the newest is written. Dropping it writes
+/// what is pending, then stops.
+///
+/// ```
+/// # let dir = std::env::temp_dir().join(format!("imaginarium-doc-{}", std::process::id()));
+/// use imaginarium_settings::FileWriter;
+///
+/// let path = dir.join("settings.toml");
+/// let writer = FileWriter::new(path.clone());
+/// let mut sink = writer.sink();
+/// sink("[ui]\ntheme = \"dark\"\n".to_owned());
+/// drop(writer);
+/// assert!(std::fs::read_to_string(&path)?.contains("dark"));
+/// # std::fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub struct FileWriter {
+    sender: std::sync::mpsc::Sender<Message>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl FileWriter {
+    /// A writer of `path`.
+    pub fn new(path: PathBuf) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+        let error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let failed = error.clone();
+        let thread = std::thread::Builder::new()
+            .name("settings-writer".into())
+            .spawn(move || {
+                while let Ok(first) = receiver.recv() {
+                    // The newest text wins; a stop ends after writing it.
+                    let mut latest = None;
+                    let mut stop = false;
+                    for write in std::iter::once(first).chain(receiver.try_iter()) {
+                        match write {
+                            Message::Text(text) => latest = Some(text),
+                            Message::Stop => stop = true,
+                        }
+                    }
+                    if let Some(text) = latest {
+                        let result = write_atomically(&path, &text);
+                        if let Ok(mut slot) = failed.lock() {
+                            *slot = result.err().map(|err| err.to_string());
+                        }
+                    }
+                    if stop {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            sender,
+            thread,
+            error,
         }
-        let mut temp = path.as_os_str().to_owned();
-        temp.push(".tmp");
-        let temp = PathBuf::from(temp);
-        let mut file = fs::File::create(&temp).map_err(io)?;
-        file.write_all(self.to_toml(scope).as_bytes()).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        drop(file);
-        fs::rename(&temp, path).map_err(io)
+    }
+
+    /// Where to send texts to write: for [`Registry::persist_to`].
+    pub fn sink(&self) -> impl FnMut(String) + Send + 'static {
+        let sender = self.sender.clone();
+        move |text| {
+            let _ = sender.send(Message::Text(text));
+        }
+    }
+
+    /// Why the last write failed, if it did.
+    pub fn last_error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Message::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl std::fmt::Debug for FileWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileWriter").finish_non_exhaustive()
     }
 }
 
@@ -546,5 +653,62 @@ mod tests {
         fresh.load_file(Scope::App, &path).unwrap();
         assert_eq!(fresh.get(&THEME).unwrap(), Theme::Dark);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hook_gets_its_scope_after_each_change() {
+        let mut r = registry();
+        let saved: Arc<Mutex<Vec<String>>> = Arc::default();
+        let into = saved.clone();
+        r.persist_to(Scope::App, move |toml| into.lock().unwrap().push(toml));
+        r.set(&GRID, false).unwrap();
+        // Unchanged: nothing to save.
+        r.set(&GRID, false).unwrap();
+        // Another scope: not this file.
+        r.set(&USER_NAME, "Ada".to_owned()).unwrap();
+        r.reset(GRID.key()).unwrap();
+        let saved = saved.lock().unwrap();
+        assert_eq!(saved.len(), 2, "{saved:?}");
+        assert!(saved[0].contains("visible = false"), "{}", saved[0]);
+        assert!(!saved[1].contains("visible"), "{}", saved[1]);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "imaginarium-settings-{}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn the_writer_writes_the_newest_text_before_it_stops() {
+        let dir = scratch("writer");
+        let path = dir.join("settings.toml");
+        let writer = FileWriter::new(path.clone());
+        let mut sink = writer.sink();
+        for n in 0..50 {
+            sink(format!("n = {n}\n"));
+        }
+        drop(writer);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "n = 49\n");
+        assert!(!dir.join("settings.toml.tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_writer_says_why_a_write_failed() {
+        // A file where its folder should be.
+        let blocker = scratch("blocked");
+        fs::write(&blocker, "").unwrap();
+        let writer = FileWriter::new(blocker.join("settings.toml"));
+        let mut sink = writer.sink();
+        sink("a = 1\n".to_owned());
+        let failed = (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            writer.last_error()
+        });
+        assert!(failed.is_some());
+        drop(writer);
+        fs::remove_file(&blocker).unwrap();
     }
 }
