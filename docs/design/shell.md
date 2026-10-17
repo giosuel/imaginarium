@@ -84,22 +84,40 @@ move it), and the save state:
 **As built (M3.6 part 1, saving).** A board opened from a file
 (`App::open_board`; the app opens the file named on its command line)
 saves every change into that file on its own:
-- After a change the board window sends the document's updates since the
-  last time to the file's saving thread (`imaginarium_io_native::
-  Autosave`), which appends them as `UPDT` records and commits them with
-  a new index (spec §9.3); everything waiting goes into one commit. Every
-  200 records it sends a snapshot instead, so the file opens without
-  replaying them all. The UI thread only exports the updates.
-- A failed write is retried every 2 s, after opening the file again;
-  closing the board writes what is pending first.
-- The pill shows the state from the SaveStates mockup: **✓ Saved**,
+- **When:** once the board has been still for 300 ms, or at the latest
+  2 s after the first unsent change, never in the middle of a gesture (a
+  drag is one save), and always when the window closes. The board window
+  then exports the document's updates since the file's version (taken
+  when it opened, before migrations) and hands them to the file's saving
+  thread (`imaginarium_io_native::Autosave`). That is all the UI thread
+  does.
+- **The saving thread** appends them as `UPDT` records and commits them
+  with a new index (spec §9.3), everything waiting in one commit. It keeps
+  a copy of the document, from which it writes a snapshot once the head
+  has 200 records (the index then drops the old head, so it stays small),
+  and it compacts the file when more than half of it is superseded
+  (spec §9.4).
+- **Never two writers:** the file is locked. A second window or app opens
+  it read-only, and so does a file that can't be written, comes from a
+  newer format, or needs features or records this version doesn't know
+  (spec §10.2, §10.3). Such a file is never written.
+- **Failures:** a write that fails is retried every 2 s, after opening the
+  file again; it must still hold the same document, and the retry writes
+  one snapshot (a broken-off write may have left part of its records). A
+  file deleted or replaced while open, or changed by another program, is
+  a failed save, not a silent one. Closing a board finishes its saving in
+  the background; the app waits for it before it exits and says if the
+  last changes couldn't be written (the close dialog comes with part 4).
+- **The pill** shows the state from the SaveStates mockup: **✓ Saved**,
   **Saving…** (only after 500 ms), **Can't save · retrying** (the reason
-  for screen readers), **Read-only · made with a newer version** (such a
-  file is never written), and **Not saved · Save…** for a board without a
-  file.
+  for screen readers), **Read-only · why** (made with a newer version,
+  open in another window, the file can't be written), and **Not saved ·
+  Save…** for a board without a file. Only the board's own window
+  redraws when it changes.
 - A file whose last save was torn opens with what could be recovered and
   goes on from a fresh snapshot (spec §9.5).
-- Encrypted files can't be saved into yet (their keys aren't kept).
+- Encrypted and Hub files can't be saved into yet (their keys aren't
+  kept).
 
 ### 3.2 Top right
 

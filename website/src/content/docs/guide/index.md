@@ -35,6 +35,11 @@ configuration folder (`~/.config/imaginarium/` on Linux,
 `~/Library/Application Support/Imaginarium/` on macOS,
 `%APPDATA%\Imaginarium\` on Windows). You never need to edit it.
 
+**Every change is saved on its own**, as you work: there is no Save
+button for a board that has a file, and the top left says **Saved**. If
+the file can't be written (it is open in another window, or comes from a
+newer version), the board opens read-only and says why.
+
 Every board has a **window of its own**. `Ctrl+N` in a board opens
 another one, and `Ctrl+W` / `⌘W` closes it; when the last board closes,
 the start window comes back.
