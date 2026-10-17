@@ -486,10 +486,11 @@ impl BoardWindow {
         if !now && (gesturing || !due) {
             return;
         }
-        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
-            return;
-        };
-        let Some(autosave) = &file.autosave else {
+        // Nothing to send them to: no deadline stays behind, in the past.
+        let (Some(board), Some(autosave)) =
+            (self.ui.widget::<BoardCanvas>(self.board), &file.autosave)
+        else {
+            file.unsent = None;
             return;
         };
         let document = board.document();
@@ -500,18 +501,20 @@ impl BoardWindow {
                     autosave.update(update);
                     file.saved = version;
                 }
-                // Not sent: tried again with the next change (the baseline
-                // stays, so nothing is skipped).
-                Err(_) => return,
+                // Not sent: tried again in a moment (the baseline stays, so
+                // nothing is skipped); a deadline left in the past would
+                // wake the window without end.
+                Err(_) => {
+                    file.unsent = Some((at, at));
+                    return;
+                }
             }
         }
         file.unsent = None;
     }
 
     /// When the unsent changes are due, if there are any and they can go
-    /// then: not during a gesture (its end is input, which saves), and not
-    /// in the past (an export that failed tries again a moment later), so
-    /// the window's other timers aren't hidden behind it.
+    /// then: not during a gesture (its end is input, which saves).
     fn save_deadline(&self) -> Option<Instant> {
         let gesturing = self
             .ui
@@ -521,8 +524,7 @@ impl BoardWindow {
             return None;
         }
         let (first, last) = self.file.as_ref()?.unsent?;
-        let due = (last + SAVE_AFTER_STILL).min(first + SAVE_AT_LATEST);
-        Some(due.max(Instant::now() + std::time::Duration::from_millis(10)))
+        Some((last + SAVE_AFTER_STILL).min(first + SAVE_AT_LATEST))
     }
 
     /// Shows in the pill how the file is doing, when that changed. Saving…

@@ -1480,3 +1480,87 @@ fn a_background_change_survives_a_tool_bar_move() {
     window.frame();
     assert_eq!(window.board().background(), Background::Plain);
 }
+
+/// A board window saving into a fresh file under the workspace's `target/`.
+fn saving(name: &str) -> (Harness, std::path::PathBuf) {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/test-scratch")
+        .join(format!("shell-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("board.imag");
+    imaginarium_io_native::save_new_path(
+        &path,
+        &Document::new(DocumentKind::Board).unwrap(),
+        &imaginarium_io_native::SaveOptions {
+            protection: imaginarium_io_native::Protection::None,
+            created_with: "imaginarium tests".into(),
+        },
+    )
+    .unwrap();
+    let imaginarium_io_native::Opening::Editable(opened, session) =
+        imaginarium_io_native::Session::open(&path).unwrap()
+    else {
+        panic!("read-only");
+    };
+    let mut harness = Harness::with(opened.document);
+    let window = std::mem::replace(
+        &mut harness.window,
+        BoardWindow::new(
+            BoardCanvas::new(Document::new(DocumentKind::Board).unwrap()),
+            "",
+            Fonts::bundled_only(),
+            harness.settings.clone(),
+        ),
+    );
+    harness.window = window.saved_in(path.clone(), *session);
+    harness.frame();
+    (harness, path)
+}
+
+/// Lets the window's timers run until `until` (as the runner does).
+fn run_timers(harness: &mut Harness, until: std::time::Duration) {
+    let end = std::time::Instant::now() + until;
+    while std::time::Instant::now() < end {
+        let now = std::time::Instant::now();
+        if harness.window.wake_at().is_some_and(|at| at <= now) && harness.window.wake(now) {
+            harness.frame();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn nodes_in(path: &std::path::Path) -> usize {
+    imaginarium_io_native::open_path(path, imaginarium_io_native::Credentials::None)
+        .unwrap()
+        .document
+        .view()
+        .children(imaginarium_model::Parent::Root)
+        .count()
+}
+
+#[test]
+fn a_shape_drawn_reaches_the_file_once_the_board_is_still() {
+    let (mut window, path) = saving("drawn");
+    let rectangle = window.named("Rectangle");
+    let at = window.bounds(rectangle).center();
+    window.click(at);
+    window.drag(Point::new(500.0, 300.0), Point::new(700.0, 420.0), false);
+    assert_eq!(
+        window
+            .board()
+            .document()
+            .view()
+            .children(imaginarium_model::Parent::Root)
+            .count(),
+        1
+    );
+    run_timers(&mut window, std::time::Duration::from_millis(1500));
+    // The saving thread has had its time; the file holds the shape
+    // while the window is still open.
+    let started = std::time::Instant::now();
+    while nodes_in(&path) == 0 && started.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(nodes_in(&path), 1);
+}
