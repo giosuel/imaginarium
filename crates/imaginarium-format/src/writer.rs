@@ -251,6 +251,11 @@ impl<F: Write + Seek + Durable> Writer<F> {
         Ok(())
     }
 
+    /// The underlying storage, to look at (its metadata).
+    pub fn storage(&self) -> &F {
+        &self.file
+    }
+
     /// The underlying storage.
     pub fn into_inner(self) -> F {
         self.file

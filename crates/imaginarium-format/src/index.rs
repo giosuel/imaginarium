@@ -70,10 +70,12 @@ impl IndexState {
                 .iter()
                 .find(|h| h.stream == key.stream && h.extension_id == key.extension_id)
             {
-                let superseded: Vec<Vec<u8>> = std::iter::once(head.snapshot_id.clone())
-                    .chain(head.update_ids.iter().cloned())
-                    .filter(|id| !id.is_empty())
-                    .collect();
+                // A set: a long head would make this quadratic.
+                let superseded: std::collections::HashSet<Vec<u8>> =
+                    std::iter::once(head.snapshot_id.clone())
+                        .chain(head.update_ids.iter().cloned())
+                        .filter(|id| !id.is_empty())
+                        .collect();
                 self.entries.retain(|entry| {
                     let in_stream = (entry.rtype == RecordType::SNAP.0
                         || entry.rtype == RecordType::UPDT.0)
