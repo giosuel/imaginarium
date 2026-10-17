@@ -57,13 +57,15 @@ pub enum Opening {
 /// What keeps a second writer out of a file.
 enum Lock {
     /// An advisory lock on the file's own handle (Unix).
+    #[cfg_attr(windows, allow(dead_code))]
     Handle,
     /// Nothing locked: storage that isn't a file, or a file system that
     /// can't lock (NFS without lockd, some FUSE and SMB mounts).
     None,
-    /// A locked file next to it, removed with the lock (Windows).
+    /// A locked file next to it, removed with the lock (Windows). The
+    /// file is only held: its lock lasts as long as it is open.
     #[cfg_attr(not(windows), allow(dead_code))]
-    Beside(File, PathBuf),
+    Beside(#[allow(dead_code)] File, PathBuf),
 }
 
 impl Drop for Lock {
