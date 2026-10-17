@@ -21,6 +21,7 @@ use imaginarium_ui::{
     ACCESS_LOCAL_IDS, Cx, Input, Key, Theme, Token, Widget, access_rect, mix, theme,
 };
 
+mod clip;
 mod edit;
 mod ops;
 mod tools;
@@ -159,6 +160,10 @@ pub struct BoardCanvas {
     keymap: imaginarium_commands::Keymap,
     /// The tool in use.
     tool: Signal<Tool>,
+    /// What the clipboard should do at the next hand-over.
+    clipboard_work: clip::ClipboardWork,
+    /// The last copy pasted (or copied) here, and how often it was pasted.
+    pastes: Option<(String, u64)>,
     /// Where frame names were drawn (window space), front last.
     name_rects: Vec<(NodeId, Rect)>,
     /// The board's box in the last layout.
@@ -194,6 +199,8 @@ impl BoardCanvas {
             pending_edit: None,
             keymap: crate::keys::default_keymap(imaginarium_commands::Platform::current()),
             tool: signal(Tool::Select),
+            clipboard_work: clip::ClipboardWork::default(),
+            pastes: None,
             name_rects: Vec::new(),
             bounds: Rect::ZERO,
             dots: None,
@@ -749,6 +756,11 @@ impl BoardCanvas {
     #[cfg(test)]
     pub(crate) fn items_mut_for_tests(&mut self) -> &mut Items {
         self.items.as_mut().expect("synced")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clipboard_work_for_tests(&self) -> &clip::ClipboardWork {
+        &self.clipboard_work
     }
 
     #[cfg(test)]
@@ -1444,6 +1456,7 @@ impl BoardCanvas {
             && let Some(command) = self.keymap.command_for_press(press)
             && commands::execute(self, command.as_str(), &imaginarium_commands::Args::new()).is_ok()
         {
+            self.hand_over(cx.clipboard());
             self.sync(cx.fonts());
             cx.request_paint();
             return true;
@@ -1607,6 +1620,13 @@ impl Widget for BoardCanvas {
         self.bounds = cx.bounds();
         if let Some(handled) = self.edit_input(cx, input) {
             return handled;
+        }
+        // What the clipboard gave for a paste the board asked for.
+        if let Input::Paste(pasted) = input {
+            let _ = self.paste(pasted);
+            self.sync(cx.fonts());
+            cx.request_paint();
+            return true;
         }
         if self.pointer(cx, input) || self.key(cx, input) {
             return true;

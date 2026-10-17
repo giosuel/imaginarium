@@ -817,6 +817,37 @@ tool!(
     crate::board::Tool::Frame
 );
 
+board_command!(
+    /// `board.copy`.
+    COPY, "board.copy", "Copy",
+    "Copy the selected nodes to the clipboard (with their text for other apps).", "Edit",
+    ["kopieren"], "copy", has_selection,
+    |board, _| Ok(done(board.copy_to_clipboard()))
+);
+
+board_command!(
+    /// `board.cut`.
+    CUT, "board.cut", "Cut", "Copy the selected nodes to the clipboard and delete them.", "Edit",
+    ["ausschneiden"], "scissors", has_selection,
+    |board, _| {
+        if !board.copy_to_clipboard() {
+            return Ok(Outcome::Unchanged);
+        }
+        Ok(done(board.delete_selection().map_err(failed("board.cut"))?))
+    }
+);
+
+board_command!(
+    /// `board.paste`.
+    PASTE, "board.paste", "Paste",
+    "Paste what the clipboard holds: nodes copied on a board, or text as a text box.", "Edit",
+    ["einfügen"], "clipboard", always,
+    |board, _| {
+        board.request_paste();
+        Ok(Outcome::Started)
+    }
+);
+
 macro_rules! nudge {
     ($name:ident, $id:literal, $title:literal, $description:literal, $dx:expr, $dy:expr) => {
         board_command!(
@@ -897,7 +928,10 @@ pub fn board_commands() -> &'static [&'static FnCommand<BoardCanvas>] {
     &BOARD_COMMANDS
 }
 
-static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 43] = [
+static BOARD_COMMANDS: [&FnCommand<BoardCanvas>; 46] = [
+    &COPY,
+    &CUT,
+    &PASTE,
     &INSERT_SHAPE,
     &INSERT_FRAME,
     &INSERT_TEXT,

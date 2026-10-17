@@ -20,6 +20,7 @@ imaginarium-reactive.workspace = true
 imaginarium-render.workspace = true
 imaginarium-text.workspace = true
 imaginarium-ui.workspace = true
+serde_json.workspace = true
 taffy.workspace = true
 
 [dev-dependencies]

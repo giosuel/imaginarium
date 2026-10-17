@@ -24,6 +24,7 @@
 #![warn(missing_docs)]
 
 mod board;
+pub mod clipboard;
 pub mod commands;
 mod copy;
 pub mod demo;
@@ -42,6 +43,8 @@ pub use shapes::{Outline, shape_path};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_clipboard;
 #[cfg(test)]
 mod tests_commands;
 #[cfg(test)]

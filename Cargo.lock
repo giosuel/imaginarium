@@ -2131,6 +2131,7 @@ dependencies = [
  "imaginarium-text",
  "imaginarium-ui",
  "proptest",
+ "serde_json",
  "taffy",
 ]
 

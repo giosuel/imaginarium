@@ -244,6 +244,11 @@ impl Items {
         self.first_key(view, node, &HashSet::new())
     }
 
+    /// A visible node's box space to document space (groups too).
+    pub(crate) fn world_of(&self, node: NodeId) -> Option<Affine> {
+        self.places.get(&node).map(|place| place.world)
+    }
+
     /// Whether a node is visible (it, and every ancestor, isn't hidden).
     pub(crate) fn is_visible(&self, node: NodeId) -> bool {
         self.places.contains_key(&node)
