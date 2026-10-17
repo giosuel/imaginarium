@@ -1610,6 +1610,12 @@ pub struct Swatch {
     selected: bool,
     action: Option<Box<dyn FnMut()>>,
     pressed: bool,
+    /// One of a group: a radio button for screen readers (Settings'
+    /// accent).
+    radio: bool,
+    /// Its color in a dark theme, if not the same (chosen at paint, so a
+    /// theme switch shows it).
+    dark: Option<Color>,
 }
 
 impl Swatch {
@@ -1628,6 +1634,8 @@ impl Swatch {
             selected: false,
             action: Some(Box::new(action)),
             pressed: false,
+            radio: false,
+            dark: None,
         }
     }
 
@@ -1641,6 +1649,8 @@ impl Swatch {
             selected: false,
             action: None,
             pressed: false,
+            radio: false,
+            dark: None,
         }
     }
 
@@ -1660,6 +1670,19 @@ impl Swatch {
     /// `size` px across (28 by default).
     pub fn size(mut self, size: f64) -> Self {
         self.size = size;
+        self
+    }
+
+    /// One of a group of choices: screen readers hear a radio button,
+    /// checked when [`Swatch::selected`].
+    pub fn radio(mut self) -> Self {
+        self.radio = true;
+        self
+    }
+
+    /// Shown as `color` in a dark theme (a lighter version, say).
+    pub fn dark_color(mut self, color: Color) -> Self {
+        self.dark = Some(color);
         self
     }
 
@@ -1695,10 +1718,14 @@ impl Widget for Swatch {
             crate::theme::ThemeKind::Light => Color::BLACK.with_alpha(0.14),
         };
         let center = bounds.center();
+        let color = match (theme.kind(), self.dark) {
+            (crate::theme::ThemeKind::Dark, Some(dark)) => Some(dark),
+            _ => self.color,
+        };
         match self.shape {
             SwatchShape::Square => {
                 let shape = RoundedRect::from_rect(bounds, 8.0);
-                scene.fill(&shape, self.color.unwrap_or(theme.color(Token::PanelBg)));
+                scene.fill(&shape, color.unwrap_or(theme.color(Token::PanelBg)));
                 scene.stroke(&RoundedRect::from_rect(bounds.inset(-0.5), 7.5), 1.0, edge);
                 if self.selected {
                     scene.stroke(
@@ -1710,23 +1737,32 @@ impl Widget for Swatch {
             }
             SwatchShape::Dot => {
                 let dot = imaginarium_render::kurbo::Circle::new(center, self.size / 2.0);
-                scene.fill(&dot, self.color.unwrap_or(theme.color(Token::PanelBg)));
+                scene.fill(&dot, color.unwrap_or(theme.color(Token::PanelBg)));
                 scene.stroke(
                     &imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 - 0.5),
                     1.0,
                     edge,
                 );
                 if self.selected {
+                    // Its own color, lighter on a dark panel so the ring
+                    // stands out (3:1).
+                    let ring = color.unwrap_or(theme.color(Token::AccentInk));
+                    let ring = match theme.kind() {
+                        crate::theme::ThemeKind::Dark => {
+                            crate::theme::mix(ring, Color::WHITE, 0.45)
+                        }
+                        crate::theme::ThemeKind::Light => ring,
+                    };
                     scene.stroke(
                         &imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 + 3.0),
                         2.0,
-                        self.color.unwrap_or(theme.color(Token::AccentInk)),
+                        ring,
                     );
                 }
             }
             SwatchShape::Ring => {
                 let ring = imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 - 1.5);
-                scene.stroke(&ring, 3.0, self.color.unwrap_or(edge));
+                scene.stroke(&ring, 3.0, color.unwrap_or(edge));
             }
         }
         if self.color.is_none() {
@@ -1804,9 +1840,20 @@ impl Widget for Swatch {
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         // A shown color says nothing of its own: its button names it.
         self.action.as_ref()?;
-        let mut node = Node::new(Role::Button);
+        let mut node = Node::new(if self.radio {
+            Role::RadioButton
+        } else {
+            Role::Button
+        });
         node.set_label(self.label.clone());
-        if self.selected {
+        if self.radio {
+            // One of a group: checked or not.
+            node.set_toggled(if self.selected {
+                accesskit::Toggled::True
+            } else {
+                accesskit::Toggled::False
+            });
+        } else if self.selected {
             node.set_selected(true);
         }
         node.set_bounds(access_rect(cx.bounds()));

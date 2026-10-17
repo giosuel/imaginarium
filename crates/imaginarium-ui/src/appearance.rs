@@ -113,7 +113,9 @@ pub fn set_system_reduces_motion(reduce: Option<bool>) {
 }
 
 fn system_changed() {
-    SYSTEM_CHANGES.fetch_add(1, Ordering::Relaxed);
+    // Released after the value, so a refresh that sees the new count sees
+    // the new value too.
+    SYSTEM_CHANGES.fetch_add(1, Ordering::Release);
     (crate::window::frame_waker())();
 }
 
@@ -132,7 +134,7 @@ pub fn appearance() -> Option<Appearance> {
 /// Applies what the system said since the last time (the window loop
 /// calls this before frames; cheap when nothing changed).
 pub(crate) fn refresh() {
-    let changes = SYSTEM_CHANGES.load(Ordering::Relaxed);
+    let changes = SYSTEM_CHANGES.load(Ordering::Acquire);
     if SEEN.with(|seen| seen.replace(changes)) != changes {
         apply();
     }
@@ -175,9 +177,10 @@ fn apply() {
     }
 }
 
-/// Starts the thread that asks the desktop portal (Linux), once: the
-/// window loop does, so tests never talk to the session bus.
-pub(crate) fn listen_to_the_system() {
+/// Starts the thread that asks the desktop portal (Linux), once. The
+/// window loop does; the app may sooner (its first frame then has the
+/// system's theme). Tests don't, so they never talk to the session bus.
+pub fn listen_to_the_system() {
     #[cfg(target_os = "linux")]
     {
         static STARTED: std::sync::Once = std::sync::Once::new();
@@ -254,7 +257,7 @@ mod portal {
     }
 
     /// `color-scheme`: 1 prefers dark, 2 prefers light, 0 no preference.
-    fn color_scheme(value: &OwnedValue) -> Option<bool> {
+    pub(super) fn color_scheme(value: &OwnedValue) -> Option<bool> {
         match u32::try_from(value.try_clone().ok()?).ok()? {
             1 => Some(true),
             2 => Some(false),
@@ -291,6 +294,49 @@ mod tests {
             ..system
         };
         assert!(!resolve_motion(&full, Some(true)));
+    }
+
+    #[test]
+    fn a_change_of_the_system_applies_at_the_next_refresh() {
+        set_appearance(Appearance {
+            theme: ThemeChoice::System,
+            accent: DEFAULT_ACCENT,
+            motion: MotionChoice::System,
+        });
+        set_system_prefers_dark(Some(false));
+        refresh();
+        assert_eq!(theme().kind(), ThemeKind::Light);
+        set_system_prefers_dark(Some(true));
+        refresh();
+        assert_eq!(theme().kind(), ThemeKind::Dark);
+        // A choice made after (a command-line flag) holds at the next
+        // refresh.
+        set_appearance(Appearance {
+            theme: ThemeChoice::Light,
+            ..appearance().unwrap_or(Appearance {
+                theme: ThemeChoice::System,
+                accent: DEFAULT_ACCENT,
+                motion: MotionChoice::System,
+            })
+        });
+        refresh();
+        assert_eq!(theme().kind(), ThemeKind::Light);
+        set_system_prefers_dark(None);
+        set_appearance(Appearance {
+            theme: ThemeChoice::Dark,
+            accent: DEFAULT_ACCENT,
+            motion: MotionChoice::Full,
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_portal_says_dark_light_or_nothing() {
+        use zbus::zvariant::OwnedValue;
+        assert_eq!(portal::color_scheme(&OwnedValue::from(1u32)), Some(true));
+        assert_eq!(portal::color_scheme(&OwnedValue::from(2u32)), Some(false));
+        assert_eq!(portal::color_scheme(&OwnedValue::from(0u32)), None);
+        assert_eq!(portal::color_scheme(&OwnedValue::from(true)), None);
     }
 
     #[test]

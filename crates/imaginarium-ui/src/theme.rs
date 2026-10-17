@@ -464,8 +464,11 @@ mod tests {
         (Token::AccentInk, Token::BoardBg),
     ];
 
-    /// The accents in Settings › Appearance (indigo, teal, orange, violet).
-    const ACCENTS: [u32; 4] = [0x3a4bd6, 0x0f766e, 0xc2410c, 0x7c3aed];
+    /// The accents in Settings › Appearance (indigo, teal, orange, violet,
+    /// pink, green, graphite).
+    const ACCENTS: [u32; 7] = [
+        0x3a4bd6, 0x0f766e, 0xc2410c, 0x7c3aed, 0xbe185d, 0x15803d, 0x52525b,
+    ];
 
     #[test]
     fn text_has_enough_contrast_in_every_theme() {
