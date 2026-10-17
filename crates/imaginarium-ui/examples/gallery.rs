@@ -21,7 +21,7 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
-    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Switch, TextInput, Theme,
     ThemeKind, Token, Ui, UiError, View, VirtualList, WidgetId, WindowOptions, animation,
     set_theme, theme,
 };
@@ -467,6 +467,38 @@ fn main() -> Result<(), UiError> {
         &[search, ai, share],
     );
 
+    // Palette pieces: a selected row with highlighted letters, a switch.
+    let snap = imaginarium_reactive::signal(true);
+    let switch = Switch::new(
+        "Snap to whole pixels",
+        move || snap.get(),
+        move || snap.update(|on| *on = !*on),
+    )
+    .add_to(&mut ui);
+    let title = ui.add(
+        Label::new("Group", TextStyle::new(14.0).weight(500.0))
+            .single_line()
+            .highlight(std::iter::once(1..4).collect(), 600.0, Token::AccentInk),
+    );
+    let hint = ui.add(
+        Label::new("Puts the selected shapes in a group", TextStyle::new(12.0))
+            .color(Token::TextMuted)
+            .single_line(),
+    );
+    let texts = ui.add_with_children(Flex::column().gap(2.0).grow(1.0), &[title, hint]);
+    let row = ButtonBox::new("Group", ButtonColors::quiet(), || {})
+        .size(360.0, 52.0)
+        .padding(12.0, 12.0)
+        .start()
+        .radius(10.0)
+        .selected(|| true)
+        .add_to(&mut ui, &[texts]);
+    let palette_bits = section(
+        &mut ui,
+        "Palette rows · selected, highlighted letters; a switch",
+        &[row, switch],
+    );
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -619,6 +651,7 @@ fn main() -> Result<(), UiError> {
             buttons,
             icon_buttons,
             boxes,
+            palette_bits,
             inputs,
             text,
             layers,
