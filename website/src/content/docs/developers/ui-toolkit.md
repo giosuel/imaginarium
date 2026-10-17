@@ -75,8 +75,9 @@ The event loop sleeps until something happens. A frame is drawn when:
   signal changes.
 
 `FrameInfo::causes` tells which. An idle window draws nothing and uses no
-CPU (gate criterion 6). So don't return `true` from `View::presented`
-unless something is animating, and let effects ask for frames.
+CPU (gate criterion 6). So don't return `true` from `View::presented`;
+widgets that animate ask for their frames through `wake_at` (see
+Animation), and effects ask for frames themselves.
 
 A frame skipped because the window is hidden isn't retried in a loop:
 the next one comes when the window shows again.
@@ -150,7 +151,123 @@ never reaches the widget that takes its slot. `set_children` detaches the
 children it leaves out, and `remove` removes a subtree.
 
 Built in: `Flex` (rows and columns with background, border, radius and
-shadow), `Label` and `label`, `Button`, and `TextInput`.
+shadow), `Label` and `label`, `Button` (styles `ButtonColors::primary`,
+`secondary`, `quiet` and `danger`), `TextInput`, and `Icon` (a line
+icon from SVG path data on Lucide's 24-unit grid).
+
+Labels wrap like text in CSS: in a box that gets too narrow, a label
+breaks lines down to its longest word. `Label::single_line()` keeps one on
+a single line (a status line, which its parent clips).
+
+Focus rings follow the keyboard, like CSS's `:focus-visible`: a click
+focuses a button without a ring, and the next navigating key (not
+Ctrl, Shift or Alt on its own, nor a Ctrl or Alt shortcut) shows it, as
+does a screen reader moving the focus. Widgets ask
+`cx.is_focus_visible()` when they paint; a view that handles a shortcut
+itself calls `ui.note_keyboard()`.
+
+## Layers: popovers, dialogs, tooltips
+
+Anything that floats above the window is a layer. Build its content like
+any widget, without a parent, and open it next to an anchor:
+
+```rust
+use imaginarium_ui::{Anchor, LayerOptions, Placement};
+
+let menu = ui.add_with_children(Flex::column().background(Token::PanelBg), &items);
+let layer = ui.open_layer(menu, LayerOptions::popover(Anchor::Widget(button)));
+// A dialog in the window's center, or a tooltip that takes no input:
+ui.open_layer(dialog, LayerOptions::modal());
+ui.open_layer(tip, LayerOptions::tooltip(Anchor::Widget(tool)).placement(Placement::Right));
+```
+
+The tree does the rest:
+- it places the layer and flips it to the other side when there's no room;
+- it moves the focus into it, and back when it closes;
+- `Esc` and a click outside close a popover, and that click doesn't also
+  reach what's below;
+- a dialog takes all input, and Tab stays inside it.
+
+`ui.close_layer(fonts, layer)` closes a layer, or a widget in it calls
+`cx.close_layer()`. `LayerOptions::on_close` tells the opener, and
+`LayerOptions::focus(widget)` picks where the focus starts (a dialog's
+safe button, not its destructive one).
+
+## Icons
+
+`Icon::named("trash", 18.0, Token::Text)` draws a vendored Lucide icon:
+line art on a 24-unit grid, stroked at the mockups' weight in the theme's
+color, sharp at any size. The icons the app uses are listed in
+`crates/imaginarium-ui/src/icons/icons.txt`. To add one, add its Lucide
+name there and run `cargo xtask icons`, which regenerates `lucide.rs` from
+the pinned release. A test fails while the list and the file disagree.
+`.label("Delete")` names an icon for screen readers; without one it is
+decoration. A name that comes from outside the code (an add-on, a setting)
+goes through `Icon::try_named`, which returns `None` for an unknown name;
+`Icon::named` panics on one in debug builds, to catch typos.
+
+## Scrolling and long lists
+
+`Scroll::new()` is a scroll container for one child (set its height, or
+let it grow). It handles the wheel, the touchpad, Page Up/Down and its
+scroll bar, and keeps the focused widget in view. For long lists, let the
+tree build only the rows in view:
+
+```rust
+use imaginarium_ui::{Scroll, VirtualList};
+
+let results = ui.add_virtual_list(
+    VirtualList::new(32.0, move || matches.get().len(), move |ui, row| {
+        ui.add(Label::new(matches.with_untracked(|m| m[row].title.clone()), style))
+    })
+    .label("Results"),
+    Scroll::new().grow(1.0),
+);
+ui.scroll_to_row(results, selected); // keep the selection in view
+```
+
+Rows have one height. The count closure is the list's data dependency:
+when a signal it reads changes, the list rebuilds its rows, so read the
+data there (not only its length in a separate signal).
+
+## Animation
+
+Hover colors, layers and keyboard scrolls already move; your own widget
+animates with a `Transition`:
+
+```rust
+use imaginarium_ui::animation::{Easing, Transition, durations};
+
+// In the widget: `glow: Transition`, starting at `Transition::new(0.0)`.
+fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+    let target = if hovered { 1.0 } else { 0.0 };
+    self.glow.to(target, durations::HOVER, Easing::EaseOut);
+    cx.request_paint();
+}
+fn wake_at(&self) -> Option<Instant> {
+    self.glow.wake_at()
+}
+fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+    self.glow.advance();
+    cx.request_paint();
+}
+// In `paint`, read `self.glow.value()`.
+```
+
+The window wakes the widget every frame while it moves and once more
+when it arrives, then draws nothing. With reduced motion
+(`animation::set_reduce_motion`) every transition arrives at once. In
+tests, fix the clock with `animation::set_clock_for_tests` and step
+through.
+
+## Component gallery
+
+`cargo run --release -p imaginarium-ui --example gallery` shows every
+component in its states, in the current theme, with a switch between dark
+and light (`--light` starts light; `--open popover`, `dialog` or `tooltip`
+opens a layer at once, for screenshots; `--reduce-motion` turns motion
+off). Every new component gets a section
+there before the shell uses it, and its screenshots go into the PR.
 
 ## Themes
 
@@ -234,9 +351,11 @@ Screen readers (Orca, NVDA, VoiceOver) get an accessibility tree through
 - A widget describes itself in `Widget::accessibility` by returning a
   `Node` with a role, label, bounds and actions. A widget that returns
   `None` is transparent: its children belong to its parent's node.
-- Node ids come from `WidgetId::access_base()`. A widget can add nodes of
-  its own below that id (text runs, canvas items, list options) and list
-  them with `Cx::add_access_child`.
+- Node ids come from `WidgetId::access_base()`, which carries the
+  widget's generation, so a late request about a removed widget is
+  refused. A widget can add up to `ACCESS_LOCAL_IDS` nodes of its own
+  below that id (text runs, canvas items, list options) and list them
+  with `Cx::add_access_child`.
 - After every frame, while a screen reader listens, the window sends the
   whole tree with its focus. A focus on a node that isn't in the tree
   falls back to the window, as AccessKit requires.
