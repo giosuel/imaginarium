@@ -22,6 +22,7 @@
 //! cargo run -p imaginarium-app -- --new                 # a new board, no start window
 //! cargo run -p imaginarium-app -- --demo                # the "Launch plan" board
 //! cargo run -p imaginarium-app -- --light --frames 60   # light theme, close after 60 frames
+//! cargo run -p imaginarium-app -- Board.imag            # open a board, saving every change
 //! cargo run -p imaginarium-app -- --version
 //! cargo run -p imaginarium-app -- --settings my.toml    # another settings file
 //! ```
@@ -125,7 +126,30 @@ fn main() -> anyhow::Result<()> {
     );
     app.report_saving(writer.as_ref().map(FileWriter::status), notice);
     let frames: Option<u64> = value("--frames").and_then(|frames| frames.parse().ok());
-    let (options, view): (WindowOptions, Box<dyn View>) = if flag("--demo") {
+    // A file to open: the first argument that isn't an option or an
+    // option's value.
+    let file = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(at, arg)| {
+            !arg.starts_with("--")
+                && !matches!(
+                    args.get(at - 1).map(String::as_str),
+                    Some("--frames" | "--settings")
+                )
+        })
+        .map(|(_, arg)| PathBuf::from(arg));
+    let opened = file.map(|path| app.open_board(&path));
+    if let Some(Err(err)) = &opened {
+        eprintln!("imaginarium: {err}");
+    }
+    let (options, view): (WindowOptions, Box<dyn View>) = if let Some(Ok(mut window)) = opened {
+        if let Some(frames) = frames {
+            window = window.close_after(frames);
+        }
+        (window.options(), Box::new(window))
+    } else if flag("--demo") {
         let mut window = app.board_window(demo::launch_plan()?, "Launch plan");
         if let Some(frames) = frames {
             window = window.close_after(frames);
