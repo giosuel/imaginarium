@@ -20,11 +20,15 @@ pub const DEFAULT_SHORTCUTS: &[(&str, &str)] = &[
     ("Mod+[", "board.send_to_back"),
     ("Mod+Alt+]", "board.bring_forward"),
     ("Mod+Alt+[", "board.send_backward"),
+    // Brackets need AltGr on some layouts (German): the arrows work on all.
+    ("Mod+Shift+Up", "board.bring_to_front"),
+    ("Mod+Shift+Down", "board.send_to_back"),
+    ("Mod+Up", "board.bring_forward"),
+    ("Mod+Down", "board.send_backward"),
     ("Mod+G", "board.group"),
     ("Mod+Shift+G", "board.ungroup"),
     ("Mod+Shift+L", "board.lock"),
     ("Mod+=", "view.zoom_in"),
-    ("Mod++", "view.zoom_in"),
     ("Mod+-", "view.zoom_out"),
     ("Mod+0", "view.zoom_100"),
     ("Mod+1", "view.zoom_to_fit"),
@@ -80,12 +84,18 @@ pub fn key_press(key: &UiKey, modifiers: UiModifiers) -> Option<KeyPress> {
             Key::F(number)
         }
     };
+    // On Windows, AltGr arrives as Ctrl+Alt: a character typed with it is
+    // just that character (as the toolkit's own key handling treats it).
+    let altgr = cfg!(target_os = "windows")
+        && modifiers.ctrl
+        && modifiers.alt
+        && matches!(key, Key::Char(_));
     Some(KeyPress {
         key,
-        ctrl: modifiers.ctrl,
+        ctrl: modifiers.ctrl && !altgr,
         meta: modifiers.meta,
         shift: modifiers.shift,
-        alt: modifiers.alt,
+        alt: modifiers.alt && !altgr,
     })
 }
 

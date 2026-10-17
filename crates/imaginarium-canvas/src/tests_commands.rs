@@ -198,3 +198,148 @@ fn zoom_commands_change_the_view() {
     let zoom = board.board().zoom();
     assert!(zoom <= 1.0 && zoom > 0.5, "{zoom}");
 }
+
+/// A board with shapes A, B, C, D side by side, back to front.
+fn four() -> (Harness, Vec<NodeId>) {
+    let mut document =
+        imaginarium_model::Document::new(imaginarium_model::DocumentKind::Board).unwrap();
+    let (nodes, _) = document
+        .transact(&imaginarium_model::Actor::User, |txn| {
+            (0..4)
+                .map(|index| {
+                    let id = txn.create_node(Parent::Root, None, &NodeKind::Shape)?;
+                    txn.set_geometry(
+                        id,
+                        imaginarium_model::Geometry::new(
+                            100.0 + f64::from(index) * 150.0,
+                            100.0,
+                            100.0,
+                            100.0,
+                        ),
+                    )?;
+                    txn.set_style_override(
+                        id,
+                        "fill",
+                        imaginarium_model::Value::String("#E0E7FF".into()),
+                    )?;
+                    Ok(id)
+                })
+                .collect::<imaginarium_model::Result<Vec<_>>>()
+        })
+        .unwrap();
+    (Harness::new(document), nodes)
+}
+
+fn root_order(board: &Harness) -> Vec<NodeId> {
+    board
+        .board()
+        .document()
+        .view()
+        .children(Parent::Root)
+        .collect()
+}
+
+#[test]
+fn reordering_keeps_the_selected_nodes_in_their_order() {
+    let (mut board, n) = four();
+    let (a, b, c, d) = (n[0], n[1], n[2], n[3]);
+    // A and C to the front: C stays above A.
+    board.click((150.0, 150.0));
+    board.shift_click((450.0, 150.0));
+    ctrl(&mut board, "]");
+    assert_eq!(root_order(&board), vec![b, d, a, c]);
+    ctrl(&mut board, "[");
+    assert_eq!(root_order(&board), vec![a, c, b, d]);
+    // B and C one step forward: B doesn't pass C.
+    let (mut board, n) = four();
+    board.click((300.0, 150.0));
+    board.shift_click((450.0, 150.0));
+    chord(&mut board, Key::Character("]".into()), false, true);
+    assert_eq!(root_order(&board), vec![n[0], n[3], n[1], n[2]]);
+}
+
+#[test]
+fn ungrouping_two_groups_keeps_the_order() {
+    let (mut board, n) = four();
+    let (a, b, c, d) = (n[0], n[1], n[2], n[3]);
+    board.click((150.0, 150.0));
+    board.shift_click((300.0, 150.0));
+    ctrl(&mut board, "g");
+    let [first] = board.selection()[..] else {
+        panic!()
+    };
+    board.click((450.0, 150.0));
+    board.shift_click((600.0, 150.0));
+    ctrl(&mut board, "g");
+    let [second] = board.selection()[..] else {
+        panic!()
+    };
+    // Something between them.
+    let id = board.board;
+    let x = board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .transact(&imaginarium_model::Actor::User, |txn| {
+            let x = txn.create_node(Parent::Root, Some(1), &NodeKind::Shape)?;
+            txn.set_geometry(
+                x,
+                imaginarium_model::Geometry::new(100.0, 400.0, 50.0, 50.0),
+            )?;
+            Ok(x)
+        })
+        .unwrap();
+    board.frame();
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .select(&[first, second]);
+    board.frame();
+    chord(&mut board, Key::Character("G".into()), true, false);
+    assert_eq!(root_order(&board), vec![a, b, x, c, d]);
+}
+
+#[test]
+fn unlock_without_a_selection_unlocks_every_locked_node() {
+    let (mut board, n) = four();
+    board.click((150.0, 150.0));
+    chord(&mut board, Key::Character("L".into()), true, false);
+    board.click((20.0, 800.0));
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .execute("board.unlock", &imaginarium_commands::Args::new())
+        .unwrap();
+    board.frame();
+    assert!(!board.board().document().view().node(n[0]).unwrap().locked());
+    assert_eq!(board.selection(), vec![n[0]]);
+}
+
+#[test]
+fn copies_keep_marks_on_line_breaks_and_empty_paragraphs() {
+    use crate::copy::NodeCopy;
+    use imaginarium_model::{Actor, Document, DocumentKind, Value};
+    let mut document = Document::new(DocumentKind::Board).unwrap();
+    let ((bold, empty), _) = document
+        .transact(&Actor::User, |txn| {
+            let bold = txn.create_node(Parent::Root, None, &NodeKind::Text)?;
+            txn.insert_text(bold, 0, "ab\n\ncd")?;
+            txn.mark_text(bold, 0..7, "b", Value::Bool(true))?;
+            let empty = txn.create_node(Parent::Root, None, &NodeKind::Text)?;
+            txn.insert_text(empty, 0, "\n")?;
+            Ok((bold, empty))
+        })
+        .unwrap();
+    for node in [bold, empty] {
+        let original = NodeCopy::read(document.view(), node).unwrap();
+        let (copy, _) = document
+            .transact(&Actor::User, |txn| {
+                original.write(txn, Parent::Root, None, (0.0, 0.0))
+            })
+            .unwrap();
+        assert_eq!(NodeCopy::read(document.view(), copy).unwrap(), original);
+    }
+}

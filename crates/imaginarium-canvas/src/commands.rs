@@ -391,8 +391,10 @@ fn has_group(board: &BoardCanvas) -> Availability {
     let view = board.document().view();
     let any = board.selection().with_untracked(|selection| {
         selection.iter().any(|node| {
-            view.node(*node)
-                .is_some_and(|node| matches!(node.kind(), imaginarium_model::NodeKind::Group))
+            !crate::hit::locked(view, *node)
+                && view
+                    .node(*node)
+                    .is_some_and(|node| matches!(node.kind(), imaginarium_model::NodeKind::Group))
         })
     });
     if any {
@@ -407,12 +409,16 @@ fn has_text_node(board: &BoardCanvas) -> Availability {
     let one = board
         .selection()
         .with_untracked(|selection| match selection[..] {
-            [node] => view.node(node).is_some_and(|node| {
-                matches!(
-                    node.kind(),
-                    imaginarium_model::NodeKind::Text | imaginarium_model::NodeKind::Shape
-                )
-            }),
+            [node] => {
+                !crate::hit::locked(view, node)
+                    && board.is_on_board(node)
+                    && view.node(node).is_some_and(|node| {
+                        matches!(
+                            node.kind(),
+                            imaginarium_model::NodeKind::Text | imaginarium_model::NodeKind::Shape
+                        )
+                    })
+            }
             _ => false,
         });
     if one {
@@ -533,8 +539,9 @@ board_command!(
 
 board_command!(
     /// `board.unlock`.
-    UNLOCK, "board.unlock", "Unlock", "Unlock the selected nodes.", "Arrange",
-    ["unpin", "entsperren"], "lock", has_selection,
+    UNLOCK, "board.unlock", "Unlock",
+    "Unlock the selected nodes; with no locked node selected, every locked node on the board.",
+    "Arrange", ["unpin", "entsperren"], "lock", always,
     |board, _| Ok(done(board.set_locked(false).map_err(failed("board.unlock"))?))
 );
 
@@ -578,7 +585,7 @@ board_command!(
 board_command!(
     /// `view.zoom_to_selection`.
     ZOOM_TO_SELECTION, "view.zoom_to_selection", "Zoom to selection",
-    "Show the selected nodes as large as they fit.", "View", ["focus", "fit selection"], "scan",
+    "Show the selected nodes as large as they fit, up to 100 %.", "View", ["focus", "fit selection"], "scan",
     has_selection,
     |board, _| Ok(done(board.zoom_to_selection()))
 );

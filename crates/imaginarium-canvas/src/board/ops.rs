@@ -38,18 +38,34 @@ impl BoardCanvas {
         let view = self.document.view();
         let selection = self.selection.get_untracked();
         let chosen: HashSet<NodeId> = selection.iter().copied().collect();
-        let mut units: Vec<NodeId> = selection
+        // Inside another selected node: a walk up the parents, against a
+        // set (a select-all of thousands stays linear).
+        let inside = |node: NodeId| {
+            let mut next = view.node(node).map(|node| node.parent());
+            while let Some(Parent::Node(parent)) = next {
+                if chosen.contains(&parent) {
+                    return true;
+                }
+                next = view.node(parent).map(|node| node.parent());
+            }
+            false
+        };
+        let mut units: Vec<(u64, NodeId)> = selection
             .into_iter()
-            .filter(|node| view.node(*node).is_some() && !hit::locked(view, *node))
             .filter(|node| {
-                !chosen
-                    .iter()
-                    .any(|other| hit::is_inside(view, *node, *other))
+                view.node(*node).is_some() && !hit::locked(view, *node) && !inside(*node)
+            })
+            .map(|node| {
+                let key = self
+                    .items
+                    .as_ref()
+                    .and_then(|items| items.order_key(view, node));
+                (key.unwrap_or(0), node)
             })
             .collect();
-        let order: Vec<NodeId> = view.walk();
-        units.sort_by_key(|node| order.iter().position(|id| id == node));
-        units
+        // Back to front, by the items' keys.
+        units.sort_unstable();
+        units.into_iter().map(|(_, node)| node).collect()
     }
 
     /// Deletes the selected nodes. `false` if there were none.
@@ -115,48 +131,69 @@ impl BoardCanvas {
     }
 
     /// Moves the selected nodes in their parents' stacking order: to the
-    /// front, the back, or one step (`step`: +1 forward, -1 backward).
+    /// front, the back, or one step, keeping their order among themselves
+    /// (a selected node never passes another).
     pub(crate) fn reorder_selection(&mut self, to: Order) -> Result<bool> {
-        let units = self.selected_units();
-        let places: Vec<(NodeId, Parent, usize, usize)> = units
+        let units: HashSet<NodeId> = self.selected_units().into_iter().collect();
+        let view = self.document.view();
+        let parents: HashSet<Parent> = units
             .iter()
-            .filter_map(|node| {
-                let (parent, index) = place_of(self, *node)?;
-                let count = self.document.view().children(parent).count();
-                Some((*node, parent, index, count))
-            })
+            .filter_map(|node| Some(view.node(*node)?.parent()))
             .collect();
-        let moves: Vec<(NodeId, Parent, Option<usize>)> = match to {
-            Order::Front => places
-                .iter()
-                .filter(|(_, _, index, count)| index + 1 < *count)
-                .map(|(node, parent, _, _)| (*node, *parent, None))
-                .collect(),
-            // Back to front reversed, so they keep their order at the back.
-            Order::Back => places
-                .iter()
-                .rev()
-                .filter(|(_, _, index, _)| *index > 0)
-                .map(|(node, parent, _, _)| (*node, *parent, Some(0)))
-                .collect(),
-            Order::Forward => places
-                .iter()
-                .rev()
-                .filter(|(_, _, index, count)| index + 1 < *count)
-                .map(|(node, parent, index, _)| (*node, *parent, Some(index + 1)))
-                .collect(),
-            Order::Backward => places
-                .iter()
-                .filter(|(_, _, index, _)| *index > 0)
-                .map(|(node, parent, index, _)| (*node, *parent, Some(index - 1)))
-                .collect(),
-        };
-        if moves.is_empty() {
+        // The order each parent's children end in.
+        let mut plans: Vec<(Parent, Vec<NodeId>)> = Vec::new();
+        for parent in parents {
+            let before: Vec<NodeId> = view.children(parent).collect();
+            let picked = |node: &NodeId| units.contains(node);
+            let mut after = before.clone();
+            match to {
+                Order::Front => {
+                    after = before
+                        .iter()
+                        .copied()
+                        .filter(|node| !picked(node))
+                        .chain(before.iter().copied().filter(picked))
+                        .collect();
+                }
+                Order::Back => {
+                    after = before
+                        .iter()
+                        .copied()
+                        .filter(picked)
+                        .chain(before.iter().copied().filter(|node| !picked(node)))
+                        .collect();
+                }
+                Order::Forward => {
+                    for index in (0..after.len().saturating_sub(1)).rev() {
+                        if picked(&after[index]) && !picked(&after[index + 1]) {
+                            after.swap(index, index + 1);
+                        }
+                    }
+                }
+                Order::Backward => {
+                    for index in 1..after.len() {
+                        if picked(&after[index]) && !picked(&after[index - 1]) {
+                            after.swap(index, index - 1);
+                        }
+                    }
+                }
+            }
+            if after != before {
+                plans.push((parent, after));
+            }
+        }
+        if plans.is_empty() {
             return Ok(false);
         }
         self.transact(&Actor::User, |txn| {
-            for (node, parent, index) in &moves {
-                txn.move_node(*node, *parent, *index)?;
+            for (parent, after) in &plans {
+                // Position by position from the back: everything before
+                // `index` is in place when `after[index]` moves there.
+                for (index, node) in after.iter().enumerate() {
+                    if txn.children(*parent).get(index) != Some(node) {
+                        txn.move_node(*node, *parent, Some(index))?;
+                    }
+                }
             }
             Ok(())
         })?;
@@ -166,13 +203,19 @@ impl BoardCanvas {
     /// Whether the selected nodes can be grouped: two or more, side by
     /// side under one parent.
     pub(crate) fn can_group(&self) -> bool {
-        let units = self.selected_units();
+        // Cheap enough for every frame: no walk of the board.
         let view = self.document.view();
-        let parents: HashSet<Parent> = units
-            .iter()
-            .filter_map(|node| Some(view.node(*node)?.parent()))
-            .collect();
-        units.len() >= 2 && parents.len() == 1
+        self.selection.with_untracked(|selection| {
+            let mut parents = selection
+                .iter()
+                .map(|node| view.node(*node).map(|node| node.parent()));
+            let Some(Some(first)) = parents.next() else {
+                return false;
+            };
+            selection.len() >= 2
+                && parents.all(|parent| parent == Some(first))
+                && !selection.iter().any(|node| hit::locked(view, *node))
+        })
     }
 
     /// Groups the selected nodes (two or more under one parent) in a new
@@ -282,7 +325,14 @@ impl BoardCanvas {
         }
         let freed = self.transact(&Actor::User, |txn| {
             let mut freed = Vec::new();
-            for (group, parent, index, children) in &plans {
+            for (group, parent, _, children) in &plans {
+                // Where the group is now: an earlier one's children may
+                // have moved in before it.
+                let index = txn
+                    .children(*parent)
+                    .iter()
+                    .position(|node| node == group)
+                    .unwrap_or(0);
                 for (offset, (child, geometry)) in children.iter().enumerate() {
                     txn.move_node(*child, *parent, Some(index + offset))?;
                     txn.set_geometry(*child, *geometry)?;
@@ -296,16 +346,23 @@ impl BoardCanvas {
         Ok(freed)
     }
 
-    /// Locks or unlocks the selected nodes (locked ones can't be selected
-    /// by a click, so unlocking takes the selection as it is).
+    /// Locks or unlocks the selected nodes. Unlocking with no locked node
+    /// selected unlocks every locked node (they can't be selected).
     pub(crate) fn set_locked(&mut self, locked: bool) -> Result<bool> {
         let view = self.document.view();
-        let nodes: Vec<NodeId> = self
+        let mut nodes: Vec<NodeId> = self
             .selection
             .get_untracked()
             .into_iter()
             .filter(|node| view.node(*node).is_some_and(|node| node.locked() != locked))
             .collect();
+        if nodes.is_empty() && !locked {
+            nodes = view
+                .walk()
+                .into_iter()
+                .filter(|node| view.node(*node).is_some_and(|node| node.locked()))
+                .collect();
+        }
         if nodes.is_empty() {
             return Ok(false);
         }
@@ -320,7 +377,17 @@ impl BoardCanvas {
             }
             Ok(())
         })?;
+        if !locked {
+            self.selection.set(nodes);
+        }
         Ok(true)
+    }
+
+    /// Whether `node` has an item on the board (it is visible and paints).
+    pub(crate) fn is_on_board(&self, node: NodeId) -> bool {
+        self.items
+            .as_ref()
+            .is_some_and(|items| items.by_node.contains_key(&node))
     }
 
     /// Zooms by `factor` around the middle of the board's box.

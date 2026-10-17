@@ -21,7 +21,8 @@ pub struct RunCopy {
 pub struct ParagraphCopy {
     /// The runs, in order.
     pub runs: Vec<RunCopy>,
-    /// The marks on its line break.
+    /// The marks on its line break: paragraph marks, and character or
+    /// add-on marks running over it.
     pub marks: Vec<(String, Value)>,
 }
 
@@ -168,10 +169,8 @@ impl NodeCopy {
             txn.set_generation(id, &generation)?;
         }
         let text = self.plain_text();
-        if self.text.iter().any(|paragraph| {
-            paragraph.runs.iter().any(|run| !run.text.is_empty()) || !paragraph.marks.is_empty()
-        }) || self.text.len() > 1
-        {
+        // Any paragraph, even one empty line, is text.
+        if !self.text.is_empty() {
             txn.insert_text(id, 0, &text)?;
             let mut at = 0;
             for paragraph in &self.text {
@@ -185,8 +184,14 @@ impl NodeCopy {
                     }
                     at += len;
                 }
+                // The line break's marks: paragraph marks as such, and the
+                // others (a bold running across lines, an add-on's) on it.
                 for (key, value) in &paragraph.marks {
-                    let _ = txn.set_paragraph_mark(id, start, key, value.clone());
+                    if imaginarium_model::mark(key).is_some_and(|mark| mark.paragraph) {
+                        let _ = txn.set_paragraph_mark(id, start, key, value.clone());
+                    } else {
+                        let _ = txn.mark_text(id, at..at + 1, key, value.clone());
+                    }
                 }
                 at += 1;
             }

@@ -238,6 +238,12 @@ impl Items {
         walker.children(Parent::Root, Affine::IDENTITY, &Rc::from([]));
     }
 
+    /// Where a node paints in the stacking order: its first item's key
+    /// (a group's first descendant's).
+    pub(crate) fn order_key(&self, view: &DocumentView, node: NodeId) -> Option<u64> {
+        self.first_key(view, node, &HashSet::new())
+    }
+
     /// Whether a node is visible (it, and every ancestor, isn't hidden).
     pub(crate) fn is_visible(&self, node: NodeId) -> bool {
         self.places.contains_key(&node)
