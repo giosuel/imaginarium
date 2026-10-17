@@ -75,7 +75,7 @@ mod setting;
 mod value;
 
 pub use error::SettingsError;
-pub use persist::LoadReport;
+pub use persist::{FileOpened, FileWriter, LoadReport, SaveStatus, write_atomically};
 pub use registry::{Change, Registry, SubscriptionId};
 pub use setting::{AnySetting, Constraint, Scope, Setting, SettingMeta, Validator};
 pub use value::{
