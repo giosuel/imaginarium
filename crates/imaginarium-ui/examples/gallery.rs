@@ -21,7 +21,7 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
-    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Slider, Swatch,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Logo, Scroll, Slider, Swatch,
     SwatchShape, Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, VirtualList,
     WidgetId, WindowOptions, animation, set_theme, theme,
 };
@@ -535,6 +535,11 @@ fn main() -> Result<(), UiError> {
     let slider = ui.add_with_children(Flex::row().width(260.0).gap(12.0), &[slider, level_text]);
     let sliders = section(&mut ui, "Slider · drag the knob or press ←→", &[slider]);
 
+    // The logo, at the start window's size and smaller.
+    let logos = [44.0, 28.0, 16.0].map(|size| ui.add(Logo::new(size)));
+    let logos = ui.add_with_children(Flex::row().gap(16.0), &logos);
+    let logo = section(&mut ui, "Logo · 44, 28 and 16 px", &[logos]);
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -690,6 +695,7 @@ fn main() -> Result<(), UiError> {
             palette_bits,
             swatches,
             sliders,
+            logo,
             inputs,
             text,
             layers,
