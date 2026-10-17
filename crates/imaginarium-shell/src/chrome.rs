@@ -15,8 +15,8 @@ use imaginarium_render::kurbo::{Affine, BezPath, Cap, Circle, Rect, RoundedRect,
 use imaginarium_render::peniko::Color;
 use imaginarium_text::TextStyle;
 use imaginarium_ui::{
-    ButtonBox, ButtonColors, Cx, Flex, Icon, IconButton, Label, Placement, Token, Ui, Widget,
-    WidgetId, label,
+    Button, ButtonBox, ButtonColors, Cx, Flex, Icon, IconButton, Label, Placement, Token, Ui,
+    Widget, WidgetId, label,
 };
 use taffy::prelude::length;
 
@@ -687,4 +687,132 @@ impl Widget for Logo {
             );
         }
     }
+}
+
+/// The dialog when a board with unsaved changes closes (`shell.md` §3.9,
+/// the SaveClose mockup): the icon tile beside the question and why,
+/// then Don't save on the left, Cancel and Save… on the right. `failed`
+/// is why its file can't be saved, for a board that has one. Returns the
+/// dialog and Save…, which starts with the keys (Enter keeps the work).
+pub(crate) fn close_dialog(
+    ui: &mut Ui,
+    name: &str,
+    failed: Option<&str>,
+    asks: &Asks,
+) -> (WidgetId, WidgetId) {
+    let icon = ui.add(Icon::named("file-plus", 20.0, Token::OnWarningSoft));
+    let tile = ui.add_with_children(
+        Flex::row()
+            .width(40.0)
+            .height(40.0)
+            .background(Token::WarningSoft)
+            .radius(10.0)
+            .align_center()
+            .style(|style| {
+                style.justify_content = taffy::JustifyContent::CENTER;
+                style.flex_shrink = 0.0;
+            }),
+        &[icon],
+    );
+    let question = format!("Save changes to \u{201c}{name}\u{201d} before closing?");
+    let why = match failed {
+        Some(reason) => format!(
+            "Its last changes couldn't be saved ({reason}). If you don't save it somewhere \
+             else, they are lost."
+        ),
+        None => "If you don't save, your changes are lost. Once it's saved, every change is \
+                 saved on its own."
+            .to_owned(),
+    };
+    let title = ui.add(Label::new(
+        question.clone(),
+        TextStyle::new(17.0).weight(600.0),
+    ));
+    let text =
+        ui.add(Label::new(why, TextStyle::new(14.0).line_height(1.5)).color(Token::TextSecondary));
+    let words = ui.add_with_children(Flex::column().gap(6.0).grow(1.0), &[title, text]);
+    let top = ui.add_with_children(
+        Flex::row()
+            .gap(14.0)
+            .style(|style| style.align_items = taffy::AlignItems::FLEX_START),
+        &[tile, words],
+    );
+    let button = |ui: &mut Ui, text: &str, colors: ButtonColors, padding: f64, weight: f32, ask| {
+        let asks = asks.clone();
+        ui.add(
+            Button::new(
+                text,
+                TextStyle::new(14.0).weight(weight),
+                colors,
+                move || {
+                    asks.borrow_mut().push(Ask::CloseAnswer(ask));
+                },
+            )
+            .padding(padding, 0.0)
+            .min_height(36.0),
+        )
+    };
+    let discard = button(
+        ui,
+        "Don't save",
+        ButtonColors::danger(),
+        12.0,
+        500.0,
+        CloseAnswer::Discard,
+    );
+    let spacer = ui.add(Flex::row().grow(1.0));
+    let cancel = button(
+        ui,
+        "Cancel",
+        ButtonColors::secondary(),
+        14.0,
+        500.0,
+        CloseAnswer::Cancel,
+    );
+    let save = button(
+        ui,
+        "Save…",
+        ButtonColors::primary(),
+        16.0,
+        600.0,
+        CloseAnswer::Save,
+    );
+    let buttons = ui.add_with_children(
+        Flex::row()
+            .gap(8.0)
+            .align_center()
+            .style(|style| style.margin.top = length(6.0)),
+        &[discard, spacer, cancel, save],
+    );
+    let dialog = ui.add_with_children(
+        Flex::column()
+            .gap(14.0)
+            .width(460.0)
+            .background(Token::PanelBg)
+            .border(1.0, Token::PanelBorder)
+            .radius(16.0)
+            .shadow()
+            .role(Role::AlertDialog, question)
+            .style(|style| {
+                style.padding = taffy::Rect {
+                    left: length(22.0),
+                    right: length(22.0),
+                    top: length(22.0),
+                    bottom: length(18.0),
+                };
+            }),
+        &[top, buttons],
+    );
+    (dialog, save)
+}
+
+/// What the close dialog was answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAnswer {
+    /// Close, and let the changes go.
+    Discard,
+    /// Keep the window open.
+    Cancel,
+    /// Choose a place, save there, then close.
+    Save,
 }

@@ -108,6 +108,8 @@ pub(crate) enum Ask {
     SaveCopy,
     /// Open the main menu (the pill's app button).
     MainMenu,
+    /// The close dialog was answered.
+    CloseAnswer(chrome::CloseAnswer),
     /// Close this window.
     CloseWindow,
     /// Open the Settings window.
@@ -268,6 +270,11 @@ pub struct BoardWindow {
     kept_failure: Option<String>,
     /// A dialog or file work running for this window.
     file_work: Option<FileWork>,
+    /// The dialog asking whether to save before closing, while open.
+    close_dialog: Option<LayerId>,
+    /// The window closes once the board is saved (its close dialog's
+    /// Save…).
+    close_when_saved: bool,
     /// What Settings sees of this board ("This board").
     link: Rc<crate::app::BoardLink>,
     /// The board's revision `link` was last brought up to date at.
@@ -427,6 +434,8 @@ impl BoardWindow {
             shown: chrome::SaveShown::Draft,
             kept_failure: None,
             file_work: None,
+            close_dialog: None,
+            close_when_saved: false,
             link: Rc::default(),
             link_seen: None,
             requests: Vec::new(),
@@ -581,6 +590,7 @@ impl BoardWindow {
                      type the whole name with .imag to replace it."
                 ),
             );
+            self.close_when_saved = false;
             return None;
         }
         Some(with)
@@ -708,7 +718,8 @@ impl BoardWindow {
             },
             FileWork::PlaceWhere(pending) => match pending.take() {
                 None => self.file_work = Some(FileWork::PlaceWhere(pending)),
-                Some(None) => {}
+                // Cancelled: the window stays.
+                Some(None) => self.close_when_saved = false,
                 Some(Some(path)) => {
                     if let Some(path) = self.chosen_path(path) {
                         self.place_at(path);
@@ -721,8 +732,13 @@ impl BoardWindow {
                     let name = crate::files::board_name(&placed.path);
                     self.link_with(placed.path, placed.session, false, placed.saved);
                     self.rename(name);
+                    if std::mem::take(&mut self.close_when_saved) {
+                        self.closing();
+                        self.requests.push(WindowRequest::Close);
+                    }
                 }
                 Some(Err(not)) => {
+                    self.close_when_saved = false;
                     let kept = self
                         .file
                         .take()
@@ -797,6 +813,21 @@ impl BoardWindow {
                     .and_then(|board| board.document().export_snapshot().ok())
             })
             .flatten();
+        // A file that fails isn't moved (its last changes aren't in it):
+        // the board is written fresh in the new place.
+        let failing = self.file.as_ref().is_some_and(|file| {
+            !file.untitled
+                && file
+                    .autosave
+                    .as_ref()
+                    .is_some_and(|autosave| matches!(autosave.state(), SaveState::Failed(_)))
+        });
+        if failing && let Some(autosave) = self.file.take().and_then(|file| file.autosave) {
+            let finishing = autosave.finish_in_background();
+            if let Some(app) = &self.app {
+                app.finishing(finishing, "a board's last changes weren't saved");
+            }
+        }
         let link = self
             .file
             .as_mut()
@@ -1541,13 +1572,79 @@ impl BoardWindow {
                 }
             }
             Ask::CloseWindow => {
-                self.closing();
-                self.requests.push(WindowRequest::Close);
+                if self.may_close() {
+                    self.closing();
+                    self.requests.push(WindowRequest::Close);
+                }
             }
+            Ask::CloseAnswer(answer) => self.close_answered(answer),
             Ask::OpenSettings => {
                 if let Some(window) = self.app.as_ref().and_then(App::settings_window) {
                     self.requests
                         .push(WindowRequest::Open(window.options(), Box::new(window)));
+                }
+            }
+        }
+    }
+
+    /// Why closing would lose work, if it would: an untitled board with
+    /// something in it (`None` inside), or one whose file fails (why).
+    fn unsaved(&self) -> Option<Option<String>> {
+        let board = self.board()?;
+        let editable = matches!(board.document().mode(), imaginarium_model::Mode::Editable);
+        match &self.file {
+            Some(file) if !file.untitled => match file.autosave.as_ref().map(Autosave::state) {
+                Some(SaveState::Failed(reason)) => Some(Some(reason)),
+                _ => None,
+            },
+            // Untitled: work in it, or a change undone (as other apps ask).
+            _ if editable && (board.revision() > 0 || board.document().view().node_count() > 0) => {
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the window may close now; if closing would lose work, the
+    /// close dialog asks first (`shell.md` §3.9) and the answer decides.
+    fn may_close(&mut self) -> bool {
+        if self.app.is_none() {
+            return true;
+        }
+        let Some(failed) = self.unsaved() else {
+            return true;
+        };
+        if self
+            .close_dialog
+            .is_some_and(|dialog| self.ui.is_layer_open(dialog))
+        {
+            return false;
+        }
+        if let Some(popup) = self.popup.take() {
+            self.ui.close_layer(&mut self.fonts, popup);
+        }
+        let (content, save) =
+            chrome::close_dialog(&mut self.ui, &self.name, failed.as_deref(), &self.asks);
+        let options = LayerOptions::modal().focus(save).scrim(0.22);
+        self.close_dialog = Some(self.ui.open_layer(content, options));
+        false
+    }
+
+    /// Does what the close dialog was answered.
+    fn close_answered(&mut self, answer: chrome::CloseAnswer) {
+        if let Some(dialog) = self.close_dialog.take() {
+            self.ui.close_layer(&mut self.fonts, dialog);
+        }
+        match answer {
+            chrome::CloseAnswer::Discard => {
+                self.closing();
+                self.requests.push(WindowRequest::Close);
+            }
+            chrome::CloseAnswer::Cancel => {}
+            chrome::CloseAnswer::Save => {
+                if self.file_work.is_none() {
+                    self.close_when_saved = true;
+                    self.start_file_work(&Ask::Place);
                 }
             }
         }
@@ -2491,8 +2588,14 @@ impl View for BoardWindow {
     }
 
     fn close_requested(&mut self) -> bool {
-        self.closing();
-        true
+        if self.closed {
+            return true;
+        }
+        let close = self.may_close();
+        if close {
+            self.closing();
+        }
+        close
     }
 
     fn take_requests(&mut self) -> Vec<WindowRequest> {

@@ -1192,6 +1192,150 @@ mod tests {
         );
     }
 
+    fn press_named(board: &mut BoardWindow, label: &str) {
+        let (ui, fonts) = board.ui();
+        let widget = ui
+            .find_by_label(fonts, label)
+            .unwrap_or_else(|| panic!("no {label:?}"));
+        let at = ui.bounds(widget).unwrap().center();
+        for pressed in [true, false] {
+            board.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        board_draw(board);
+    }
+
+    const ASKS: &str = "Save changes to \u{201c}Untitled board\u{201d} before closing?";
+
+    #[test]
+    fn closing_an_untitled_board_with_work_asks_first() {
+        let folder = scratch("close-asks").join("recovery");
+        let app = app();
+        app.keep_untitled_in(folder);
+        // An empty one closes without asking.
+        let mut empty = app.new_board().unwrap();
+        board_draw(&mut empty);
+        assert!(empty.close_requested());
+        drop(empty);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| {
+            board.kept_path().is_some_and(std::path::Path::exists)
+        });
+        let kept = board.kept_path().unwrap().to_owned();
+        // The close button: the dialog, and the window stays.
+        assert!(!board.close_requested());
+        board_draw(&mut board);
+        assert!(status_named(&mut board, ASKS));
+        // Cancel keeps it all.
+        press_named(&mut board, "Cancel");
+        assert!(!status_named(&mut board, ASKS));
+        assert!(requests_of(&mut board).is_empty());
+        assert!(kept.exists());
+        // Ctrl+W asks too; Enter is Save…, so the keys start there.
+        board.input(&ctrl("w"));
+        board_draw(&mut board);
+        assert!(status_named(&mut board, ASKS));
+        let (ui, fonts) = board.ui();
+        let save = ui.find_by_label(fonts, "Save…");
+        assert!(save.is_some() && ui.focused() == save);
+        // Don't save: it closes, and the work goes.
+        press_named(&mut board, "Don't save");
+        assert_eq!(requests_of(&mut board), ["Open(\"Imaginarium\")", "Close"]);
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert!(!kept.exists());
+    }
+
+    #[test]
+    fn save_in_the_close_dialog_saves_then_closes() {
+        let dir = scratch("close-save");
+        let app = app();
+        app.keep_untitled_in(dir.join("recovery"));
+        let answers = answering(&app);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        board.input(&ctrl("w"));
+        board_draw(&mut board);
+        // Cancelled in the save dialog: the window stays.
+        press_named(&mut board, "Save…");
+        until(|| answers.asked.lock().unwrap().len() == 1);
+        board_draw(&mut board);
+        assert!(requests_of(&mut board).is_empty());
+        // Saved: then it closes.
+        let target = dir.join("Kept.imag");
+        *answers.save.lock().unwrap() = Some(target.clone());
+        board.input(&ctrl("w"));
+        board_draw(&mut board);
+        press_named(&mut board, "Save…");
+        let mut seen = Vec::new();
+        run_until(&mut board, |board| {
+            seen.extend(requests_of(board));
+            seen.iter().any(|request| request == "Close")
+        });
+        assert!(seen.iter().any(|request| request == "Close"), "{seen:?}");
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert_eq!(nodes_in(&target), 1);
+    }
+
+    #[test]
+    fn a_board_whose_file_fails_asks_before_closing() {
+        let dir = scratch("close-failed");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 1);
+        let app = app();
+        let mut board = app.open_board(&path).unwrap();
+        board_draw(&mut board);
+        std::fs::remove_file(&path).unwrap();
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| {
+            let (ui, fonts) = board.ui();
+            let mut tree = imaginarium_ui::AccessTree::default();
+            ui.access(fonts, &mut tree);
+            tree.nodes().iter().any(|(_, node)| {
+                node.label()
+                    .is_some_and(|label| label.starts_with("Can't save"))
+            })
+        });
+        assert!(!board.close_requested());
+        board_draw(&mut board);
+        assert!(status_named(
+            &mut board,
+            "Save changes to \u{201c}Plan\u{201d} before closing?"
+        ));
+    }
+
+    #[test]
+    fn a_saved_board_closes_without_asking() {
+        let dir = scratch("close-saved");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 1);
+        let app = app();
+        let mut board = app.open_board(&path).unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        assert!(board.close_requested());
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert_eq!(nodes_in(&path), 2);
+    }
+
     #[test]
     fn the_main_menu_has_the_file_commands() {
         let app = app();
@@ -1731,8 +1875,8 @@ mod tests {
         });
         assert!(kept.exists());
         assert!(status_named(&mut board, "Save…"));
-        // Closed on purpose: the file goes.
-        assert!(board.close_requested());
+        // Closed on purpose (Don't save): the file goes.
+        dont_save(&mut board);
         drop(board);
         assert!(app.wait_for_saves().is_empty());
         assert!(!kept.exists());
@@ -1768,6 +1912,28 @@ mod tests {
         next.look_for_kept_boards();
         until(|| next.kept_search_done());
         assert_eq!(next.kept_boards().map(|(count, _)| count), Some(1));
+    }
+
+    /// Closes `view`, answering its close dialog with Don't save.
+    fn dont_save(view: &mut dyn View) {
+        assert!(!view.close_requested(), "it asks first");
+        let mut scene = Scene::new();
+        view.paint(&mut scene, Size::new(1440.0, 900.0));
+        let mut tree = imaginarium_ui::AccessTree::default();
+        view.accessibility(&mut tree);
+        let (id, _) = tree
+            .nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some("Don't save"))
+            .expect("Don't save");
+        let id = *id;
+        view.accessibility_action(&accesskit::ActionRequest {
+            action: accesskit::Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: id,
+            data: None,
+        });
+        assert!(names(&view.take_requests()).contains(&"Close".to_owned()));
     }
 
     fn start_has(start: &mut StartWindow, label: &str) -> bool {
@@ -1807,7 +1973,7 @@ mod tests {
         let Some(WindowRequest::Open(_, mut view)) = requests.into_iter().next() else {
             panic!("no board");
         };
-        assert!(view.close_requested());
+        dont_save(view.as_mut());
         drop(view);
         // Closed on purpose: no longer kept.
         assert!(app.wait_for_saves().is_empty());
