@@ -250,6 +250,30 @@ impl<'d> Transaction<'d> {
         Ok(())
     }
 
+    /// Sets the document's own value of the setting `key`
+    /// (`meta.settings`); `Value::Null` removes it, so the setting follows
+    /// the user's again. The value is a setting's stored form (an enum's
+    /// id, a color's hex), which the settings layer checks.
+    pub fn set_document_setting(&mut self, key: &str, value: Value) -> Result<()> {
+        let dotted = key.split('.').count() >= 2
+            && key.split('.').all(|part| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            });
+        if !dotted {
+            return Err(ModelError::Invalid(format!("`{key}` isn't a setting key")));
+        }
+        if matches!(value, Value::Map(_) | Value::Binary(_)) {
+            return Err(ModelError::Invalid(format!(
+                "`{key}`: a setting's value is a plain value or a list"
+            )));
+        }
+        let settings = self.meta_map().ensure_mergeable_map(meta::SETTINGS)?;
+        set_or_delete(&settings, key, &value)
+    }
+
     pub(crate) fn init_meta(&mut self, kind: DocumentKind, created: i64) -> Result<()> {
         let meta = self.meta_map();
         meta.insert(meta::SCHEMA_VERSION, schema::SCHEMA_VERSION)?;

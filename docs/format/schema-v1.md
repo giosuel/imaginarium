@@ -69,7 +69,7 @@ a later schema version.
 (`ensure_mergeable_*`), so peers that create one concurrently get the same
 container and their first edits merge:
 - a node's `g`, `s`, `t`, `a` and `x`;
-- `meta.required_features`;
+- `meta.required_features` and `meta.settings`;
 - each entry of `assets`.
 
 Exceptions: `gen` (§5.4) and the entries of `styles` (§8) are regular
@@ -90,6 +90,7 @@ Mergeable containers need Loro 1.13.1 or later. Readers of `loro-1` (spec
 | `created` | `Timestamp` | When the document was created |
 | `required_features` | List of `string` | Features a reader MUST understand to **edit** the document (§10.2). Absent or empty means none. |
 | `ai_policy` | Map | Reserved for the document's AI policy (M6) |
+| `settings` | Map | The document's own values of settings that can differ per document ("This board"): setting key (dotted `snake_case`, e.g. `board.background`) → value. A setting absent here follows the reader's own value. Values are plain (`bool`, `int`, `number`, `string`, or a list of them) in the setting's stored form: an enum's id (`"grid"`), a color's `color` string. Readers MUST keep entries they don't know and MUST ignore values they can't use, falling back to their own setting. |
 
 ## 5. Nodes
 

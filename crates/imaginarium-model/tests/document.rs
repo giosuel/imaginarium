@@ -921,3 +921,63 @@ fn a_failed_transaction_inside_an_undo_group_splits_it_cleanly() {
     assert_eq!(x(&doc), 0.0);
     assert_consistent(&doc);
 }
+
+#[test]
+fn a_document_keeps_its_own_settings_and_peers_merge_them() {
+    let mut a = board();
+    let changes = a
+        .transact(&Actor::User, |t| {
+            t.set_document_setting("board.background", Value::String("grid".into()))
+        })
+        .unwrap()
+        .1;
+    assert!(changes.meta);
+    assert_eq!(
+        a.view().meta().settings().get("board.background"),
+        Some(&Value::String("grid".into()))
+    );
+    // Saved and opened again.
+    let mut b = open(&a.export_snapshot().unwrap());
+    assert_eq!(a.view(), b.view());
+    // Two peers set two settings at once: both stay (a mergeable map).
+    let (va, vb) = (a.version(), b.version());
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.snap", Value::Bool(true))
+    })
+    .unwrap();
+    b.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::Null)
+    })
+    .unwrap();
+    let from_a = a.export_updates_since(&va).unwrap();
+    let from_b = b.export_updates_since(&vb).unwrap();
+    a.apply_remote(&[&from_b]).unwrap();
+    let remote = b.apply_remote(&[&from_a]).unwrap();
+    assert!(remote.meta);
+    assert_eq!(a.view(), b.view());
+    let settings = a.view().meta().settings().clone();
+    assert_eq!(settings.get("board.snap"), Some(&Value::Bool(true)));
+    assert_eq!(settings.get("board.background"), None);
+    // Undo takes a setting back too.
+    assert!(a.can_undo(UndoScope::User));
+    assert_consistent(&a);
+}
+
+#[test]
+fn document_settings_take_setting_keys_and_plain_values() {
+    let mut a = board();
+    for key in ["background", "Board.background", "board..x", ""] {
+        assert!(
+            a.transact(&Actor::User, |t| t
+                .set_document_setting(key, Value::Bool(true)))
+                .is_err(),
+            "{key:?}"
+        );
+    }
+    assert!(
+        a.transact(&Actor::User, |t| {
+            t.set_document_setting("board.x", Value::Binary(std::sync::Arc::from(&[1u8][..])))
+        })
+        .is_err()
+    );
+}
