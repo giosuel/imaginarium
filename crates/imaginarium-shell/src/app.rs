@@ -42,8 +42,9 @@ pub struct App {
     settings_open: Cell<bool>,
     /// The board window used last, for This board in Settings.
     active_board: RefCell<std::rc::Weak<BoardLink>>,
-    /// Closed boards' saving threads finishing.
-    finishing: RefCell<Vec<std::thread::JoinHandle<Option<String>>>>,
+    /// Closed boards' saving threads finishing, and what their failure
+    /// means.
+    finishing: RefCell<Vec<Finishing>>,
     /// Whether the settings file is saved, and a notice from reading it.
     saving: RefCell<Saving>,
     /// Where untitled boards are kept for crash recovery (`None`: they
@@ -53,6 +54,9 @@ pub struct App {
     kept: Arc<Mutex<KeptScan>>,
 }
 
+/// A closed board's saving thread finishing, and what its failure means.
+type Finishing = (std::thread::JoinHandle<Option<String>>, &'static str);
+
 /// The search for boards a crashed app left (`App::look_for_kept_boards`).
 #[derive(Default)]
 struct KeptScan {
@@ -60,8 +64,8 @@ struct KeptScan {
     done: bool,
     /// What it found, until opened.
     boards: Vec<imaginarium_io_native::KeptBoard>,
-    /// Wakes the window that waits for it.
-    waker: Option<Box<dyn Fn() + Send>>,
+    /// Wake the windows that wait for it.
+    wakers: Vec<Box<dyn Fn() + Send>>,
 }
 
 /// A board window, as the Settings window sees it ("This board"): its
@@ -188,7 +192,7 @@ impl App {
                 if let Ok(mut scan) = scan.lock() {
                     scan.boards = boards;
                     scan.done = true;
-                    if let Some(wake) = &scan.waker {
+                    for wake in &scan.wakers {
                         wake();
                     }
                 }
@@ -207,9 +211,16 @@ impl App {
         if let Ok(mut scan) = self.kept.lock() {
             if scan.done {
                 wake();
+            } else {
+                scan.wakers.push(wake);
             }
-            scan.waker = Some(wake);
         }
+    }
+
+    /// Whether the search for kept boards is done (or never started).
+    #[cfg(test)]
+    pub(crate) fn kept_search_done(&self) -> bool {
+        self.recovery.borrow().is_none() || self.kept.lock().is_ok_and(|scan| scan.done)
     }
 
     /// The boards found after a crash and not opened yet: how many, and
@@ -374,16 +385,24 @@ impl App {
 
     /// A closed board's saving thread finishing (the app waits for it
     /// before it exits).
-    pub(crate) fn finishing(&self, save: std::thread::JoinHandle<Option<String>>) {
-        self.finishing.borrow_mut().push(save);
+    pub(crate) fn finishing(
+        &self,
+        save: std::thread::JoinHandle<Option<String>>,
+        what: &'static str,
+    ) {
+        self.finishing.borrow_mut().push((save, what));
     }
 
-    /// Waits for the closed boards' saves to finish; why the ones that
-    /// failed did (their last changes aren't in the file).
+    /// Waits for the closed boards' saves to finish; what went wrong with
+    /// the ones that failed, as sentences (their last changes aren't in the
+    /// file, a recovery file is left).
     pub fn wait_for_saves(&self) -> Vec<String> {
         std::mem::take(&mut *self.finishing.borrow_mut())
             .into_iter()
-            .filter_map(|save| save.join().ok().flatten())
+            .filter_map(|(save, what)| {
+                let reason = save.join().unwrap_or_else(|_| Some("it stopped".into()))?;
+                Some(format!("{what}: {reason}"))
+            })
             .collect()
     }
 
@@ -1195,9 +1214,42 @@ mod tests {
         assert!(kept.exists());
         assert!(status_named(&mut board, "Save…"));
         // Closed on purpose: the file goes.
+        assert!(board.close_requested());
         drop(board);
         assert!(app.wait_for_saves().is_empty());
         assert!(!kept.exists());
+    }
+
+    #[test]
+    fn a_board_gone_without_a_close_stays_kept() {
+        // A window that failed, the app ending with an error, a panic: the
+        // window is dropped without being closed.
+        let folder = scratch("untitled-dropped").join("recovery");
+        let app = app();
+        app.keep_untitled_in(folder.clone());
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        // Dropped before its change was even sent: that goes too.
+        let kept = board.kept_path().unwrap().to_owned();
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert_eq!(
+            imaginarium_io_native::open_path(&kept, imaginarium_io_native::Credentials::None)
+                .unwrap()
+                .document
+                .view()
+                .node_count(),
+            1
+        );
+        // The next start offers it.
+        let next = super::tests::app();
+        next.keep_untitled_in(folder);
+        next.look_for_kept_boards();
+        until(|| next.kept_search_done());
+        assert_eq!(next.kept_boards().map(|(count, _)| count), Some(1));
     }
 
     fn start_has(start: &mut StartWindow, label: &str) -> bool {
@@ -1234,9 +1286,10 @@ mod tests {
         assert_eq!(names(&requests), ["Open(\"Untitled board — Imaginarium\")"]);
         frame(&mut start);
         assert!(!start_has(&mut start, notice));
-        let Some(WindowRequest::Open(_, view)) = requests.into_iter().next() else {
+        let Some(WindowRequest::Open(_, mut view)) = requests.into_iter().next() else {
             panic!("no board");
         };
+        assert!(view.close_requested());
         drop(view);
         // Closed on purpose: no longer kept.
         assert!(app.wait_for_saves().is_empty());
@@ -1263,6 +1316,8 @@ mod tests {
         let quiet = super::tests::app();
         quiet.keep_untitled_in(scratch("no-crash"));
         quiet.look_for_kept_boards();
+        until(|| quiet.kept_search_done());
+        assert!(quiet.kept_search_done());
         let mut start = quiet.start_window();
         frame(&mut start);
         assert!(!start_has(&mut start, "Open it"));

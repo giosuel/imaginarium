@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
     // Boards closed last may still be writing their last changes, even when
     // the run ended with an error.
     for err in app.wait_for_saves() {
-        eprintln!("imaginarium: a board's last changes weren't saved: {err}");
+        eprintln!("imaginarium: {err}");
     }
     let stats = ran.context("running the app")?;
     // Writes what is pending, then says if saving failed.

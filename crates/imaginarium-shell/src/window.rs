@@ -240,6 +240,8 @@ pub struct BoardWindow {
     file: Option<FileLink>,
     /// What the pill says about the file now.
     shown: chrome::SaveShown,
+    /// Why an untitled board's recovery file fails, once said.
+    kept_failure: Option<String>,
     /// What Settings sees of this board ("This board").
     link: Rc<crate::app::BoardLink>,
     /// The board's revision `link` was last brought up to date at.
@@ -397,6 +399,7 @@ impl BoardWindow {
             app: None,
             file: None,
             shown: chrome::SaveShown::Draft,
+            kept_failure: None,
             link: Rc::default(),
             link_seen: None,
             requests: Vec::new(),
@@ -612,7 +615,19 @@ impl BoardWindow {
             }
             // Kept for recovery, but not saved anywhere of its own.
             (_, None) => chrome::SaveShown::Draft,
-            (_, Some(file)) if file.untitled => chrome::SaveShown::Draft,
+            (_, Some(file)) if file.untitled => {
+                // Its pill says Not saved anyway; a failing recovery file
+                // is said where someone may look.
+                if let Some(SaveState::Failed(reason)) = file.autosave.as_ref().map(Autosave::state)
+                    && self.kept_failure.as_deref() != Some(reason.as_str())
+                {
+                    eprintln!(
+                        "imaginarium: an untitled board can't be kept for recovery: {reason}"
+                    );
+                    self.kept_failure = Some(reason);
+                }
+                chrome::SaveShown::Draft
+            }
             (_, Some(file)) => match file.autosave.as_ref().map(Autosave::state) {
                 None | Some(SaveState::Saved) => chrome::SaveShown::Saved,
                 Some(SaveState::Saving(since)) if since.elapsed() >= SAVING_SHOWN_AFTER => {
@@ -647,7 +662,10 @@ impl BoardWindow {
     /// When the pill should show Saving…, while a save runs and it doesn't
     /// yet.
     fn saving_deadline(&self) -> Option<Instant> {
-        if self.shown == chrome::SaveShown::Saving {
+        // An untitled board's pill never shows Saving….
+        if self.shown == chrome::SaveShown::Saving
+            || self.file.as_ref().is_none_or(|file| file.untitled)
+        {
             return None;
         }
         match self.file.as_ref()?.autosave.as_ref()?.state() {
@@ -657,23 +675,31 @@ impl BoardWindow {
     }
 
     /// Sends what isn't saved yet, and lets the saving thread finish on its
-    /// own (the app waits for it before it exits). An untitled board's
-    /// recovery file is deleted instead: it closed on purpose.
-    fn finish_saving(&mut self) {
-        let untitled = self.file.as_ref().is_some_and(|file| file.untitled);
+    /// own (the app waits for it before it exits). With `discard` (the
+    /// user closed the board), an untitled board's recovery file is
+    /// deleted instead; otherwise (the window went away: the app failed)
+    /// it stays, to be offered again.
+    fn finish_saving(&mut self, discard: bool) {
+        let untitled = discard && self.file.as_ref().is_some_and(|file| file.untitled);
         if !untitled {
             self.save_changes(true);
         }
         let Some(autosave) = self.file.as_mut().and_then(|file| file.autosave.take()) else {
             return;
         };
-        let finishing = if untitled {
-            autosave.discard_in_background()
+        let (finishing, what) = if untitled {
+            (
+                autosave.discard_in_background(),
+                "a closed board's recovery file is left",
+            )
         } else {
-            autosave.finish_in_background()
+            (
+                autosave.finish_in_background(),
+                "a board's last changes weren't saved",
+            )
         };
         match &self.app {
-            Some(app) => app.finishing(finishing),
+            Some(app) => app.finishing(finishing, what),
             None => {
                 let _ = finishing.join();
             }
@@ -1132,7 +1158,7 @@ impl BoardWindow {
             return;
         }
         // Nothing waits for another frame now.
-        self.finish_saving();
+        self.finish_saving(true);
         // It stops counting at once: several boards closing in one go
         // (before any is dropped) see each other gone.
         if let Some(app) = &self.app
@@ -1896,7 +1922,9 @@ impl BoardWindow {
 
 impl Drop for BoardWindow {
     fn drop(&mut self) {
-        self.finish_saving();
+        // Dropped without being closed (a window that failed, the app
+        // ending with an error, a panic): an untitled board stays kept.
+        self.finish_saving(false);
         // The registry outlives the window (several windows share it).
         if let Ok(mut settings) = self.settings.try_borrow_mut() {
             settings.unsubscribe(self.subscription);
