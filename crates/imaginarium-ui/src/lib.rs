@@ -8,6 +8,9 @@
 //! - [`run`] opens a window and shows a [`View`] in it. Each frame is one
 //!   scene, built by the view in logical pixels and drawn at the window's
 //!   scale factor.
+//! - **Several windows:** a view asks for more windows, or to close its
+//!   own ([`WindowRequest`]); the run ends with the last one. They share
+//!   the first window's GPU.
 //! - **No frame without a reason:** a frame is drawn when the window
 //!   appears, is resized or moves to a monitor with another scale, when
 //!   [`View::input`], [`View::presented`] or the view's timer

@@ -321,6 +321,42 @@ when the last board closes.
   **Recent** as a grid of thumbnails (name, folder, when) with a filter,
   "Open another board…", and "Drop an .imag file here to open it."
 
+**As built (M3.4, the start window and windows).** `StartWindow` in
+`imaginarium-shell`, opened by `App::first_window` when
+`startup.show_start_window` is on (the default; `--new` skips it):
+- **Left:** the logo (`imaginarium_ui::Logo`, in the gallery), the
+  name and version, **New board** (`Ctrl+N`, `file.new_board`), and
+  **Show at startup** as a switch rather than the mockup's checkbox (the
+  toolkit's control for a setting). **Open…** is disabled, with a tooltip,
+  until files come (M3.6). The links to Settings, Shortcuts and What's new
+  come with the windows they open; the templates with M4.
+- **Right:** **Recent** with an empty tile saying boards will show there.
+  The recovery notice, the filter, the thumbnails and dropping files come
+  with files (M3.6).
+- **Fixed size** (960 × 600, `WindowOptions::resizable = false`), so
+  Hyprland and Sway float it like a dialog. Nothing has the keys at
+  first (no focus ring, as in the mockup); `Ctrl+N` works anywhere in it
+  and Tab reaches New board first.
+- **One window per document:** `imaginarium-ui` runs several windows in
+  one event loop. Views ask for windows (`View::take_requests`) and hear
+  the close button (`View::close_requested`); the run ends with the last
+  window. The second and later windows share the first one's GPU device
+  (`WindowRenderer::sibling`) and the app's fonts (`Fonts::share`, one
+  scan of the system's fonts), settings and tile workers (`App`).
+- **Closing:** `Ctrl+W` (`window.close`) or the close button. A board
+  stops counting as open as soon as it starts closing, so boards closed
+  together still bring the start window back once. Closing the start
+  window ends the app. Unsaved changes can't be asked about until M3.6.
+- **Settings aren't saved to a file yet** (that comes with Settings,
+  M3.5): Show at startup lasts for the session.
+- **Timings** (release, llvmpipe on the 8-vCPU VM, 2026-10-17): the first
+  frame of the start window 240–255 ms after `main` starts (about 55 ms
+  of setup, mostly the font scan, while the GPU opens on its thread; then
+  about 150 ms waiting for the GPU), under PLAN §10's 400 ms. A new board
+  window draws its first frame about 245 ms after `Ctrl+N`, 130 ms of
+  which build its own Vello renderer (the pipelines are compiled per
+  window); sharing them between windows is a follow-up.
+
 ## 5. Settings
 
 A window of its own (`Ctrl+,`), generated from the settings registry

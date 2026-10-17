@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The windows around the documents (`docs/design/shell.md`). For now, the
-//! board window (§3): the board fills it, and panels float over it, 16 px
-//! from its edges:
+//! The windows around the documents (`docs/design/shell.md`): the start
+//! window (§4), and one board window per board (§3), where the board
+//! fills the window and panels float over it, 16 px from its edges:
 //!
 //! - top left, the document pill: the app button, the board's name and its
 //!   save state;
@@ -19,6 +19,14 @@
 //!   or floats ([`TOOLBAR_POSITION`]).
 //! - The command palette (`Ctrl+K`): the board's and the shell's commands
 //!   and the settings, found by name.
+//! - The contextual toolbar above the selection, built from the commands
+//!   available for it.
+//! - The context menu (a right-click, Shift+F10, the Menu key), F6
+//!   between the board and the panels, and the inspector (`Ctrl+I`) on
+//!   the right.
+//! - The start window ([`StartWindow`]), and the app's windows: New board
+//!   (`Ctrl+N`) opens another, closing the last board brings the start
+//!   window back ([`App`]).
 //! - Declares the shell's settings ([`SETTINGS`]).
 //!
 //! # Boundaries
@@ -26,15 +34,11 @@
 //!   (`imaginarium-canvas`), so the palette and the AI can do the same.
 //! - Does NOT open, save or name files (M3.6), run the AI (M6) or share
 //!   (M8). Their buttons are placeholders that say what is coming when
-//!   clicked.
-//! - The contextual toolbar above the selection, built from the commands
-//!   available for it.
-//! - The context menu (a right-click, Shift+F10, the Menu key), F6
-//!   between the board and the panels, and the inspector (`Ctrl+I`) on
-//!   the right.
-//! - No start window yet (the last step of M3.4).
+//!   clicked. The start window's Open… and recent boards wait for files.
 //!
 //! # Key types
+//! - [`App`]: what the windows share, and which window comes first.
+//! - [`StartWindow`]: the start window's view.
 //! - [`BoardWindow`]: a board window's view.
 //! - [`Dock`]: where the tool bar is.
 

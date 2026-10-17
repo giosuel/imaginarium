@@ -11,14 +11,16 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.4 part 6, the start window**: new boards,
-  recent files and open (the Start mockups), one window per document,
-  and startup under 400 ms (PLAN §10). Parts 1 to 5 are done
-  (2026-10-17): the board window
+- **Next step:** **M3.5, the Settings UI** (below): the window generated
+  from the registry, and saving the settings to a file (Show at startup
+  lasts only for the session until then). M3.4 is done (2026-10-17), in
+  six parts, each reviewed by a fresh agent and stacked: the board window
   (https://github.com/giosuel/imaginarium/pull/56), the command palette
   (https://github.com/giosuel/imaginarium/pull/57), the contextual
-  toolbar and the context menu, each reviewed by a fresh agent, stacked
-  on M3.3's PRs.
+  toolbar and the context menu
+  (https://github.com/giosuel/imaginarium/pull/58), the inspector
+  (https://github.com/giosuel/imaginarium/pull/59), and the start window
+  with one window per document (part 6).
   M3.3 is done (2026-10-17): the board's commands, tools and
   clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
   `imaginarium-canvas` shows and edits a board. Each part was reviewed by
@@ -49,8 +51,9 @@ Last updated: 2026-10-17
   clipboard, layers, scrolling, icons, animation), `imaginarium-canvas`
   (the board: a document's nodes on the tile canvas, selection, handles,
   text in place, the board's commands), `imaginarium-shell` (the board
-  window: panels and the tool bar), `imaginarium-app` (opens a board
-  window) and `imaginarium-gate` (the M2 gate app: a board with text,
+  window with its panels, palette, contextual toolbar, context menu and
+  inspector; the start window), `imaginarium-app` (the start window,
+  one window per board) and `imaginarium-gate` (the M2 gate app: a board with text,
   search, in-place editing, a command palette, measurements,
   `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
@@ -1061,7 +1064,7 @@ What M3 builds on:
   - **Shortcuts** come from the keymaps of `imaginarium-commands`, replacing
     the gate's hard-coded ones.
   - **The command context:** the document, the selection and the view.
-- [ ] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`):
+- [x] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`), done 2026-10-17:
   - [x] **part 1, the board window** (2026-10-17, `shell.md` §3 "As
     built"): the pill, search, AI and share (placeholders that say what
     is coming), zoom and undo, help, and the tool bar, docked left,
@@ -1082,6 +1085,12 @@ What M3 builds on:
   - [x] **part 5, the inspector** (2026-10-17, `shell.md` §3.6 "As
     built"), with its commands (opacity, text size, Reset to style, named
     styles, rename, hide, shape type) and a slider in the toolkit;
+  - [x] **part 6, the start window and windows** (2026-10-17, `shell.md`
+    §4 "As built"): New board, Show at startup
+    (`startup.show_start_window`), Open… and Recent waiting for files
+    (M3.6); several windows in one event loop sharing the GPU and fonts,
+    `Ctrl+N` and `Ctrl+W`, the start window again after the last board;
+    the first frame 240–255 ms after start on llvmpipe (budget 400 ms);
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;
@@ -1152,6 +1161,16 @@ What M3 builds on:
 - Hub name: "Imaginarium Hub" is the working name (not yet confirmed).
 
 ## Known issues and notes
+
+- **A new window builds its own Vello renderer** (M3.4 part 6): about
+  130 ms of the 245 ms from `Ctrl+N` to the new board's first frame on
+  llvmpipe go into compiling its pipelines. Sharing one renderer's
+  pipelines between windows would cut that.
+- **Two render tests are timing-sensitive**: `canvas::tests::
+  the_budget_owes_tiles_and_stand_ins_fill_them` and
+  `uploads_follow_what_they_cost` failed once in a full workspace run
+  while other sessions loaded the machine (load average about 5), and
+  passed on their own and in the next full run (2026-10-17).
 
 - **Opening a big board is slow in the model** (M3.2 benchmarks): 282 ms
   for 10,000 shapes (Loro import and reading the view key by key), and
