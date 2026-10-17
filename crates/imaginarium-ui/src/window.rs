@@ -224,6 +224,16 @@ pub enum Input {
     FileDropped(std::path::PathBuf),
 }
 
+/// What a window says the system prefers: on Windows and macOS (on Linux
+/// winit doesn't know; the desktop portal says, `crate::appearance`).
+fn system_theme(theme: Option<winit::window::Theme>) {
+    if cfg!(any(target_os = "windows", target_os = "macos"))
+        && let Some(theme) = theme
+    {
+        crate::appearance::set_system_prefers_dark(Some(theme == winit::window::Theme::Dark));
+    }
+}
+
 /// Whether dropped files reach the windows ([`Input::FileDropped`]): on
 /// Windows, macOS and X11, but not on Wayland, where winit 0.30 doesn't
 /// report drops yet (it is used when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET`
@@ -711,6 +721,8 @@ pub fn run_with_gpu<'v>(
             let _ = frames.send_event(UserEvent::Wake(window));
         }));
     }
+    // What the system prefers (the desktop portal, on Linux), from now on.
+    crate::appearance::listen_to_the_system();
     let mut shell = Shell {
         windows: std::collections::HashMap::new(),
         pending: vec![(options, Box::new(view) as Box<dyn View + 'v>)],
@@ -927,6 +939,7 @@ impl<'v> Shell<'v> {
             self.first = Some(id);
             self.stats.window_created = Some(creating.elapsed());
         }
+        system_theme(window.theme());
         // The renderer comes with the first frame, after its layout: the
         // GPU keeps opening meanwhile.
         let access = accesskit_winit::Adapter::with_event_loop_proxy(
@@ -1167,7 +1180,12 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
 
     fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if matches!(event, WindowEvent::RedrawRequested) {
+            // A change of the system's look shows in this frame.
+            crate::appearance::refresh();
             return self.redraw(id);
+        }
+        if let WindowEvent::ThemeChanged(theme) = &event {
+            system_theme(Some(*theme));
         }
         let Some(state) = self.windows.get_mut(&id) else {
             return;

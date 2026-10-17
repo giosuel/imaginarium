@@ -23,6 +23,9 @@ taffy.workspace = true
 thiserror.workspace = true
 winit.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
 [dev-dependencies]
 # Checks our updates the way the platform adapters read them.
 accesskit_consumer.workspace = true

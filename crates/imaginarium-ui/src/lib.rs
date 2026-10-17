@@ -57,6 +57,7 @@
 
 mod access;
 pub mod animation;
+pub mod appearance;
 mod clipboard;
 mod controls;
 pub mod icons;
