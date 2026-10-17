@@ -398,7 +398,10 @@ impl BoardWindow {
     /// board's, as the palette and the AI do.
     pub fn execute(&mut self, id: &str, args: &Args) -> Result<Outcome, CommandError> {
         let outcome = if self.commands.get(id).is_some() {
-            let mut cx = ShellCx::default();
+            let mut cx = ShellCx {
+                in_app: self.app.is_some(),
+                ..ShellCx::default()
+            };
             let outcome = self.commands.execute(&mut cx, id, args)?;
             self.asks.borrow_mut().extend(cx.asks);
             outcome
@@ -1088,10 +1091,15 @@ impl BoardWindow {
             return;
         };
         let board_keys = board.keymap().clone();
+        let shell = ShellCx {
+            in_app: self.app.is_some(),
+            ..ShellCx::default()
+        };
         let availability = self
             .board_commands
             .availability(board)
             .into_iter()
+            .chain(self.commands.availability(&shell))
             .map(|(id, availability)| (id.as_str(), availability))
             .collect();
         let settings = self.settings.clone();
@@ -1538,7 +1546,12 @@ impl View for BoardWindow {
             && let Some(command) = self.keymap.command_for_press(press)
         {
             self.ui.note_keyboard();
-            let _ = self.execute(command.as_str(), &Args::new());
+            // A held Ctrl+N or Ctrl+W would open or close a window per
+            // repeat.
+            let once = matches!(command.as_str(), "file.new_board" | "window.close");
+            if !(once && matches!(input, Input::Key { repeat: true, .. })) {
+                let _ = self.execute(command.as_str(), &Args::new());
+            }
             return true;
         }
         // A right-click on the board: the context menu of what it is on

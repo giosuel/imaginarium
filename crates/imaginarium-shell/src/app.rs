@@ -57,14 +57,25 @@ impl App {
         })
     }
 
-    /// The first window: the start window, or a new board when the
-    /// settings say not to show it.
-    pub fn first_window(self: &Rc<Self>) -> Result<(WindowOptions, Box<dyn View>), ModelError> {
-        if self.shows_start_window() {
-            let window = self.start_window();
+    /// The first window: the start window, or a new board when `new` or
+    /// the settings say not to show it. `close_after` closes it after that
+    /// many frames (scripted runs).
+    pub fn first_window(
+        self: &Rc<Self>,
+        new: bool,
+        close_after: Option<u64>,
+    ) -> Result<(WindowOptions, Box<dyn View>), ModelError> {
+        if !new && self.shows_start_window() {
+            let mut window = self.start_window();
+            if let Some(frames) = close_after {
+                window = window.close_after(frames);
+            }
             Ok((window.options(), Box::new(window)))
         } else {
-            let window = self.new_board()?;
+            let mut window = self.new_board()?;
+            if let Some(frames) = close_after {
+                window = window.close_after(frames);
+            }
             Ok((window.options(), Box::new(window)))
         }
     }
@@ -195,6 +206,7 @@ mod tests {
             ["Open(\"Untitled board — Imaginarium\")", "Close"]
         );
         // Ctrl+N does the same.
+        let mut start = app.start_window();
         start.input(&ctrl("n"));
         assert_eq!(
             names(&start.take_requests()),
@@ -255,8 +267,10 @@ mod tests {
     #[test]
     fn the_setting_picks_the_first_window_and_the_switch_changes_it() {
         let app = app();
-        let (options, _) = app.first_window().unwrap();
+        let (options, _) = app.first_window(false, None).unwrap();
         assert_eq!(options.title, "Imaginarium");
+        let (options, _) = app.first_window(true, None).unwrap();
+        assert_eq!(options.title, "Untitled board — Imaginarium");
         let mut start = app.start_window();
         frame(&mut start);
         let (ui, fonts) = start.ui();
@@ -272,8 +286,73 @@ mod tests {
             });
         }
         assert!(!app.shows_start_window());
-        let (options, _) = app.first_window().unwrap();
+        let (options, _) = app.first_window(false, None).unwrap();
         assert_eq!(options.title, "Untitled board — Imaginarium");
+    }
+
+    fn repeated(input: Input) -> Input {
+        match input {
+            Input::Key {
+                key,
+                text,
+                pressed,
+                modifiers,
+                ..
+            } => Input::Key {
+                key,
+                text,
+                pressed,
+                repeat: true,
+                modifiers,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    fn a_held_ctrl_n_opens_one_board() {
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        board.input(&ctrl("n"));
+        board.input(&repeated(ctrl("n")));
+        board.input(&repeated(ctrl("n")));
+        assert_eq!(board.take_requests().len(), 1);
+        // The start window asks once, even pressed twice before it closes.
+        let mut start = app.start_window();
+        start.input(&ctrl("n"));
+        start.input(&ctrl("n"));
+        assert_eq!(
+            names(&start.take_requests()),
+            ["Open(\"Untitled board — Imaginarium\")", "Close"]
+        );
+        start.input(&ctrl("n"));
+        assert!(start.take_requests().is_empty());
+    }
+
+    #[test]
+    fn window_commands_need_the_app() {
+        // A board window outside the app (tests, embedding) can't open
+        // windows: the palette doesn't offer it.
+        let mut registry = Registry::new();
+        registry.register_all(crate::SETTINGS).unwrap();
+        let mut alone = BoardWindow::new(
+            BoardCanvas::new(Document::new(DocumentKind::Board).unwrap()),
+            "Untitled board",
+            Fonts::bundled_only(),
+            Rc::new(RefCell::new(registry)),
+        );
+        assert!(
+            alone
+                .execute("file.new_board", &imaginarium_commands::Args::new())
+                .is_err()
+        );
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        assert!(
+            board
+                .execute("file.new_board", &imaginarium_commands::Args::new())
+                .is_ok()
+        );
     }
 
     #[test]

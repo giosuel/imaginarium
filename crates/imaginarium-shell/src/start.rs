@@ -45,6 +45,8 @@ pub struct StartWindow {
     keymap: Keymap,
     new_board: WidgetId,
     requests: Vec<WindowRequest>,
+    /// It asked to close (after New board).
+    closing: bool,
     close_after: Option<u64>,
     frames: u64,
 }
@@ -82,6 +84,7 @@ impl StartWindow {
             keymap,
             new_board,
             requests: Vec::new(),
+            closing: false,
             close_after: None,
             frames: 0,
         }
@@ -111,12 +114,17 @@ impl StartWindow {
         (&mut self.ui, &mut self.fonts)
     }
 
-    /// Opens a board window on a new board and closes this one.
+    /// Opens a board window on a new board and closes this one (once: a
+    /// second press before it closes does nothing).
     pub fn new_board(&mut self) {
+        if self.closing {
+            return;
+        }
         if let Ok(window) = self.app.new_board() {
             self.requests
                 .push(WindowRequest::Open(window.options(), Box::new(window)));
             self.requests.push(WindowRequest::Close);
+            self.closing = true;
         }
     }
 
@@ -349,6 +357,7 @@ impl View for StartWindow {
         if let Input::Key {
             key,
             pressed: true,
+            repeat: false,
             modifiers,
             ..
         } = input

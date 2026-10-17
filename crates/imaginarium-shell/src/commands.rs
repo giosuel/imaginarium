@@ -5,7 +5,7 @@
 //! collects what the window should do.
 
 use imaginarium_commands::{
-    ArgKind, ArgSpec, ArgsSchema, CommandError, CommandMeta, FnCommand, Outcome,
+    ArgKind, ArgSpec, ArgsSchema, Availability, CommandError, CommandMeta, FnCommand, Outcome,
 };
 
 use crate::toolbar::Dock;
@@ -15,6 +15,17 @@ use crate::window::Ask;
 #[derive(Default)]
 pub(crate) struct ShellCx {
     pub(crate) asks: Vec<Ask>,
+    /// The window is one of the app's (it can open and close windows).
+    pub(crate) in_app: bool,
+}
+
+/// Window commands need the app's windows (not a window in a test).
+fn in_app(cx: &ShellCx) -> Availability {
+    if cx.in_app {
+        Availability::Enabled
+    } else {
+        Availability::Hidden
+    }
 }
 
 const EDGES: &[&str] = &["left", "top", "right", "bottom", "floating"];
@@ -166,7 +177,8 @@ pub(crate) static NEW_BOARD: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
         cx.asks.push(Ask::NewBoard);
         Ok(Outcome::Done)
     },
-);
+)
+.availability(in_app);
 
 /// `window.close`.
 pub(crate) static CLOSE_WINDOW: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
@@ -182,7 +194,8 @@ pub(crate) static CLOSE_WINDOW: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
         cx.asks.push(Ask::CloseWindow);
         Ok(Outcome::Done)
     },
-);
+)
+.availability(in_app);
 
 /// The shell's shortcuts (the board has its own keymap).
 pub(crate) fn shell_keymap(

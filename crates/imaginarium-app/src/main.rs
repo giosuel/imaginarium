@@ -81,18 +81,8 @@ fn main() -> anyhow::Result<()> {
             window = window.close_after(frames);
         }
         (window.options(), Box::new(window))
-    } else if flag("--new") || !app.shows_start_window() {
-        let mut window = app.new_board()?;
-        if let Some(frames) = frames {
-            window = window.close_after(frames);
-        }
-        (window.options(), Box::new(window))
     } else {
-        let mut window = app.start_window();
-        if let Some(frames) = frames {
-            window = window.close_after(frames);
-        }
-        (window.options(), Box::new(window))
+        app.first_window(flag("--new"), frames)?
     };
     let setup = started.elapsed();
     let stats = imaginarium_ui::run_with_gpu(gpu, options, view).context("running the app")?;
