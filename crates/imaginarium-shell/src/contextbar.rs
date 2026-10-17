@@ -9,7 +9,8 @@
 
 use accesskit::Role;
 use imaginarium_canvas::BoardCanvas;
-use imaginarium_canvas::style::{PALETTE, parse_color, shape_style, shown, text_look};
+use imaginarium_canvas::commands_style::{StyleTarget, first_target};
+use imaginarium_canvas::style::{PALETTE, parse_color, shape_style, shown};
 use imaginarium_commands::{ArgValue, Args, Availability, Keymap, Registry};
 use imaginarium_model::{NodeId, Value};
 use imaginarium_render::kurbo::{Point, Rect, Size};
@@ -126,27 +127,39 @@ pub(crate) fn state(board: &BoardCanvas, commands: &Registry<BoardCanvas>) -> Op
         }
     }
     controls.extend([Control::Ai, Control::More]);
+    // Each control shows the first node it applies to (a text box first
+    // and a card second: the fill is the card's).
     let view = board.document().view();
     let kind = theme().kind();
-    let first = selection[0];
-    let look = shape_style(view, first, kind);
-    let text = text_look(view, first, kind, theme().color(Token::Text), 16.0, 400.0);
-    let stored = |prop: &str| {
-        view.style_prop(first, prop)
+    let target = |which| first_target(board, which);
+    let look = |which| target(which).map(|node| (node, shape_style(view, node, kind)));
+    let stored = |node: Option<NodeId>, prop: &str| {
+        node.and_then(|node| view.style_prop(node, prop))
             .and_then(Value::as_str)
             .map(str::to_ascii_lowercase)
     };
+    let fill = look(StyleTarget::Fill);
+    let stroke = look(StyleTarget::Stroke);
+    let radius = look(StyleTarget::Radius);
+    let text_node = target(StyleTarget::Text);
+    let stored_text = stored(text_node, "color");
+    // The text's color from its style, not its runs: cheap per frame.
+    let text = stored_text
+        .as_deref()
+        .and_then(parse_color)
+        .map(|color| shown(color, kind))
+        .or_else(|| Some(theme().color(Token::Text)));
     Some(BarState {
         selection,
         controls,
-        fill: look.fill,
-        stroke: look.stroke,
-        width: look.stroke_width,
-        radius: look.radius,
-        text: Some(text.color),
-        stored_fill: stored("fill"),
-        stored_stroke: stored("stroke"),
-        stored_text: stored("color"),
+        fill: fill.as_ref().and_then(|(_, look)| look.fill),
+        stroke: stroke.as_ref().and_then(|(_, look)| look.stroke),
+        width: stroke.as_ref().map_or(1.5, |(_, look)| look.stroke_width),
+        radius: radius.as_ref().map_or(0.0, |(_, look)| look.radius),
+        text,
+        stored_fill: stored(fill.map(|(node, _)| node), "fill"),
+        stored_stroke: stored(stroke.map(|(node, _)| node), "stroke"),
+        stored_text,
         disabled,
     })
 }
@@ -163,8 +176,6 @@ pub(crate) struct ContextBar {
     pub(crate) placed: Option<Point>,
     /// Rebuilt since it was placed: place it again, even at the same spot.
     stale: bool,
-    /// It sits below the selection (no room above): popovers go below it.
-    pub(crate) below: bool,
 }
 
 impl ContextBar {
@@ -192,7 +203,6 @@ impl ContextBar {
             children: Vec::new(),
             placed: None,
             stale: true,
-            below: false,
         }
     }
 
@@ -290,15 +300,21 @@ impl ContextBar {
             const BELOW: f64 = 16.0;
             const TOP: f64 = 16.0 + 44.0 + 8.0;
             let above = selection.y0 - ABOVE - bar.height;
-            let below = above < TOP;
-            let y = if below { selection.y1 + BELOW } else { above };
+            let y = if above < TOP {
+                selection.y1 + BELOW
+            } else {
+                above
+            };
             let x = selection.center().x - bar.width / 2.0;
-            let x = x.clamp(16.0, (size.width - 16.0 - bar.width).max(16.0));
-            let y = y.clamp(
-                TOP.min(size.height),
-                (size.height - 16.0 - 44.0 - 8.0 - bar.height).max(0.0),
-            );
-            (Point::new(x.round(), y.round()), below)
+            // Inside the window, between the top panels and the bottom
+            // ones as far as there is room (a short window: as high as
+            // it must be, never a panic).
+            let x = x.min(size.width - 16.0 - bar.width).max(16.0);
+            let y = y
+                .min(size.height - 16.0 - 44.0 - 8.0 - bar.height)
+                .max(TOP.min(size.height - bar.height))
+                .max(0.0);
+            (Point::new(x.round(), y.round()), ())
         });
         let placed = spot.map(|(at, _)| at);
         if placed == self.placed && !self.stale {
@@ -306,7 +322,6 @@ impl ContextBar {
         }
         self.placed = placed;
         self.stale = false;
-        self.below = spot.is_some_and(|(_, below)| below);
         if let Some(panel) = ui.widget_mut::<Flex>(self.panel) {
             let style = panel.style_mut();
             match placed {
@@ -462,6 +477,11 @@ pub(crate) fn color_popover(
     );
     let header = ui.add_with_children(Flex::row().space_between(), &[heading, note]);
     let current_rgb = current.map(|hex| hex.get(..7).unwrap_or(hex).to_owned());
+    let alpha = current
+        .filter(|hex| hex.len() == 9)
+        .and_then(|hex| hex.get(7..))
+        .filter(|alpha| !alpha.eq_ignore_ascii_case("ff"))
+        .map(str::to_owned);
     let none =
         current.is_some_and(|hex| parse_color(hex).is_some_and(|color| color.components[3] == 0.0));
     let swatches: Vec<WidgetId> = palette_choices()
@@ -472,10 +492,17 @@ pub(crate) fn color_popover(
                 Some(_) => !none && current_rgb.as_deref() == Some(hex.as_str()),
             };
             let asks = asks.clone();
+            // A color picked keeps the opacity the node had.
+            let hex = match (color, &alpha) {
+                (Some(_), Some(alpha)) => format!("{hex}{alpha}"),
+                _ => hex,
+            };
             ui.add(
                 Swatch::new(color, name, move || {
                     let args = Args::new().with("color", ArgValue::String(hex.clone()));
-                    asks.borrow_mut().push(Ask::RunWith(command, args));
+                    let mut asks = asks.borrow_mut();
+                    asks.push(Ask::CloseMenu);
+                    asks.push(Ask::RunWith(command, args));
                 })
                 .selected(selected),
             )
@@ -502,31 +529,47 @@ pub(crate) fn color_popover(
         .on_submit({
             let asks = asks.clone();
             move |text| {
-                asks.borrow_mut()
-                    .push(Ask::BarColor(command, text.trim().to_owned()))
+                let mut asks = asks.borrow_mut();
+                asks.push(Ask::CloseMenu);
+                asks.push(Ask::BarColor(command, text.trim().to_owned()));
             }
         }),
     );
     let hex_box = ui.add_with_children(Flex::row().grow(1.0), &[hex_field]);
-    let opacity = ui.add(
-        TextInput::new(
-            "Opacity, percent",
-            "100 %",
-            TextStyle::new(13.0),
-            InputColors::themed(),
-        )
-        .on_submit({
-            let asks = asks.clone();
-            move |text| {
-                asks.borrow_mut().push(Ask::BarOpacity(
-                    command,
-                    text.trim().trim_end_matches('%').trim().to_owned(),
-                ))
-            }
-        }),
-    );
-    let opacity_box = ui.add_with_children(Flex::row().width(72.0), &[opacity]);
-    let custom = ui.add_with_children(Flex::row().gap(8.0), &[sample, hex_box, opacity_box]);
+    // The opacity of fills and outlines (a text color has none here),
+    // each node keeping its own color.
+    let opacity_command = match command {
+        "style.set_fill" => Some("style.set_fill_opacity"),
+        "style.set_stroke" => Some("style.set_stroke_opacity"),
+        _ => None,
+    };
+    let mut row = vec![sample, hex_box];
+    if let Some(opacity_command) = opacity_command {
+        let percent = current.and_then(parse_color).map_or(100.0, |color| {
+            (f64::from(color.components[3]) * 100.0).round()
+        });
+        let opacity = ui.add(
+            TextInput::new(
+                "Opacity, percent",
+                format!("{percent:.0} %"),
+                TextStyle::new(13.0),
+                InputColors::themed(),
+            )
+            .on_submit({
+                let asks = asks.clone();
+                move |text| {
+                    let mut asks = asks.borrow_mut();
+                    asks.push(Ask::CloseMenu);
+                    asks.push(Ask::BarOpacity(
+                        opacity_command,
+                        text.trim().trim_end_matches('%').trim().to_owned(),
+                    ));
+                }
+            }),
+        );
+        row.push(ui.add_with_children(Flex::row().width(72.0), &[opacity]));
+    }
+    let custom = ui.add_with_children(Flex::row().gap(8.0), &row);
     ui.add_with_children(
         Flex::column()
             .width(234.0)
@@ -555,10 +598,11 @@ pub(crate) fn value_popover(
     let rows: Vec<WidgetId> = values
         .iter()
         .map(|&(value, name)| {
+            let checked = (value - current).abs() < 1e-6;
             let check = ui.add(Icon::named(
                 "check",
                 16.0,
-                if (value - current).abs() < 1e-6 {
+                if checked {
                     Token::AccentInk
                 } else {
                     Token::PanelBg
@@ -583,12 +627,14 @@ pub(crate) fn value_popover(
                 .gap(10.0)
                 .start()
                 .radius(7.0)
-                .keep_focus(),
+                .keep_focus()
+                .role(Role::MenuItem)
+                .selected(move || checked),
                 &[check, text],
             )
         })
         .collect();
-    ui.add_with_children(
+    let panel = ui.add_with_children(
         Flex::column()
             .padding(6.0, 6.0)
             .gap(1.0)
@@ -598,7 +644,8 @@ pub(crate) fn value_popover(
             .shadow()
             .role(Role::Menu, title),
         &rows,
-    )
+    );
+    crate::menu::with_keys(ui, panel, asks)
 }
 
 /// Outline widths, in points.
@@ -623,17 +670,6 @@ pub(crate) const RADII: [(f64, &str); 7] = [
     (1.0e6, "Round ends"),
 ];
 
-/// The stored color with its alpha at `percent` (0 to 100).
-pub(crate) fn with_opacity(stored: &str, percent: f64) -> Option<String> {
-    let color = parse_color(stored)?;
-    let rgba = color.to_rgba8();
-    let alpha = (percent.clamp(0.0, 100.0) / 100.0 * 255.0).round() as u8;
-    Some(format!(
-        "#{:02x}{:02x}{:02x}{alpha:02x}",
-        rgba.r, rgba.g, rgba.b
-    ))
-}
-
 /// A typed hex color as the commands take it (`#rrggbb[aa]`), or `None`.
 pub(crate) fn typed_color(text: &str) -> Option<String> {
     let hex = text.trim().trim_start_matches('#');
@@ -651,7 +687,5 @@ mod tests {
         assert_eq!(typed_color("#e0e7ff80"), Some("#e0e7ff80".into()));
         assert_eq!(typed_color("#e0e7f"), None);
         assert_eq!(typed_color("zzzzzz"), None);
-        assert_eq!(with_opacity("#e0e7ff", 50.0), Some("#e0e7ff80".into()));
-        assert_eq!(with_opacity("#e0e7ffff", 0.0), Some("#e0e7ff00".into()));
     }
 }

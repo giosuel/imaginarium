@@ -34,7 +34,7 @@ pub(crate) const SELECTION: &[&[&str]] = &[
 
 /// The context menu of the empty board.
 pub(crate) const BOARD: &[&[&str]] = &[
-    &["board.paste", "board.select_all"],
+    &["board.paste", "board.select_all", "board.unlock"],
     &["view.zoom_to_fit", "view.zoom_100"],
     &["edit.undo", "edit.redo"],
 ];
@@ -166,6 +166,11 @@ pub(crate) fn menu(ui: &mut Ui, label: &str, groups: Vec<Vec<Entry>>, asks: &Ask
             .role(Role::Menu, label),
         &children,
     );
+    with_keys(ui, panel, asks)
+}
+
+/// `panel` (a menu) with ↑↓ moving through its rows.
+pub(crate) fn with_keys(ui: &mut Ui, panel: WidgetId, asks: &Asks) -> WidgetId {
     ui.add_with_children(MenuKeys { asks: asks.clone() }, &[panel])
 }
 
@@ -218,7 +223,8 @@ fn row(ui: &mut Ui, entry: Entry, asks: &Asks) -> WidgetId {
         .start()
         .radius(7.0)
         .keep_focus()
-        .role(Role::MenuItem),
+        .role(Role::MenuItem)
+        .disabled(!enabled),
         &children,
     )
 }

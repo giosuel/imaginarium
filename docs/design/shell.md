@@ -194,8 +194,17 @@ only when that changes.
   undo step over the selected nodes that take them, hidden when none
   does.
 - **Popovers.** Colors: the board's palette (in the theme's version),
-  no color, a hex field and the opacity. Widths and radii: short lists
-  with the current one checked.
+  no color, a hex field and the opacity (`style.set_fill_opacity`,
+  `set_stroke_opacity`: each node keeps its own color). A pick closes
+  the popover and keeps the node's opacity. Widths and radii: short
+  menus with the current one checked.
+- **Cost.** Its state is computed only when the document, the
+  selection, the theme or a gesture changed (`BoardCanvas::revision`);
+  each control shows the first node it applies to. A frame with 10,000
+  nodes selected takes 2.8 ms (the board's part 1.4 ms, benchmarked).
+- **Keyboard.** F6 and Shift+F6 move the keys between the board, the
+  contextual toolbar, the tool bar and the top panels; Shift+F10 or the
+  Menu key opens the context menu at the selection.
 
 ### 3.6 The inspector (`Ctrl+I`)
 
@@ -251,8 +260,11 @@ copy style and paste style; lock and delete), with shortcuts.
 it (as a click would) and lists the selection's commands: clipboard;
 order and grouping; edit text and lock; Delete in the danger color. On
 the board: paste, select all, zoom, undo. Rows that don't apply are
-left out, those that can't run are greyed; ↑↓ move, Enter runs. The
-same menu serves the toolbar's More and Arrange.
+left out, those that can't run are greyed and skipped; ↑↓ move, Enter
+runs. A right-click inside a selection's box keeps the selection; the
+board's menu offers Unlock (locked nodes don't take clicks). Only the
+right button opens it. The same menu serves the toolbar's More and
+Arrange.
 
 ### 3.9 Dialogs
 

@@ -29,8 +29,9 @@
 //!   clicked.
 //! - The contextual toolbar above the selection, built from the commands
 //!   available for it.
-//! - No inspector, context menu or start window yet (later steps of
-//!   M3.4).
+//! - The context menu (a right-click, Shift+F10, the Menu key), and F6
+//!   between the board and the panels.
+//! - No inspector or start window yet (later steps of M3.4).
 //!
 //! # Key types
 //! - [`BoardWindow`]: a board window's view.

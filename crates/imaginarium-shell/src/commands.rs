@@ -88,6 +88,54 @@ pub(crate) static OPEN_PALETTE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
     },
 );
 
+/// `view.context_menu`.
+pub(crate) static CONTEXT_MENU: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "view.context_menu",
+    CommandMeta::new(
+        "Open the context menu",
+        "Open the menu of the selection's commands (or the board's) at the selection, as a right-click there does.",
+    )
+    .category("View")
+    .synonyms(&["right click", "menu", "kontextmenü"])
+    .icon("ellipsis"),
+    |cx, _args| {
+        cx.asks.push(Ask::ContextMenu);
+        Ok(Outcome::Done)
+    },
+);
+
+/// `view.next_area`.
+pub(crate) static NEXT_AREA: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "view.next_area",
+    CommandMeta::new(
+        "Next area",
+        "Move the keyboard to the next area of the window: the board, the selection's toolbar, the tool bar, the panels.",
+    )
+    .category("View")
+    .synonyms(&["focus", "f6", "panels"])
+    .icon("chevron-right"),
+    |cx, _args| {
+        cx.asks.push(Ask::NextArea(true));
+        Ok(Outcome::Done)
+    },
+);
+
+/// `view.previous_area`.
+pub(crate) static PREVIOUS_AREA: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "view.previous_area",
+    CommandMeta::new(
+        "Previous area",
+        "Move the keyboard to the previous area of the window (the reverse of Next area).",
+    )
+    .category("View")
+    .synonyms(&["focus back", "shift f6"])
+    .icon("chevron-left"),
+    |cx, _args| {
+        cx.asks.push(Ask::NextArea(false));
+        Ok(Outcome::Done)
+    },
+);
+
 /// The shell's shortcuts (the board has its own keymap).
 pub(crate) fn shell_keymap(
     platform: imaginarium_commands::Platform,
@@ -98,6 +146,15 @@ pub(crate) fn shell_keymap(
         "Mod+K",
         imaginarium_commands::CommandId::new("palette.open"),
     );
+    let _ = keymap.bind(
+        "Shift+F10",
+        imaginarium_commands::CommandId::new("view.context_menu"),
+    );
+    let _ = keymap.bind("F6", imaginarium_commands::CommandId::new("view.next_area"));
+    let _ = keymap.bind(
+        "Shift+F6",
+        imaginarium_commands::CommandId::new("view.previous_area"),
+    );
     keymap
 }
 
@@ -106,4 +163,11 @@ pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 3] = [&OPEN_PALETTE, &DOCK_TOOLBAR, &RESET_TOOLBAR];
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 6] = [
+    &CONTEXT_MENU,
+    &NEXT_AREA,
+    &PREVIOUS_AREA,
+    &OPEN_PALETTE,
+    &DOCK_TOOLBAR,
+    &RESET_TOOLBAR,
+];

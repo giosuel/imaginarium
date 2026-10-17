@@ -929,3 +929,177 @@ fn more_and_the_context_menu_run_the_selections_commands() {
     window.click(at);
     assert!(shows(&mut window, "Copy"));
 }
+
+fn key_with(key: imaginarium_ui::Key, shift: bool) -> Input {
+    Input::Key {
+        key,
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            shift,
+            ..Modifiers::default()
+        },
+    }
+}
+
+#[test]
+fn a_short_window_with_a_selection_draws() {
+    let mut window = demo();
+    window.click(CARD);
+    for height in [179.0, 120.0, 60.0, 10.0, 1.0] {
+        window.resize(Size::new(1440.0, height));
+    }
+}
+
+#[test]
+fn opacity_keeps_each_cards_color_and_the_fill_is_the_first_filled_nodes() {
+    let mut window = demo();
+    // A text box first, then a card: the bar's fill is the card's.
+    window.click(Point::new(1200.0, 300.0));
+    window.input(Input::PointerMoved(CARD));
+    window.press(CARD, true, 1, true);
+    window.press(CARD, false, 1, true);
+    assert_eq!(window.board().selection().get_untracked().len(), 2);
+    assert_eq!(
+        window.window.bar_fill_for_tests().as_deref(),
+        Some("#e0e7ff")
+    );
+    // Add the amber card and make both fills half opaque.
+    let amber_at = Point::new(600.0, 320.0);
+    window.input(Input::PointerMoved(amber_at));
+    window.press(amber_at, true, 1, true);
+    window.press(amber_at, false, 1, true);
+    let fill = window.named("Fill");
+    let at = window.bounds(fill).center();
+    window.click(at);
+    let at = window.item_center("Opacity, percent", accesskit::Role::TextInput);
+    window.click(at);
+    type_text(&mut window, "50");
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+    let view = window.board().document().view();
+    let fills: Vec<String> = window
+        .board()
+        .selection()
+        .get_untracked()
+        .iter()
+        .filter_map(|node| view.style_prop(*node, "fill"))
+        .filter_map(imaginarium_model::Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    assert_eq!(fills.len(), 2, "{fills:?}");
+    assert!(fills.contains(&"#e0e7ff80".to_owned()), "{fills:?}");
+    assert!(
+        fills.iter().any(|fill| fill.starts_with("#fef3c7")),
+        "{fills:?}"
+    );
+}
+
+#[test]
+fn the_keyboard_reaches_the_bar_and_the_context_menu() {
+    let mut window = demo();
+    window.click(CARD);
+    // Shift+F10: the selection's menu.
+    window.input(key_with(imaginarium_ui::Key::Other("F10".into()), true));
+    assert!(shows(&mut window, "Cut"));
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    // F6: from the board to the contextual toolbar's first control.
+    window.input(key_with(imaginarium_ui::Key::Other("F6".into()), false));
+    let fill = window.named("Fill");
+    assert_eq!(window.window.ui().0.focused(), Some(fill));
+    // Shift+F6 goes back to the board.
+    window.input(key_with(imaginarium_ui::Key::Other("F6".into()), true));
+    let board = window.window.board_widget();
+    assert_eq!(window.window.ui().0.focused(), Some(board));
+}
+
+#[test]
+fn right_clicks_keep_a_selection_and_offer_unlock_on_the_board() {
+    let mut window = demo();
+    let right = |window: &mut Harness, at: Point| {
+        window.input(Input::PointerMoved(at));
+        window.input(Input::PointerButton {
+            primary: false,
+            pressed: true,
+            position: at,
+            clicks: 1,
+            modifiers: Modifiers::default(),
+        });
+        window.frame();
+    };
+    // Two cards, then a right-click on the empty space between them.
+    window.click(CARD);
+    let amber_at = Point::new(600.0, 320.0);
+    window.input(Input::PointerMoved(amber_at));
+    window.press(amber_at, true, 1, true);
+    window.press(amber_at, false, 1, true);
+    right(&mut window, Point::new(510.0, 300.0));
+    assert_eq!(window.board().selection().get_untracked().len(), 2);
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    // Locked: a right-click on it gives the board's menu, with Unlock.
+    window
+        .window
+        .execute("board.lock", &imaginarium_commands::Args::new())
+        .unwrap();
+    window.frame();
+    right(&mut window, CARD);
+    let at = window.item_center("Unlock", accesskit::Role::MenuItem);
+    window.click(at);
+    let view = window.board().document().view();
+    assert!(
+        view.walk()
+            .iter()
+            .all(|node| !view.node(*node).unwrap().locked())
+    );
+}
+
+#[test]
+fn a_new_shape_has_its_bar_in_the_same_frame() {
+    let mut window = Harness::new();
+    let args = imaginarium_commands::Args::new().with(
+        "preset",
+        imaginarium_commands::ArgValue::String("rect".into()),
+    );
+    window.window.execute("board.insert_shape", &args).unwrap();
+    window.frame();
+    assert!(shows(&mut window, "Selection"));
+}
+
+#[test]
+#[ignore = "a timing: cargo test --release -p imaginarium-shell -- --ignored --nocapture"]
+fn a_frame_with_ten_thousand_selected_stays_cheap() {
+    let mut window = Harness::with(imaginarium_canvas::demo::grid(10_000).unwrap());
+    let time = |window: &mut Harness, what: &str| {
+        for _ in 0..3 {
+            window.frame();
+        }
+        let frames = 20;
+        let started = std::time::Instant::now();
+        for _ in 0..frames {
+            window.frame();
+        }
+        eprintln!("{what}: {:?} a frame", started.elapsed() / frames);
+    };
+    time(&mut window, "nothing selected");
+    window
+        .window
+        .execute("board.select_all", &imaginarium_commands::Args::new())
+        .unwrap();
+    time(&mut window, "10,000 selected");
+    let started = std::time::Instant::now();
+    let mut fonts = Fonts::bundled_only();
+    for _ in 0..20 {
+        let mut scene = Scene::new();
+        let board = window.window.board_mut_for_tests().unwrap();
+        board.paint_into(
+            &mut fonts,
+            &mut scene,
+            Rect::new(0.0, 0.0, 1440.0, 900.0),
+            std::time::Instant::now(),
+        );
+    }
+    eprintln!(
+        "the board alone, 10,000 selected: {:?} a frame",
+        started.elapsed() / 20
+    );
+}

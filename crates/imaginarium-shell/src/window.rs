@@ -73,6 +73,20 @@ pub(crate) enum Ask {
     BarOpacity(&'static str, String),
     /// Move the focus to the next (or previous) control: ↓ and ↑ in menus.
     FocusStep(bool),
+    /// Open the context menu from the keyboard (Shift+F10, the Menu key).
+    ContextMenu,
+    /// Move the keys to the next area (F6) or the previous one (Shift+F6):
+    /// the board, the contextual toolbar, the tool bar, the panels.
+    NextArea(bool),
+}
+
+/// What the contextual toolbar's state depends on.
+#[derive(Clone, Debug, PartialEq)]
+struct BarKey {
+    revision: u64,
+    selection: Vec<imaginarium_model::NodeId>,
+    gesturing: bool,
+    theme: usize,
 }
 
 /// The queue of what the panels asked for.
@@ -127,6 +141,8 @@ pub struct BoardWindow {
     usage: UsageStats,
     palette: Option<Palette>,
     bar: ContextBar,
+    /// What the bar's state was computed for.
+    bar_key: Option<BarKey>,
     /// Holds the tool bar; laid out for where it docks.
     stage: WidgetId,
     placing: Option<Placing>,
@@ -257,6 +273,7 @@ impl BoardWindow {
             usage: UsageStats::new(),
             palette: None,
             bar,
+            bar_key: None,
             stage,
             placing: None,
             zones,
@@ -313,6 +330,18 @@ impl BoardWindow {
         self.board
     }
 
+    /// The stored fill the contextual toolbar shows.
+    #[cfg(test)]
+    pub(crate) fn bar_fill_for_tests(&self) -> Option<String> {
+        self.bar.stored_color("style.set_fill")
+    }
+
+    /// Whether the board's state was looked at in the last frame.
+    #[cfg(test)]
+    pub(crate) fn board_mut_for_tests(&mut self) -> Option<&mut BoardCanvas> {
+        self.ui.widget_mut::<BoardCanvas>(self.board)
+    }
+
     /// The board.
     pub fn board(&self) -> Option<&BoardCanvas> {
         self.ui.widget::<BoardCanvas>(self.board)
@@ -361,11 +390,30 @@ impl BoardWindow {
         }
         // The contextual toolbar follows the selection; it steps aside
         // while the pointer moves something.
-        let bar_state = self.board().and_then(|board| {
-            (!board.is_gesturing())
-                .then(|| contextbar::state(board, &self.board_commands))
-                .flatten()
+        // Its state is computed only when something it shows can have
+        // changed: the document, the selection, the theme, a gesture.
+        let fonts = &mut self.fonts;
+        if let Some(board) = self.ui.widget_mut::<BoardCanvas>(self.board) {
+            // The board's items as of now, so a new node's box is there.
+            board.update(fonts);
+        }
+        let key = self.board().map(|board| BarKey {
+            revision: board.revision(),
+            selection: board.selection().get_untracked(),
+            gesturing: board.is_gesturing(),
+            theme: std::rc::Rc::as_ptr(&theme()) as usize,
         });
+        let changed = key != self.bar_key;
+        self.bar_key = key;
+        let bar_state = if changed {
+            self.board().and_then(|board| {
+                (!board.is_gesturing())
+                    .then(|| contextbar::state(board, &self.board_commands))
+                    .flatten()
+            })
+        } else {
+            self.bar.state.clone()
+        };
         if bar_state != self.bar.state {
             let keymap = self.board().map(|board| board.keymap().clone());
             if let Some(keymap) = keymap {
@@ -550,17 +598,67 @@ impl BoardWindow {
                 }
             }
             Ask::BarOpacity(command, text) => {
-                let stored = self.bar.stored_color(command);
-                if let (Ok(percent), Some(stored)) = (text.parse::<f64>(), stored)
-                    && let Some(color) = contextbar::with_opacity(&stored, percent)
-                {
-                    let args =
-                        Args::new().with("color", imaginarium_commands::ArgValue::String(color));
+                // A percent for a color opacity command (each node keeps
+                // its own color).
+                if let Ok(percent) = text.parse::<f64>() {
+                    let args = Args::new().with(
+                        "opacity",
+                        imaginarium_commands::ArgValue::Float((percent / 100.0).clamp(0.0, 1.0)),
+                    );
                     let _ = self.execute(command, &args);
                 }
             }
+            Ask::ContextMenu => {
+                // At the selection's middle, or the board's.
+                let at = self
+                    .board()
+                    .and_then(BoardCanvas::selection_on_screen)
+                    .map_or(
+                        Point::new(self.size.width / 2.0, self.size.height / 2.0),
+                        |selection| selection.center(),
+                    );
+                self.context_menu(at);
+            }
+            Ask::NextArea(forward) => self.next_area(forward),
             Ask::FocusStep(forward) => self.ui.focus_next(&mut self.fonts, forward),
         }
+    }
+
+    /// Moves the keys to the next area, or the previous one: the board,
+    /// the contextual toolbar (when it shows), the tool bar, the
+    /// document pill, the top right.
+    fn next_area(&mut self, forward: bool) {
+        let mut areas = vec![self.board];
+        areas.extend(self.bar.buttons.first().map(|(_, button)| *button));
+        areas.extend(self.tools.buttons.first().copied());
+        areas.extend(
+            [Placeholder::MainMenu, Placeholder::Ai]
+                .iter()
+                .filter_map(|placeholder| self.chrome.anchors.get(placeholder).copied()),
+        );
+        let focused = self.ui.focused();
+        // Where the keys are now: the area that holds the focused widget.
+        let current = areas
+            .iter()
+            .position(|area| Some(*area) == focused)
+            .or_else(|| {
+                let bar = self.bar.buttons.iter().any(|(_, id)| Some(*id) == focused);
+                let tools = self.tools.buttons.iter().any(|id| Some(*id) == focused);
+                match (bar, tools) {
+                    (true, _) => Some(1),
+                    (_, true) => Some(areas.len().min(2)),
+                    _ => None,
+                }
+            })
+            .unwrap_or(0);
+        let count = areas.len();
+        let next = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        self.ui.note_keyboard();
+        self.ui.set_focus(&mut self.fonts, Some(areas[next]));
     }
 
     /// Opens the context menu at `at`: the selection's commands when the
@@ -572,9 +670,14 @@ impl BoardWindow {
         };
         let node = board.node_at(at);
         let selected = board.selection().get_untracked();
+        // Inside the selection's box the selection stays, as a click in
+        // it would keep it for a drag.
+        let inside = board
+            .selection_on_screen()
+            .is_some_and(|selection| selection.contains(at));
         match node {
             Some(node) if !selected.contains(&node) => board.select(&[node]),
-            None if !selected.is_empty() => board.select(&[]),
+            None if !selected.is_empty() && !inside => board.select(&[]),
             _ => {}
         }
         let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
@@ -1068,6 +1171,19 @@ impl View for BoardWindow {
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        // The Menu key opens the context menu, as Shift+F10 does.
+        if let Input::Key {
+            key: Key::Other(name),
+            pressed: true,
+            ..
+        } = input
+            && name == "ContextMenu"
+        {
+            self.ui.note_keyboard();
+            self.asks.borrow_mut().push(Ask::ContextMenu);
+            self.handle_asks();
+            return true;
+        }
         // The shell's own shortcuts (Ctrl+K) work wherever the keys are.
         if let Input::Key {
             key,
