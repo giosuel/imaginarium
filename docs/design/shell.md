@@ -176,12 +176,20 @@ the board's place.
   goes on from what the file holds. An untitled board that never changed
   has no file yet and is written fresh. A file at the target that another
   window or app has open is never replaced; on any failure the board
-  goes on saving where it was, and the reason shows next to its name.
+  goes on saving where it was (an untitled one stays kept for recovery),
+  and the reason shows next to its name. While the file moves the pill
+  says Saving…; a window closed meanwhile hands what the board has
+  beyond its old file to a thread the app waits for, which writes it
+  wherever the board ended up. A name typed without `.imag` gets it,
+  unless a file of that name is there already (the dialog asked about
+  replacing the other name): then it says so.
   The name in the pill and the window's title follow
   (`WindowRequest::SetTitle`). Saving an already saved board is
   disabled ("every change is already saved on its own").
 - **Save a copy…** (`Ctrl+Shift+S`): a new document (an id of its own)
-  from the board as it is; the window goes on where it was.
+  from the board as it is; the window goes on where it was. Not for a
+  board this version can't write (a newer format, unknown records): the
+  copy would drop what it doesn't know.
 - **The main menu** (the pill's app button): New board, Open…; Save…,
   Rename or move…, Save a copy…; Settings; Close window, as rows of the
   ContextMenu mockup's menu (its own contents had no mockup).
