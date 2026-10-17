@@ -118,6 +118,9 @@ const DOT_PITCH: f64 = 24.0;
 /// A frame's name sits this far above it, in logical pixels.
 const NAME_GAP: f64 = 8.0;
 
+/// The selection's box for an items version and a selection.
+type SelectionBoxCache = (u64, Vec<NodeId>, Option<SelectionBox>);
+
 /// What the board window's controls show ([`BoardCanvas::status`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoardStatus {
@@ -186,6 +189,11 @@ pub struct BoardCanvas {
     /// Counts the document's changes, for panels that read it to know
     /// when to look again.
     revision: u64,
+    /// Counts the items' updates (changes applied, a rebuild).
+    items_version: u64,
+    /// The selection's box for an items version and a selection: a big
+    /// selection's union is costly, and paint and panels ask each frame.
+    selection_box_cache: std::cell::RefCell<Option<SelectionBoxCache>>,
     /// What the clipboard should do at the next hand-over.
     clipboard_work: clip::ClipboardWork,
     /// The last copy pasted (or copied) here, and how often it was pasted.
@@ -227,6 +235,8 @@ impl BoardCanvas {
             tool: signal(Tool::Select),
             status: signal(BoardStatus::default()),
             revision: 0,
+            items_version: 0,
+            selection_box_cache: std::cell::RefCell::new(None),
             clipboard_work: clip::ClipboardWork::default(),
             pastes: None,
             name_rects: Vec::new(),
@@ -367,6 +377,19 @@ impl BoardCanvas {
     /// The box around the selection: a single node's own (turned) box, or
     /// the straight box around several.
     fn selection_box(&self) -> Option<SelectionBox> {
+        let selection = self.selection.get_untracked();
+        if let Some((version, cached, found)) = &*self.selection_box_cache.borrow()
+            && *version == self.items_version
+            && *cached == selection
+        {
+            return *found;
+        }
+        let found = self.measure_selection_box();
+        *self.selection_box_cache.borrow_mut() = Some((self.items_version, selection, found));
+        found
+    }
+
+    fn measure_selection_box(&self) -> Option<SelectionBox> {
         let items = self.items.as_ref()?;
         let view = self.document.view();
         let selection = self.selection.get_untracked();
@@ -636,9 +659,15 @@ impl BoardCanvas {
     /// line's two ends, fewer on small boxes so they stay movable.
     fn shown_handles(&self, selection: &SelectionBox) -> Vec<(Handle, Point)> {
         let radius = self.selected_radius().map(|(_, radius)| radius);
-        let line = match self.starts()[..] {
-            [ref start] if self.selection.with_untracked(Vec::len) == 1 => start.flip,
-            _ => None,
+        // Only one selected line has end handles: don't gather every
+        // selected node's start (a select-all would, each paint).
+        let line = if self.selection.with_untracked(Vec::len) == 1 {
+            match self.starts()[..] {
+                [ref start] => start.flip,
+                _ => None,
+            }
+        } else {
+            None
         };
         gesture::handles_shown(selection, self.camera(self.bounds), radius, line)
     }
@@ -872,6 +901,7 @@ impl BoardCanvas {
             return;
         };
         // All at once: each set names what changed, the view is after all.
+        self.items_version += 1;
         let changes = crate::items::merge(std::mem::take(&mut self.pending));
         let update = items.apply(self.document.view(), &changes, fonts, &colors);
         for id in &update.removed {
@@ -1006,6 +1036,7 @@ impl BoardCanvas {
         self.names.clear();
         // A build reads the whole view, pending changes included.
         self.pending.clear();
+        self.items_version += 1;
         self.items = Some(items);
         self.theme = Some(current);
     }
@@ -1102,7 +1133,19 @@ impl BoardCanvas {
         {
             scene.stroke_with(&outline, &Stroke::new(1.5), color.with_alpha(0.6));
         }
+        // Only the outlines on screen: a select-all on a big board would
+        // otherwise stroke every node each frame.
+        let camera = self.camera(bounds);
+        let visible = bounds.inflate(4.0, 4.0);
         for node in &selection {
+            let on_screen = self
+                .items
+                .as_ref()
+                .and_then(|items| items.by_node.get(node))
+                .is_none_or(|item| camera.transform_rect_bbox(item.bounds).overlaps(visible));
+            if !on_screen {
+                continue;
+            }
             if let Some(outline) = self.node_outline(*node, bounds) {
                 scene.stroke_with(&outline, &Stroke::new(1.5), color);
             }

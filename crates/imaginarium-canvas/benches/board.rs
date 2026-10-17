@@ -116,6 +116,18 @@ fn edit(c: &mut Criterion) {
     // A click's hit test, over shapes and between them.
     let (board, _) = ready(&mut fonts);
     let mut at = 0.0;
+    // A frame with all 10,000 nodes selected (a select-all on a big
+    // board): only the outlines on screen are drawn, and the selection's
+    // box is measured once.
+    {
+        let (mut all, _) = ready(&mut fonts);
+        let nodes = all.document().view().walk();
+        all.select(&nodes);
+        frame(&mut all, &mut fonts);
+        group.bench_function("frame_10k_selected", |b| {
+            b.iter(|| frame(&mut all, &mut fonts))
+        });
+    }
     group.bench_function("hit_10k", |b| {
         b.iter(|| {
             at = (at + 7.0) % 800.0;
