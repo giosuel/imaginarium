@@ -21,9 +21,9 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
-    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Swatch, SwatchShape,
-    Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, VirtualList, WidgetId,
-    WindowOptions, animation, set_theme, theme,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Slider, Swatch,
+    SwatchShape, Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, VirtualList,
+    WidgetId, WindowOptions, animation, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -519,6 +519,22 @@ fn main() -> Result<(), UiError> {
         &swatches,
     );
 
+    // A slider: drag or ←→; the value goes on at the release.
+    let level = imaginarium_reactive::signal(0.6_f64);
+    let slider = Slider::new(
+        "Opacity",
+        0.0,
+        1.0,
+        move || level.get(),
+        move |value| level.set(value),
+    )
+    .add_to(&mut ui);
+    let level_text = imaginarium_ui::label(&mut ui, body(), Token::Text, move || {
+        format!("{:.0} %", level.get() * 100.0)
+    });
+    let slider = ui.add_with_children(Flex::row().width(260.0).gap(12.0), &[slider, level_text]);
+    let sliders = section(&mut ui, "Slider · drag the knob or press ←→", &[slider]);
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -673,6 +689,7 @@ fn main() -> Result<(), UiError> {
             boxes,
             palette_bits,
             swatches,
+            sliders,
             inputs,
             text,
             layers,
