@@ -185,19 +185,14 @@ impl App {
     /// change.
     pub fn keep_recent_in(&self, file: std::path::PathBuf) {
         let writer = imaginarium_settings::FileWriter::new(file.clone());
-        crate::recent::load(
-            file,
-            self.recent.clone(),
-            (*imaginarium_ui::theme()).clone(),
-            writer.sink(),
-        );
+        crate::recent::load(file, self.recent.clone(), writer.sink());
         *self.recent_writer.borrow_mut() = Some(writer);
     }
 
     /// The board at `path` was opened or saved: it goes first among the
-    /// recent boards, and its picture is read again on a thread.
+    /// recent boards.
     pub(crate) fn remember(&self, path: &std::path::Path) {
-        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+        let path = crate::recent::normalize(path);
         self.change_recent(|boards| {
             let preview = boards
                 .iter()
@@ -213,16 +208,31 @@ impl App {
             );
             boards.truncate(crate::recent::MAX);
         });
-        let shared = self.recent.clone();
-        let theme = (*imaginarium_ui::theme()).clone();
-        let _ = std::thread::Builder::new()
-            .name("recent-picture".into())
-            .spawn(move || crate::recent::picture(&shared, &path, &theme));
     }
 
     /// The board at `path` left the recent boards (its file is gone).
     pub(crate) fn forget(&self, path: &std::path::Path) {
+        let path = crate::recent::normalize(path);
         self.change_recent(|boards| boards.retain(|board| board.path != path));
+    }
+
+    /// A closing board's picture, fresh (the start window that may open
+    /// next shows it).
+    pub(crate) fn picture_of(
+        &self,
+        path: &std::path::Path,
+        view: &imaginarium_model::DocumentView,
+    ) {
+        let preview = crate::recent::Preview::of(view);
+        let path = crate::recent::normalize(path);
+        if let Ok(mut state) = self.recent.lock() {
+            state.set_picture(&path, preview);
+        }
+    }
+
+    /// Reads the pictures of `paths` (the tiles shown) on a worker.
+    pub(crate) fn want_pictures(&self, paths: &[std::path::PathBuf]) {
+        crate::recent::want_pictures(&self.recent, paths);
     }
 
     /// A board moved from `from` (if it had a place) to `to`.
@@ -234,18 +244,20 @@ impl App {
     }
 
     fn change_recent(&self, change: impl FnOnce(&mut Vec<crate::recent::RecentBoard>)) {
+        // The text and whether the file was read, under one lock: written
+        // only once it was (else the reading thread merges this change and
+        // writes it), so a stale list never follows the merged one.
         let text = {
             let Ok(mut state) = self.recent.lock() else {
                 return;
             };
             change(&mut state.boards);
             state.changed();
-            crate::recent::to_text(&state.boards)
+            state.loaded.then(|| crate::recent::to_text(&state.boards))
         };
-        // Written only once the file was read: else the boards in it would
-        // be lost.
-        let loaded = self.recent.lock().is_ok_and(|state| state.loaded);
-        if loaded && let Some(writer) = self.recent_writer.borrow().as_ref() {
+        if let Some(text) = text
+            && let Some(writer) = self.recent_writer.borrow().as_ref()
+        {
             let mut sink = writer.sink();
             sink(text);
         }
@@ -267,9 +279,17 @@ impl App {
 
     /// Wakes the caller's window (from `imaginarium_ui::window_waker`)
     /// when the recent boards change.
-    pub(crate) fn when_recent_changes(&self, wake: Box<dyn Fn() + Send>) {
+    pub(crate) fn when_recent_changes(&self, wake: Box<dyn Fn() + Send>) -> Option<u64> {
+        self.recent
+            .lock()
+            .ok()
+            .map(|mut state| state.add_waker(wake))
+    }
+
+    /// The window that asked for waker `id` closed.
+    pub(crate) fn recent_waker_gone(&self, id: u64) {
         if let Ok(mut state) = self.recent.lock() {
-            state.wakers.push(wake);
+            state.remove_waker(id);
         }
     }
 
@@ -1550,9 +1570,12 @@ mod tests {
         app.wait_for_saves();
         frame(&mut start);
         let labels = start_labels(&mut start);
-        let at = |label: &str| labels.iter().position(|seen| seen == label);
-        // Newest first, then Open another board….
-        let (road_at, plan_at) = (at("Open Roadmap").unwrap(), at("Open Launch plan").unwrap());
+        let at = |label: &str| labels.iter().position(|seen| seen.starts_with(label));
+        // Newest first, then Open another board…; named with their folder.
+        let (road_at, plan_at) = (
+            at("Open Roadmap, in ").unwrap(),
+            at("Open Launch plan, in ").unwrap(),
+        );
         assert!(road_at < plan_at, "{labels:?}");
         assert!(at("Open another board…").unwrap() > plan_at);
         assert!(start_has(&mut start, "Filter recent boards"));
@@ -1590,10 +1613,14 @@ mod tests {
             });
         }
         frame(&mut start);
-        assert!(start_has(&mut start, "Open Roadmap"));
-        assert!(!start_has(&mut start, "Open Launch plan"));
+        assert!(start_has_prefix(&mut start, "Open Roadmap, in "));
+        assert!(!start_has_prefix(&mut start, "Open Launch plan, in "));
         // A click opens it, and the start window closes.
-        click_label(&mut start, "Open Roadmap");
+        let roadmap = start_labels(&mut start)
+            .into_iter()
+            .find(|label| label.starts_with("Open Roadmap, in "))
+            .unwrap();
+        click_label(&mut start, &roadmap);
         let mut requests = Vec::new();
         until(|| {
             frame(&mut start);
@@ -1620,9 +1647,12 @@ mod tests {
         drop(app.open_board(&gone).unwrap());
         drop(app.open_board(&plan).unwrap());
         app.wait_for_saves();
-        until(|| std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 2));
+        let both = || std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 2);
+        until(both);
+        assert!(both());
         std::fs::remove_file(&gone).unwrap();
-        // The next start reads it; a board whose file is gone leaves it.
+        // The next start reads it, the board that is gone too (its drive
+        // may be away) …
         let next = super::tests::app();
         next.keep_recent_in(list.clone());
         until(|| next.recent_loaded());
@@ -1632,9 +1662,105 @@ mod tests {
             .into_iter()
             .map(|board| board.path)
             .collect();
-        assert_eq!(paths, [plan]);
-        until(|| std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 1));
-        assert_eq!(std::fs::read_to_string(&list).unwrap().lines().count(), 1);
+        assert_eq!(
+            paths,
+            [
+                crate::recent::normalize(&plan),
+                crate::recent::normalize(&gone)
+            ]
+        );
+        // … until a click finds it gone.
+        let mut start = next.start_window();
+        frame(&mut start);
+        let label = start_labels(&mut start)
+            .into_iter()
+            .find(|label| label.starts_with("Open Gone, in "))
+            .unwrap();
+        click_label(&mut start, &label);
+        until(|| {
+            frame(&mut start);
+            next.recent_boards().1.len() == 1
+        });
+        assert_eq!(next.recent_boards().1.len(), 1);
+        let one = || std::fs::read_to_string(&list).is_ok_and(|text| text.lines().count() == 1);
+        until(one);
+        assert!(one());
+    }
+
+    #[test]
+    fn a_picture_that_arrives_leaves_the_keys_on_their_tile() {
+        let dir = scratch("recent-focus");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 1);
+        let app = app();
+        drop(app.open_board(&path).unwrap());
+        app.wait_for_saves();
+        let mut start = app.start_window();
+        frame(&mut start);
+        let focused = |start: &mut StartWindow| {
+            let (ui, fonts) = start.ui();
+            let focused = ui.focused()?;
+            let mut tree = imaginarium_ui::AccessTree::default();
+            ui.access(fonts, &mut tree);
+            tree.nodes()
+                .iter()
+                .find(|(id, _)| *id == accesskit::NodeId(focused.access_base()))
+                .and_then(|(_, node)| node.label().map(str::to_owned))
+        };
+        for _ in 0..12 {
+            if focused(&mut start).is_some_and(|label| label.starts_with("Open Plan, in ")) {
+                break;
+            }
+            start.input(&Input::Key {
+                key: Key::Tab,
+                text: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            });
+            frame(&mut start);
+        }
+        assert!(focused(&mut start).is_some_and(|label| label.starts_with("Open Plan, in ")));
+        let document =
+            imaginarium_io_native::open_path(&path, imaginarium_io_native::Credentials::None)
+                .unwrap()
+                .document;
+        app.picture_of(&path, document.view());
+        frame(&mut start);
+        assert!(focused(&mut start).is_some_and(|label| label.starts_with("Open Plan, in ")));
+    }
+
+    #[test]
+    fn a_list_that_cant_be_read_is_never_overwritten() {
+        let dir = scratch("recent-unreadable");
+        let list = dir.join("recent.txt");
+        // Not UTF-8: unreadable as text.
+        std::fs::write(&list, b"100\t/a/\xff.imag\n").unwrap();
+        let plan = dir.join("Plan.imag");
+        board_file(&plan, 1);
+        let app = app();
+        app.keep_recent_in(list.clone());
+        drop(app.open_board(&plan).unwrap());
+        app.wait_for_saves();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(app);
+        assert_eq!(std::fs::read(&list).unwrap(), b"100\t/a/\xff.imag\n");
+    }
+
+    #[test]
+    fn a_closing_board_leaves_its_picture_as_it_is() {
+        let dir = scratch("recent-picture");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 0);
+        let app = app();
+        let mut board = app.open_board(&path).unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        assert!(board.close_requested());
+        let preview = app.recent_boards().1[0].preview.clone();
+        assert!(preview.is_some_and(|preview| !preview.is_empty()));
     }
 
     #[test]
@@ -1658,7 +1784,7 @@ mod tests {
             .into_iter()
             .map(|board| board.path)
             .collect();
-        assert_eq!(paths, [to]);
+        assert_eq!(paths, [crate::recent::normalize(&to)]);
     }
 
     #[test]

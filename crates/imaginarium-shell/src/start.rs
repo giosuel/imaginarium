@@ -33,6 +33,10 @@ use taffy::prelude::length;
 use crate::app::{App, SHOW_START_WINDOW};
 use crate::toolbar::shortcut;
 
+/// What the recent tiles were built for: the boards shown and their
+/// times, the filter, and whether there were none.
+type ShownKey = (Vec<(std::path::PathBuf, u64)>, String, bool);
+
 /// What the start window's controls asked for.
 #[derive(Clone, Debug, PartialEq)]
 enum StartAsk {
@@ -79,8 +83,15 @@ pub struct StartWindow {
     filter: String,
     /// The recent boards' change number the list was built for.
     recent_seen: Option<u64>,
-    /// It asked to be woken when the recent boards change.
-    waiting_for_recent: bool,
+    /// The waker it gave for changes of the recent boards.
+    recent_waker: Option<u64>,
+    /// What the tiles were built for (the boards shown, their times, the
+    /// filter): pictures alone are put in place, not rebuilt.
+    shown_key: Option<ShownKey>,
+    /// The tiles' pictures, by board.
+    pictures: Vec<(std::path::PathBuf, WidgetId)>,
+    /// A recent board found gone by its opening thread, to forget.
+    gone: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// The crash notice, while it shows.
     notice: Option<WidgetId>,
     /// It asked to be woken when the search for kept boards is done.
@@ -153,7 +164,10 @@ impl StartWindow {
             hint: None,
             filter: String::new(),
             recent_seen: None,
-            waiting_for_recent: false,
+            recent_waker: None,
+            shown_key: None,
+            pictures: Vec::new(),
+            gone: Arc::default(),
             notice: None,
             waiting_for_kept: false,
             opening: None,
@@ -210,33 +224,18 @@ impl StartWindow {
     /// Builds the recent boards' tiles again when they or the filter
     /// changed.
     fn sync_recent(&mut self, force: bool) {
-        if !self.waiting_for_recent
+        if self.recent_waker.is_none()
             && let Some(wake) = imaginarium_ui::window_waker()
         {
-            self.app.when_recent_changes(Box::new(wake));
-            self.waiting_for_recent = true;
+            self.recent_waker = self.app.when_recent_changes(Box::new(wake));
         }
         let (generation, boards) = self.app.recent_boards();
         if !force && self.recent_seen == Some(generation) {
             return;
         }
         self.recent_seen = Some(generation);
-        for widget in std::mem::take(&mut self.list) {
-            self.ui.remove(widget);
-        }
-        if let Some(hint) = self.hint.take() {
-            self.ui.remove(hint);
-        }
-        // The filter only once there is something to filter.
-        let header: Vec<WidgetId> = if boards.is_empty() {
-            vec![self.title]
-        } else {
-            vec![self.title, self.filter_field]
-        };
-        self.ui.set_children(self.header, &header);
         let query = self.filter.trim().to_lowercase();
         let home = home_folder();
-        let now = crate::recent::now_ms();
         let shown: Vec<_> = boards
             .iter()
             .map(|board| {
@@ -251,22 +250,64 @@ impl StartWindow {
             })
             .take(RECENT_SHOWN)
             .collect();
+        // The pictures of the boards shown, read on a worker.
+        let paths: Vec<std::path::PathBuf> = shown
+            .iter()
+            .map(|(board, _, _)| board.path.clone())
+            .collect();
+        self.app.want_pictures(&paths);
+        let key = (
+            shown
+                .iter()
+                .map(|(board, _, _)| (board.path.clone(), board.at_ms))
+                .collect::<Vec<_>>(),
+            query.clone(),
+            boards.is_empty(),
+        );
+        // Only pictures came: they go in place, so the keys, the pointer
+        // and a click in progress stay where they are.
+        if !force && self.shown_key.as_ref() == Some(&key) {
+            for (path, widget) in &self.pictures {
+                let preview = shown
+                    .iter()
+                    .find(|(board, _, _)| &board.path == path)
+                    .and_then(|(board, _, _)| board.preview.clone());
+                if let Some(tile) = self.ui.widget_mut::<crate::recent::PreviewTile>(*widget)
+                    && tile.preview.as_ref().map(Arc::as_ptr) != preview.as_ref().map(Arc::as_ptr)
+                {
+                    tile.preview = preview;
+                    self.ui.refresh(*widget);
+                }
+            }
+            return;
+        }
+        self.shown_key = Some(key);
+        self.pictures.clear();
+        for widget in std::mem::take(&mut self.list) {
+            self.ui.remove(widget);
+        }
+        if let Some(hint) = self.hint.take() {
+            self.ui.remove(hint);
+        }
+        // The filter only once there is something to filter.
+        let header: Vec<WidgetId> = if boards.is_empty() {
+            vec![self.title]
+        } else {
+            vec![self.title, self.filter_field]
+        };
+        self.ui.set_children(self.header, &header);
+        let now = crate::recent::now_ms();
         self.list = if boards.is_empty() {
             vec![empty_tile(&mut self.ui, "The boards you open show here.")]
         } else {
-            let mut tiles: Vec<WidgetId> = shown
-                .iter()
-                .map(|(board, name, folder)| {
-                    let when = crate::recent::when_text(board.at_ms, now);
-                    recent_tile(
-                        &mut self.ui,
-                        board,
-                        name,
-                        &format!("{folder} · {when}"),
-                        &self.asks,
-                    )
-                })
-                .collect();
+            let mut tiles = Vec::new();
+            for (board, name, folder) in &shown {
+                let when = crate::recent::when_text(board.at_ms, now);
+                let (tile, picture) =
+                    recent_tile(&mut self.ui, board, name, folder, &when, &self.asks);
+                tiles.push(tile);
+                self.pictures.push((board.path.clone(), picture));
+            }
             if shown.is_empty() {
                 let text = format!(
                     "No recent board matches \u{201c}{}\u{201d}.",
@@ -297,12 +338,19 @@ impl StartWindow {
         if self.closing || self.opening.is_some() {
             return;
         }
-        if !path.exists() {
-            self.app.forget(&path);
-        }
+        // Looked at on the thread (a network drive may be slow): a board
+        // that is gone is forgotten when the answer comes.
+        let gone = self.gone.clone();
         self.opening = Some(crate::files::Pending::spawn(
             "open-board",
-            move || Some(crate::files::open_file(path)),
+            move || {
+                if !path.exists()
+                    && let Ok(mut gone) = gone.lock()
+                {
+                    *gone = Some(path.clone());
+                }
+                Some(crate::files::open_file(path))
+            },
             || Some(Err("no thread to open with".into())),
         ));
     }
@@ -328,6 +376,9 @@ impl StartWindow {
             return;
         };
         self.opening = None;
+        if let Some(gone) = self.gone.lock().ok().and_then(|mut gone| gone.take()) {
+            self.app.forget(&gone);
+        }
         if let Some((error, _)) = self.error.take() {
             self.ui.remove(error);
         }
@@ -755,13 +806,16 @@ fn empty_tile(ui: &mut Ui, text: &str) -> WidgetId {
 }
 
 /// A recent board: its picture, its name, its folder and when.
+/// Returns the tile and its picture.
 fn recent_tile(
     ui: &mut Ui,
     board: &crate::recent::RecentBoard,
     name: &str,
-    detail: &str,
+    folder: &str,
+    when: &str,
     asks: &StartAsks,
-) -> WidgetId {
+) -> (WidgetId, WidgetId) {
+    let detail = format!("{folder} · {when}");
     let picture = ui.add(crate::recent::PreviewTile {
         preview: board.preview.clone(),
     });
@@ -788,13 +842,19 @@ fn recent_tile(
     );
     let asks = asks.clone();
     let path = board.path.clone();
-    ButtonBox::new(format!("Open {name}"), tile_colors(), move || {
-        asks.borrow_mut().push(StartAsk::OpenRecent(path.clone()));
-    })
+    // Named with its folder: two boards may share a name.
+    let tile = ButtonBox::new(
+        format!("Open {name}, in {folder}"),
+        tile_colors(),
+        move || {
+            asks.borrow_mut().push(StartAsk::OpenRecent(path.clone()));
+        },
+    )
     .padding(0.0, 0.0)
     .radius(10.0)
     .role(Role::Link)
-    .add_to(ui, &[content])
+    .add_to(ui, &[content]);
+    (tile, picture)
 }
 
 /// The dashed tile after the recent boards: Open another board….
@@ -945,6 +1005,9 @@ impl View for StartWindow {
 
 impl Drop for StartWindow {
     fn drop(&mut self) {
+        if let Some(waker) = self.recent_waker {
+            self.app.recent_waker_gone(waker);
+        }
         if let Ok(mut settings) = self.app.settings().try_borrow_mut() {
             settings.unsubscribe(self.subscription);
         }

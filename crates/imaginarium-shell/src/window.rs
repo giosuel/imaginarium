@@ -1694,6 +1694,10 @@ impl BoardWindow {
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
+        // The start window that may open next shows its picture as it is.
+        if let (Some(app), Some(path), Some(board)) = (&self.app, self.path(), self.board()) {
+            app.picture_of(path, board.document().view());
+        }
         // Nothing waits for another frame now.
         self.finish_saving(true);
         // It stops counting at once: several boards closing in one go
