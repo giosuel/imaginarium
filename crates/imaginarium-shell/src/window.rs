@@ -189,6 +189,8 @@ pub struct BoardWindow {
     frames: u64,
     /// The app it is a window of, if any (not in tests).
     app: Option<Rc<App>>,
+    /// What Settings sees of this board ("This board").
+    link: Rc<crate::app::BoardLink>,
     /// Windows to open, or this one to close.
     requests: Vec<WindowRequest>,
     /// It asked to close, or was asked to.
@@ -340,6 +342,7 @@ impl BoardWindow {
             close_after: None,
             frames: 0,
             app: None,
+            link: Rc::default(),
             requests: Vec::new(),
             closed: false,
         };
@@ -354,6 +357,7 @@ impl BoardWindow {
     /// and closing the last board opens the start window.
     pub fn in_app(mut self, app: Rc<App>) -> Self {
         app.board_opened();
+        app.board_active(&self.link);
         if let Some(old) = self.app.replace(app) {
             old.board_closed();
         }
@@ -443,9 +447,43 @@ impl BoardWindow {
         Ok(outcome)
     }
 
+    /// Does what Settings asked of this board, and tells it the board's own
+    /// values when they changed.
+    fn sync_link(&mut self) {
+        let asks = std::mem::take(&mut *self.link.asks.borrow_mut());
+        for (key, value) in asks {
+            let mut args =
+                Args::new().with("key", imaginarium_commands::ArgValue::String(key.into()));
+            if let Some(value) = &value {
+                args = args.with(
+                    "value",
+                    imaginarium_commands::ArgValue::String(crate::settings::format_value(value)),
+                );
+            }
+            let _ = self.execute("board.set_setting", &args);
+        }
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let own: std::collections::BTreeMap<&'static str, imaginarium_settings::Value> =
+            imaginarium_canvas::board_settings::BOARD_SETTINGS
+                .iter()
+                .filter_map(|setting| Some((setting.key(), board.own_setting(setting.key())?)))
+                .collect();
+        let changed = *self.link.own.borrow() != own || *self.link.name.borrow() != self.name;
+        if changed {
+            *self.link.own.borrow_mut() = own;
+            *self.link.name.borrow_mut() = self.name.clone();
+            self.link.generation.set(self.link.generation.get() + 1);
+            // Settings, in its own window, shows them.
+            imaginarium_ui::request_frame_everywhere();
+        }
+    }
+
     /// Lays the window out and draws it into `scene` at `size`.
     pub fn draw(&mut self, scene: &mut Scene, size: Size) {
         self.size = size;
+        self.sync_link();
         if let Some(palette) = &mut self.palette {
             palette.resize(&mut self.ui, size.width, size.height);
         }
@@ -1563,6 +1601,12 @@ impl View for BoardWindow {
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        // The board Settings' This board edits.
+        if matches!(input, Input::WindowFocus(true))
+            && let Some(app) = &self.app
+        {
+            app.board_active(&self.link);
+        }
         // The Menu key opens the context menu, as Shift+F10 does.
         if let Input::Key {
             key: Key::Other(name),

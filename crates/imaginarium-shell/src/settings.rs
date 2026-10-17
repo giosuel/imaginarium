@@ -106,6 +106,8 @@ enum Ask {
     Reset(&'static str),
     /// Open the list of a dropdown.
     Choices(&'static str, WidgetId),
+    /// Show the values for me (false) or of this board (true).
+    Scope(bool),
 }
 
 type Asks = Rc<RefCell<Vec<Ask>>>;
@@ -139,6 +141,10 @@ pub struct SettingsWindow {
     /// A change from elsewhere came while a field was being typed in: the
     /// rebuild waits until the field is left.
     deferred: bool,
+    /// This board's values are shown (where a setting can have one).
+    board_scope: bool,
+    /// The board shown, and its values' generation then.
+    board_seen: Option<(*const crate::app::BoardLink, u64)>,
     requests: Vec<WindowRequest>,
     close_after: Option<u64>,
     frames: u64,
@@ -231,6 +237,8 @@ impl SettingsWindow {
             built: Vec::new(),
             restore: None,
             deferred: false,
+            board_scope: false,
+            board_seen: None,
             requests: Vec::new(),
             close_after: None,
             frames: 0,
@@ -296,6 +304,14 @@ impl SettingsWindow {
         if self.app.save_notice() != self.notice {
             external = true;
         }
+        // Another board became the active one, or this one's values changed.
+        let board = self
+            .app
+            .active_board()
+            .map(|board| (Rc::as_ptr(&board), board.generation.get()));
+        if board != self.board_seen {
+            external = true;
+        }
         if external && !rebuild {
             if self.typing() {
                 self.deferred = true;
@@ -335,6 +351,10 @@ impl SettingsWindow {
                 self.set(key, value);
                 true
             }
+            Ask::Scope(board) => {
+                self.board_scope = board;
+                true
+            }
             Ask::Typed(key, text) => {
                 let settings = self.app.settings().clone();
                 let declaration = settings.borrow().declaration(key);
@@ -356,7 +376,13 @@ impl SettingsWindow {
             }
             Ask::Reset(key) => {
                 self.errors.remove(key);
-                let _ = self.app.settings().borrow_mut().reset(key);
+                match self.board() {
+                    // Back to following my setting.
+                    Some(board) => board.asks.borrow_mut().push((key, None)),
+                    None => {
+                        let _ = self.app.settings().borrow_mut().reset(key);
+                    }
+                }
                 true
             }
             Ask::Choices(key, anchor) => {
@@ -366,7 +392,59 @@ impl SettingsWindow {
         }
     }
 
+    /// The board whose values are shown and edited, if This board is.
+    fn board(&self) -> Option<Rc<crate::app::BoardLink>> {
+        if !self.board_scope || !self.query.trim().is_empty() {
+            return None;
+        }
+        self.app.active_board()
+    }
+
+    /// The value shown for `declaration`, and whether it is changed (from
+    /// the default, or, for This board, the board has its own).
+    fn current(&self, declaration: &'static dyn AnySetting) -> (Value, bool) {
+        let key = declaration.key();
+        let settings = self.app.settings().borrow();
+        let mine = settings
+            .value(key)
+            .unwrap_or_else(|_| declaration.default_dyn());
+        match self.board() {
+            Some(board) => match board.own.borrow().get(key) {
+                Some(own) => (own.clone(), true),
+                None => (mine, false),
+            },
+            None => (mine, settings.is_modified(key)),
+        }
+    }
+
     fn set(&mut self, key: &'static str, value: Value) {
+        if let Some(board) = self.board() {
+            // Checked here, so a refused value says why at once; the board
+            // stores it with `board.set_setting`.
+            let checked = self
+                .app
+                .settings()
+                .borrow()
+                .declaration(key)
+                .map_err(|err| err.to_string())
+                .and_then(|declaration| {
+                    declaration
+                        .validate(&value)
+                        .map(|()| declaration.normalize(value))
+                        .map_err(|err| err.to_string())
+                });
+            match checked {
+                Ok(value) => {
+                    self.errors.remove(key);
+                    board.asks.borrow_mut().push((key, Some(value)));
+                    imaginarium_ui::request_frame_everywhere();
+                }
+                Err(err) => {
+                    self.errors.insert(key, reason_of(&err));
+                }
+            }
+            return;
+        }
         let set = self.app.settings().borrow_mut().set_value(key, value);
         match set {
             Ok(()) => {
@@ -387,12 +465,11 @@ impl SettingsWindow {
     /// Opens the list of values of `key` below `anchor`.
     fn open_choices(&mut self, key: &'static str, anchor: WidgetId) {
         self.close_menu();
-        let settings = self.app.settings().clone();
-        let settings = settings.borrow();
-        let (Ok(declaration), Ok(current)) = (settings.declaration(key), settings.value(key))
-        else {
+        let declaration = self.app.settings().borrow().declaration(key);
+        let Ok(declaration) = declaration else {
             return;
         };
+        let (current, _) = self.current(declaration);
         let rows: Vec<WidgetId> = choices(declaration)
             .into_iter()
             .map(|(value, name)| {
@@ -458,6 +535,10 @@ impl SettingsWindow {
             self.ui.remove(widget);
         }
         self.notice = self.app.save_notice();
+        self.board_seen = self
+            .app
+            .active_board()
+            .map(|board| (Rc::as_ptr(&board), board.generation.get()));
         let searching = !self.query.trim().is_empty();
         let buttons: Vec<WidgetId> = SECTIONS
             .iter()
@@ -554,13 +635,34 @@ impl SettingsWindow {
             children.extend(self.shortcut_rows(None));
             return children;
         }
-        let mut children = vec![self.header(section.title(), "Changes apply right away.")];
-        let declarations: Vec<&'static dyn AnySetting> = self
+        let all: Vec<&'static dyn AnySetting> = self
             .app
             .settings()
             .borrow()
             .declarations()
             .filter(|declaration| Section::of(&declaration.meta()) == section)
+            .collect();
+        // For me and This board, where a setting can have a board's value
+        // and a board window was used.
+        let board = self.app.active_board();
+        let tabs = board.is_some()
+            && all
+                .iter()
+                .any(|declaration| declaration.meta().per_document);
+        if !tabs {
+            self.board_scope = false;
+        }
+        let subtitle = match &board {
+            Some(board) if self.board_scope => format!(
+                "Changes apply to “{}” only. The others follow your settings.",
+                board.name.borrow()
+            ),
+            _ => "Changes apply right away.".to_owned(),
+        };
+        let mut children = vec![self.header_with(section.title(), &subtitle, tabs)];
+        let declarations: Vec<&'static dyn AnySetting> = all
+            .into_iter()
+            .filter(|declaration| !self.board_scope || declaration.meta().per_document)
             .collect();
         if declarations.is_empty() {
             children.push(
@@ -628,6 +730,11 @@ impl SettingsWindow {
     }
 
     fn header(&mut self, title: &str, subtitle: &str) -> WidgetId {
+        self.header_with(title, subtitle, false)
+    }
+
+    /// The section's title and subtitle, and the scope tabs if `tabs`.
+    fn header_with(&mut self, title: &str, subtitle: &str, tabs: bool) -> WidgetId {
         let title = self.ui.add(
             Label::new(title, TextStyle::new(20.0).weight(700.0))
                 .color(Token::Text)
@@ -638,11 +745,32 @@ impl SettingsWindow {
                 .color(Token::TextMuted)
                 .single_line(),
         );
-        self.ui.add_with_children(
-            Flex::column().gap(4.0).style(|style| {
-                style.padding.bottom = length(18.0);
+        let text = self.ui.add_with_children(
+            Flex::column().gap(4.0).grow(1.0).style(|style| {
+                style.min_size.width = length(0.0);
             }),
             &[title, subtitle],
+        );
+        let mut children = vec![text];
+        if tabs {
+            let asks = self.asks.clone();
+            let board = self.board_scope;
+            children.push(
+                Segmented::new(
+                    "Settings for",
+                    &["For me", "This board"],
+                    move || usize::from(board),
+                    move |at| asks.borrow_mut().push(Ask::Scope(at == 1)),
+                )
+                .add_to(&mut self.ui),
+            );
+        }
+        self.ui.add_with_children(
+            Flex::row().gap(16.0).style(|style| {
+                style.padding.bottom = length(18.0);
+                style.align_items = taffy::AlignItems::FLEX_START;
+            }),
+            &children,
         )
     }
 
@@ -665,7 +793,7 @@ impl SettingsWindow {
     fn row(&mut self, declaration: &'static dyn AnySetting) -> WidgetId {
         let key = declaration.key();
         let meta = declaration.meta();
-        let modified = self.app.settings().borrow().is_modified(key);
+        let (value, modified) = self.current(declaration);
         let title = self.ui.add(
             Label::new(meta.title, TextStyle::new(14.0).weight(600.0))
                 .color(Token::Text)
@@ -708,7 +836,7 @@ impl SettingsWindow {
                 .add_to(&mut self.ui),
             );
         }
-        controls.push(self.editor(declaration));
+        controls.push(self.editor(declaration, value));
         let controls = self.ui.add_with_children(Flex::row().gap(10.0), &controls);
         let row = self.ui.add_with_children(
             Flex::row().gap(24.0).style(|style| {
@@ -723,15 +851,9 @@ impl SettingsWindow {
     }
 
     /// The control that edits `declaration`, chosen by its kind.
-    fn editor(&mut self, declaration: &'static dyn AnySetting) -> WidgetId {
+    fn editor(&mut self, declaration: &'static dyn AnySetting, value: Value) -> WidgetId {
         let key = declaration.key();
         let meta = declaration.meta();
-        let value = self
-            .app
-            .settings()
-            .borrow()
-            .value(key)
-            .unwrap_or_else(|_| declaration.default_dyn());
         let asks = self.asks.clone();
         match (declaration.kind(), &value) {
             (ValueKind::Bool, Value::Bool(on)) => {

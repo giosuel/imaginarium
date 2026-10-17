@@ -39,8 +39,25 @@ pub struct App {
     boards: Cell<usize>,
     /// The Settings window is open.
     settings_open: Cell<bool>,
+    /// The board window used last, for This board in Settings.
+    active_board: RefCell<std::rc::Weak<BoardLink>>,
     /// Whether the settings file is saved, and a notice from reading it.
     saving: RefCell<Saving>,
+}
+
+/// A board window, as the Settings window sees it ("This board"): its
+/// name, its own setting values, and changes to make to them. The board
+/// window keeps it current and does the changes (as commands) at its next
+/// frame.
+#[derive(Default)]
+pub(crate) struct BoardLink {
+    pub(crate) name: RefCell<String>,
+    /// The board's own values, by setting key.
+    pub(crate) own: RefCell<std::collections::BTreeMap<&'static str, imaginarium_settings::Value>>,
+    /// Counts changes of `own` and `name`, for Settings to notice.
+    pub(crate) generation: Cell<u64>,
+    /// Values to set (`None`: follow the user's again), from Settings.
+    pub(crate) asks: RefCell<Vec<(&'static str, Option<imaginarium_settings::Value>)>>,
 }
 
 /// What the Settings window says about the settings file.
@@ -66,6 +83,7 @@ impl App {
             version: version.into(),
             boards: Cell::new(0),
             settings_open: Cell::new(false),
+            active_board: RefCell::default(),
             saving: RefCell::default(),
         })
     }
@@ -99,6 +117,16 @@ impl App {
             return None;
         }
         Some(crate::settings::SettingsWindow::new(self.clone()))
+    }
+
+    /// `board` is the board window used last.
+    pub(crate) fn board_active(&self, board: &Rc<BoardLink>) {
+        *self.active_board.borrow_mut() = Rc::downgrade(board);
+    }
+
+    /// The board window used last, while it is open.
+    pub(crate) fn active_board(&self) -> Option<Rc<BoardLink>> {
+        self.active_board.borrow().upgrade()
     }
 
     pub(crate) fn settings_closed(&self) {
@@ -744,5 +772,37 @@ mod tests {
                 .unwrap(),
             imaginarium_canvas::Background::Grid
         );
+    }
+
+    #[test]
+    fn this_board_gives_the_board_its_own_value() {
+        use imaginarium_canvas::{BACKGROUND, Background};
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        let mut scene = Scene::new();
+        board.draw(&mut scene, Size::new(1440.0, 900.0));
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        // Only where a board's value can differ: not in General.
+        press(&mut window, "This board");
+        press(&mut window, "Grid");
+        board.draw(&mut scene, Size::new(1440.0, 900.0));
+        let own = board.board().unwrap().own_setting(BACKGROUND.key());
+        assert_eq!(own, Some(imaginarium_settings::Value::Enum("grid".into())));
+        // Mine is untouched.
+        assert_eq!(
+            app.settings().borrow().get(&BACKGROUND).unwrap(),
+            Background::Dots
+        );
+        // The board's own value shows as changed; reset follows mine again.
+        settings_frame(&mut window);
+        press(&mut window, "Reset Board background");
+        board.draw(&mut scene, Size::new(1440.0, 900.0));
+        assert_eq!(board.board().unwrap().own_setting(BACKGROUND.key()), None);
+        // General has no board values: no tabs there.
+        settings_frame(&mut window);
+        press(&mut window, "General");
+        assert!(!has(&mut window, "This board"));
     }
 }
