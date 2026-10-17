@@ -688,6 +688,14 @@ Board background, Reduce motion, then the tool bar):
   thread the window loop starts, which hears changes too. Without a
   portal, System is dark and motion full. Reduced motion follows the
   system on Linux only so far.
+- **Interface size** (`ui.scale`, M3.7 part 2): 80 to 200 % in steps of
+  10, the mockup's dropdown. It scales panels, menus, dialogs and the
+  start and Settings windows, not the board: the toolkit's logical
+  pixels grow by it (`imaginarium_ui::set_interface_scale`; each window's
+  scale is the system's times it), and the board draws at its zoom
+  divided by it (`view_zoom`), so at 100 % a point is still a system
+  pixel and the zoom shown doesn't change. A window of a fixed size (the
+  start window) grows with it.
 - **Shadows** are the mockups' (`shadow.panel` above), soft: blurred
   rounded rectangles (`Scene::shadow`, Vello's), no longer stepped
   layers, which showed as bands on light.

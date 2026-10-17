@@ -11,8 +11,9 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.7 part 2, interface size** (below); M3.7 part 1,
-  the theme and the accent, is done (2026-10-17). M3.6 is done (2026-10-17),
+- **Next step:** **M3.7 part 3, high contrast**, once its design is
+  approved (below); M3.7 parts 1 and 2, the theme, the accent and the
+  interface size, are done (2026-10-17). M3.6 is done (2026-10-17),
   in five stacked parts, each reviewed by a fresh agent: saving every
   change into a board's file
   (https://github.com/giosuel/imaginarium/pull/66), crash recovery for
@@ -1164,7 +1165,8 @@ What M3 builds on:
     "As built"): `ui.theme`, `ui.accent`, `ui.reduce_motion` with the
     Settings mockup's cards, swatches and dropdown, live; following the
     system (winit, the desktop portal); soft shadows;
-  - part 2, interface size (`ui.scale`: panels and menus, not the board);
+  - [x] **part 2, interface size** (2026-10-17, `shell.md` §7 "As
+    built"): `ui.scale`, 80 to 200 %, panels and menus, not the board;
   - part 3, high contrast, once its design is mocked up and approved.
 - [ ] **M3.8 From M2:**
   - **the board's opening:** cover the fill, maybe with an animation
