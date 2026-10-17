@@ -96,14 +96,24 @@ saves every change into that file on its own:
   a copy of the document, from which it writes a snapshot once the head
   has 200 records (the index then drops the old head, so it stays small),
   and it compacts the file when more than half of it is superseded
-  (spec §9.4).
-- **Never two writers:** the file is locked. A second window or app opens
-  it read-only, and so does a file that can't be written, comes from a
-  newer format, or needs features or records this version doesn't know
-  (spec §10.2, §10.3). Such a file is never written.
-- **Failures:** a write that fails is retried every 2 s, after opening the
-  file again; it must still hold the same document, and the retry writes
-  one snapshot (a broken-off write may have left part of its records). A
+  (spec §9.4): once the dead part is twice the live one, and never for a
+  file with records this version doesn't know or with other names (hard
+  links).
+- **Never two writers:** the file is locked (on Unix the file itself, on
+  Windows a hidden `.~name.lock` next to it, since a lock on the file
+  would keep everyone from reading it; a file system without locks opens
+  it unlocked). A second window or app opens it read-only, and so does a
+  file that can't be written, comes from a newer format, or needs
+  features or records this version doesn't know (spec §4.3, §10.2,
+  §10.3). Such a file is never written.
+- **A snapshot never drops what is in the file:** before writing one, the
+  saving thread merges the file's head into its copy, so changes another
+  writer put there (a sync tool replacing the file) are kept. The board
+  shows them when it is opened again.
+- **Failures:** a write that fails is retried every 2 s, on the same
+  handle (and lock) when the file is still there, else by opening it
+  again (it must still hold the same document); the retry writes one
+  snapshot (a broken-off write may have left part of its records). A
   file deleted or replaced while open, or changed by another program, is
   a failed save, not a silent one. Closing a board finishes its saving in
   the background; the app waits for it before it exits and says if the
