@@ -134,8 +134,10 @@ board (`--demo` shows the mockups' board).
   and undo and redo follow the board's signals (`tool()`, `status()`).
 - **Focus.** Tool bar and panel buttons take a click without taking the
   keyboard (`Widget::focus_on_click`): after a click on a tool, the
-  board's keys still work. Tab reaches them. A click on a panel's
-  background gives the keys back to the board.
+  board's keys still work. Tab reaches them; keys a focused button
+  doesn't use go to the board (its shortcuts work), and Esc gives the
+  keys back to it. A click on a panel's background does too. Esc closes
+  a note even while the board has a selection.
 - **Placeholders.** The app button, the name, Save…, Search, AI, Share
   and help open a note saying which milestone brings them (M3.6, the
   palette next, M6, M8, M3.9).
@@ -145,8 +147,15 @@ board (`--demo` shows the mockups' board).
   floating"). Released with the pointer in the outer quarter of the
   window toward an edge, it docks there; elsewhere, or with Shift, it
   floats, kept inside the window (also when the window shrinks). A
-  double-click on the grip puts it back on the left. The setting isn't
-  saved to disk yet: settings files come with M3.5.
+  press drags only after 4 px, so a click leaves the bar alone; a
+  double-click on the grip puts it back on the left; a drag cut short
+  (the window loses the focus) puts it back where it was. Commands do
+  the same (`view.dock_toolbar` with an `edge`, `view.reset_toolbar`),
+  and the window follows the setting when it changes elsewhere. Docked,
+  the bar is centered on its edge when that keeps it clear of the
+  corner panels, else centered between them, else placed past them (a
+  narrow or short window), its grip in reach. The setting isn't saved
+  to disk yet: settings files come with M3.5.
 - **Zoom.** The percentage opens a menu: fit, 100 % and the selection,
   with their keys.
 - **Not yet:** the arrow keys between tools and `F6` (the focus between
