@@ -20,9 +20,9 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, Input,
-    InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme, ThemeKind, Token, Ui,
-    UiError, View, VirtualList, WidgetId, WindowOptions, animation, set_theme, theme,
+    AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, IconButton,
+    Input, InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme, ThemeKind, Token,
+    Ui, UiError, View, VirtualList, WidgetId, WindowOptions, animation, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -361,6 +361,48 @@ fn main() -> Result<(), UiError> {
         &buttons,
     );
 
+    // Icon buttons: the tool bar's (40 px) and the zoom controls' (36 px).
+    // Resting on one shows its tooltip; undo makes redo usable.
+    let tool = imaginarium_reactive::signal("select");
+    let tools = [
+        ("mouse-pointer-2", "Select", "V", "select"),
+        ("hand", "Hand", "H", "hand"),
+        ("rectangle-horizontal", "Rectangle", "R", "rectangle"),
+        ("circle", "Ellipse", "O", "ellipse"),
+    ];
+    let mut icon_buttons: Vec<WidgetId> = tools
+        .into_iter()
+        .map(|(icon, label, key, id)| {
+            IconButton::new(icon, label, move || tool.set(id))
+                .shortcut(key)
+                .size(40.0, 40.0, 10.0, 20.0)
+                .selected(move || tool.get() == id)
+                .add_to(&mut ui)
+        })
+        .collect();
+    let can_redo = imaginarium_reactive::signal(false);
+    icon_buttons.push(ui.add(Flex::row().width(12.0)));
+    icon_buttons.extend([
+        IconButton::new("minus", "Zoom out", || {})
+            .shortcut("Ctrl −")
+            .add_to(&mut ui),
+        IconButton::new("plus", "Zoom in", || {})
+            .shortcut("Ctrl +")
+            .add_to(&mut ui),
+        IconButton::new("undo-2", "Undo", move || can_redo.set(true))
+            .shortcut("Ctrl Z")
+            .add_to(&mut ui),
+        IconButton::new("redo-2", "Redo", move || can_redo.set(false))
+            .shortcut("Ctrl Shift Z")
+            .enabled(move || can_redo.get())
+            .add_to(&mut ui),
+    ]);
+    let icon_buttons = section(
+        &mut ui,
+        "Icon buttons · selected, quiet, disabled; rest on one for its tooltip",
+        &icon_buttons,
+    );
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -383,6 +425,7 @@ fn main() -> Result<(), UiError> {
         ("Accent", Token::AccentInk),
         ("Danger", Token::Danger),
         ("Warning", Token::Warning),
+        ("Disabled", Token::Disabled),
     ]
     .into_iter()
     .map(|(name, token)| ui.add(Label::new(name, body()).color(token)))
@@ -510,6 +553,7 @@ fn main() -> Result<(), UiError> {
         &[
             header,
             buttons,
+            icon_buttons,
             inputs,
             text,
             layers,
