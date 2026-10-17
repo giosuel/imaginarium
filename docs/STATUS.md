@@ -11,8 +11,9 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.4 part 5, the inspector** (`Ctrl+I`,
-  `shell.md` §3.6, the Inspector mockups). Parts 1 to 4 are done
+- **Next step:** **M3.4 part 6, the start window**: new boards,
+  recent files and open (the Start mockups), one window per document,
+  and startup under 400 ms (PLAN §10). Parts 1 to 5 are done
   (2026-10-17): the board window
   (https://github.com/giosuel/imaginarium/pull/56), the command palette
   (https://github.com/giosuel/imaginarium/pull/57), the contextual
@@ -1078,6 +1079,9 @@ What M3 builds on:
     the selection (fill, outline, width, radius, text color), the bar
     above the selection with its popovers, menus of commands for More,
     Arrange and right-clicks;
+  - [x] **part 5, the inspector** (2026-10-17, `shell.md` §3.6 "As
+    built"), with its commands (opacity, text size, Reset to style, named
+    styles, rename, hide, shape type) and a slider in the toolkit;
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;

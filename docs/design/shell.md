@@ -216,6 +216,24 @@ style (the named style, which values are changed here, Reset to style).
 Every field is a command with arguments, so the palette and the AI can
 set the same values.
 
+**As built (M3.4, the inspector).** `Ctrl+I` (`view.inspector`) or its
+close button; 300 px wide, 72 from the top, 16 from the right and
+bottom, scrolling when the window is short.
+- **Sections**, each when its commands apply: the kind and the name
+  (`board.rename`); Shape: type (`shape.set_preset`) and corner radius
+  (a slider and a field, `style.set_radius`); Position and size
+  (`board.set_box` in the parent's space, Keep proportions on by
+  default); Fill, Stroke, Text (text boxes): a swatch opening the
+  board's colors, the hex, opacity, width or size; Layer: opacity
+  (`style.set_opacity`), Lock or Unlock, Hide (`board.set_hidden`);
+  Style: the named style (`style.apply`) and Reset to style
+  (`style.reset`).
+- **Updates.** Rebuilt when the selection or its values change, not
+  during a gesture; the field that had the keys keeps them.
+- **Not yet:** per-corner radii and Convert to path (paths come with
+  the vector work); a mixed multi-selection shows the first node's
+  values.
+
 ### 3.7 The command palette (`Ctrl+K`)
 
 Centered near the top, 640 px wide. One input; results from commands,
