@@ -345,3 +345,19 @@ fn copies_keep_marks_on_line_breaks_and_empty_paragraphs() {
         assert_eq!(NodeCopy::read(document.view(), copy).unwrap(), original);
     }
 }
+
+#[test]
+fn the_status_follows_undo_redo_and_zoom() {
+    let mut board = sample();
+    let status = board.board().status();
+    board.frame();
+    let start = status.get_untracked();
+    assert!(!start.can_redo);
+    board.click((300.0, 300.0));
+    board.key(Key::Delete, false);
+    assert!(status.get_untracked().can_undo);
+    ctrl(&mut board, "z");
+    assert!(status.get_untracked().can_redo);
+    ctrl(&mut board, "=");
+    assert!(status.get_untracked().zoom > start.zoom);
+}

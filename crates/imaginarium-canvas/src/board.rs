@@ -118,6 +118,27 @@ const DOT_PITCH: f64 = 24.0;
 /// A frame's name sits this far above it, in logical pixels.
 const NAME_GAP: f64 = 8.0;
 
+/// What the board window's controls show ([`BoardCanvas::status`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardStatus {
+    /// Logical pixels per point (1.0 is 100 %).
+    pub zoom: f64,
+    /// Whether `board.undo` has a step to undo.
+    pub can_undo: bool,
+    /// Whether `board.redo` has a step to redo.
+    pub can_redo: bool,
+}
+
+impl Default for BoardStatus {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            can_undo: false,
+            can_redo: false,
+        }
+    }
+}
+
 /// A board: the document it shows (ADR-0020: the open document lives on
 /// the UI thread, here) and its view.
 pub struct BoardCanvas {
@@ -160,6 +181,8 @@ pub struct BoardCanvas {
     keymap: imaginarium_commands::Keymap,
     /// The tool in use.
     tool: Signal<Tool>,
+    /// What the window's controls show (zoom, undo and redo).
+    status: Signal<BoardStatus>,
     /// What the clipboard should do at the next hand-over.
     clipboard_work: clip::ClipboardWork,
     /// The last copy pasted (or copied) here, and how often it was pasted.
@@ -199,6 +222,7 @@ impl BoardCanvas {
             pending_edit: None,
             keymap: crate::keys::default_keymap(imaginarium_commands::Platform::current()),
             tool: signal(Tool::Select),
+            status: signal(BoardStatus::default()),
             clipboard_work: clip::ClipboardWork::default(),
             pastes: None,
             name_rects: Vec::new(),
@@ -211,6 +235,24 @@ impl BoardCanvas {
     /// Panels and commands read it; it stays valid as nodes go.
     pub fn selection(&self) -> Signal<Vec<NodeId>> {
         self.selection
+    }
+
+    /// The zoom and whether undo and redo can run, for the window's
+    /// controls. Brought up to date whenever the board paints or takes
+    /// input, so a change shows in the next frame.
+    pub fn status(&self) -> Signal<BoardStatus> {
+        self.status
+    }
+
+    /// Writes the current state into [`BoardCanvas::status`] (readers wake
+    /// only when it changed).
+    fn publish_status(&self) {
+        use imaginarium_model::UndoScope;
+        self.status.set_if_changed(BoardStatus {
+            zoom: self.zoom,
+            can_undo: self.document.can_undo(UndoScope::User),
+            can_redo: self.document.can_redo(UndoScope::User),
+        });
     }
 
     /// The selected nodes a gesture changes: not locked, and not inside
@@ -785,6 +827,7 @@ impl BoardCanvas {
     /// current theme, with every pending change applied.
     fn sync(&mut self, fonts: &mut Fonts) {
         self.ensure_items(fonts);
+        self.publish_status();
         if let Some(node) = self.pending_edit.take() {
             self.start_editing(fonts, node, None);
         }
