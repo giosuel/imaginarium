@@ -2117,6 +2117,33 @@ dependencies = [
 [[package]]
 name = "imaginarium-app"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "imaginarium-canvas",
+ "imaginarium-render",
+ "imaginarium-settings",
+ "imaginarium-shell",
+ "imaginarium-text",
+ "imaginarium-ui",
+]
+
+[[package]]
+name = "imaginarium-canvas"
+version = "0.0.1"
+dependencies = [
+ "accesskit",
+ "criterion",
+ "imaginarium-commands",
+ "imaginarium-model",
+ "imaginarium-reactive",
+ "imaginarium-render",
+ "imaginarium-settings",
+ "imaginarium-text",
+ "imaginarium-ui",
+ "proptest",
+ "serde_json",
+ "taffy",
+]
 
 [[package]]
 name = "imaginarium-cli"
@@ -2267,6 +2294,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "imaginarium-shell"
+version = "0.0.1"
+dependencies = [
+ "accesskit",
+ "imaginarium-canvas",
+ "imaginarium-commands",
+ "imaginarium-model",
+ "imaginarium-reactive",
+ "imaginarium-render",
+ "imaginarium-settings",
+ "imaginarium-text",
+ "imaginarium-ui",
+ "taffy",
+]
+
+[[package]]
 name = "imaginarium-test-utils"
 version = "0.0.1"
 
@@ -2287,6 +2330,7 @@ dependencies = [
  "accesskit_consumer",
  "accesskit_winit",
  "arboard",
+ "criterion",
  "imaginarium-reactive",
  "imaginarium-render",
  "imaginarium-text",
