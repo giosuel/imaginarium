@@ -1397,3 +1397,25 @@ fn the_palette_hides_window_commands_outside_the_app() {
     assert!(ui.find_by_label(fonts, "New board").is_none());
     assert!(ui.find_by_label(fonts, "Close window").is_none());
 }
+
+#[test]
+fn the_board_background_follows_its_setting() {
+    let mut window = Harness::new();
+    assert_eq!(
+        window.board().background(),
+        imaginarium_canvas::Background::Dots
+    );
+    window
+        .settings
+        .borrow_mut()
+        .set(
+            &imaginarium_canvas::BACKGROUND,
+            imaginarium_canvas::Background::Grid,
+        )
+        .unwrap();
+    window.frame();
+    assert_eq!(
+        window.board().background(),
+        imaginarium_canvas::Background::Grid
+    );
+}

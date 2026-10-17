@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use imaginarium_canvas::BoardCanvas;
+use imaginarium_canvas::{BACKGROUND, BoardCanvas};
 use imaginarium_commands::{Args, CommandError, Keymap, Outcome, Registry as Commands, UsageStats};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, Size};
@@ -284,7 +284,7 @@ impl BoardWindow {
         let settings_changed = Arc::new(AtomicBool::new(false));
         let flag = settings_changed.clone();
         let subscription = settings.borrow_mut().subscribe(move |change| {
-            if change.key == TOOLBAR_POSITION.key() {
+            if change.key == TOOLBAR_POSITION.key() || change.key == BACKGROUND.key() {
                 flag.store(true, Ordering::Relaxed);
                 // The change may come from another window: this one
                 // draws to follow it.
@@ -335,6 +335,7 @@ impl BoardWindow {
         };
         // Shown where the setting says, without writing it back.
         window.put_bar(dock);
+        window.apply_background();
         window.ui.set_focus(&mut window.fonts, Some(board));
         window
     }
@@ -365,6 +366,17 @@ impl BoardWindow {
             app_id: Some("ch.giosuel.Imaginarium".into()),
             more_windows: true,
             ..WindowOptions::default()
+        }
+    }
+
+    /// Draws the board's background as the settings say.
+    fn apply_background(&mut self) {
+        let background = self.settings.borrow().get(&BACKGROUND).unwrap_or_default();
+        if let Some(board) = self.ui.widget_mut::<BoardCanvas>(self.board)
+            && board.background() != background
+        {
+            board.set_background(background);
+            self.ui.refresh(self.board);
         }
     }
 
@@ -427,7 +439,9 @@ impl BoardWindow {
         if let Some(palette) = &mut self.palette {
             palette.resize(&mut self.ui, size.width, size.height);
         }
-        if self.settings_changed.swap(false, Ordering::Relaxed) && self.drag.is_none() {
+        // During a drag the bar stays where the pointer has it; the change
+        // waits until it is dropped.
+        if self.drag.is_none() && self.settings_changed.swap(false, Ordering::Relaxed) {
             let dock = self
                 .settings
                 .borrow()
@@ -436,6 +450,7 @@ impl BoardWindow {
             if dock != self.dock {
                 self.put_bar(dock);
             }
+            self.apply_background();
         }
         if self.dock == Dock::Floating && self.drag.is_none() {
             // A smaller window must not lose the bar.

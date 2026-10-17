@@ -63,6 +63,9 @@ pub use start::StartWindow;
 pub use toolbar::{Dock, TOOLBAR_POSITION};
 pub use window::BoardWindow;
 
-/// The shell's settings, for the app to register.
-pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] =
-    &[&TOOLBAR_POSITION, &SHOW_START_WINDOW];
+/// The shell's settings and the board's, for the app to register.
+pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] = &[
+    &TOOLBAR_POSITION,
+    &SHOW_START_WINDOW,
+    &imaginarium_canvas::BACKGROUND,
+];

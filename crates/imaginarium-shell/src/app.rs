@@ -727,4 +727,20 @@ mod tests {
         window.input(&ctrl("w"));
         assert_eq!(names(&window.take_requests()), ["Close"]);
     }
+
+    #[test]
+    fn the_board_background_is_a_segmented_control_in_appearance() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        press(&mut window, "Grid");
+        assert_eq!(
+            app.settings()
+                .borrow()
+                .get(&imaginarium_canvas::BACKGROUND)
+                .unwrap(),
+            imaginarium_canvas::Background::Grid
+        );
+    }
 }
