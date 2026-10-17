@@ -72,9 +72,38 @@ pub(crate) static RESET_TOOLBAR: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
     },
 );
 
+/// `palette.open`.
+pub(crate) static OPEN_PALETTE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "palette.open",
+    CommandMeta::new(
+        "Search commands and settings",
+        "Open the command palette, which finds every command and setting by name.",
+    )
+    .category("View")
+    .synonyms(&["palette", "search", "find command", "command"])
+    .icon("search"),
+    |cx, _args| {
+        cx.asks.push(Ask::OpenPalette);
+        Ok(Outcome::Done)
+    },
+);
+
+/// The shell's shortcuts (the board has its own keymap).
+pub(crate) fn shell_keymap(
+    platform: imaginarium_commands::Platform,
+) -> imaginarium_commands::Keymap {
+    let mut keymap = imaginarium_commands::Keymap::new(platform);
+    // Fixed, valid bindings: this can't fail.
+    let _ = keymap.bind(
+        "Mod+K",
+        imaginarium_commands::CommandId::new("palette.open"),
+    );
+    keymap
+}
+
 /// The shell's commands, for the window's registry and the palette.
 pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 2] = [&DOCK_TOOLBAR, &RESET_TOOLBAR];
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 3] = [&OPEN_PALETTE, &DOCK_TOOLBAR, &RESET_TOOLBAR];

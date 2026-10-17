@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use imaginarium_canvas::BoardCanvas;
-use imaginarium_commands::{Args, CommandError, Outcome, Registry as Commands};
+use imaginarium_commands::{Args, CommandError, Keymap, Outcome, Registry as Commands, UsageStats};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, Size};
 use imaginarium_settings::{Registry, SubscriptionId};
@@ -22,12 +22,13 @@ use imaginarium_ui::{
 use taffy::prelude::length;
 
 use crate::chrome::{self, Chrome, Placeholder};
-use crate::commands::{ShellCx, shell_commands};
+use crate::commands::{ShellCx, shell_commands, shell_keymap};
+use crate::palette::{self, Catalog, Kind, Palette, Sources};
 use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
 
 /// What a panel's button asked for. The window does it after the input
 /// that asked, when it can reach the board and the tree.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Ask {
     /// Run a command, the board's or the shell's.
     Run(&'static str),
@@ -48,6 +49,18 @@ pub(crate) enum Ask {
     CancelDrag,
     /// Put the tool bar there, and remember it.
     Dock(Dock),
+    /// Open the command palette.
+    OpenPalette,
+    /// The palette's query changed.
+    PaletteQuery(String),
+    /// Move the palette's active row.
+    PaletteMove(i32),
+    /// Run the palette's row (the active one: `None`).
+    PaletteRun(Option<usize>),
+    /// Change the active row's value (a setting).
+    PaletteTab,
+    /// The palette closed (Esc, a click outside, a command run).
+    PaletteClosed,
 }
 
 /// The queue of what the panels asked for.
@@ -94,6 +107,13 @@ pub struct BoardWindow {
     chrome: Chrome,
     tools: ToolBar,
     commands: Commands<ShellCx>,
+    /// The board's commands, for their availability in the palette.
+    board_commands: Commands<BoardCanvas>,
+    /// The shell's shortcuts (`Ctrl+K`).
+    keymap: Keymap,
+    catalog: Catalog,
+    usage: UsageStats,
+    palette: Option<Palette>,
     /// Holds the tool bar; laid out for where it docks.
     stage: WidgetId,
     placing: Option<Placing>,
@@ -133,8 +153,9 @@ impl BoardWindow {
         let asks: Asks = Rc::default();
         let (tool, status) = (board.tool(), board.status());
         let keymap = board.keymap().clone();
+        let shell_keys = shell_keymap(keymap.platform());
         let board = ui.add(board);
-        let chrome = chrome::chrome(&mut ui, name, status, &keymap, &asks);
+        let chrome = chrome::chrome(&mut ui, name, status, [&keymap, &shell_keys], &asks);
         let tools = toolbar::tool_bar(&mut ui, tool, &keymap, &asks);
         let zones = ui.add(DropZones { target: None });
         let hint_text = ui.add(
@@ -171,6 +192,31 @@ impl BoardWindow {
             // The shell's own ids are fixed and distinct: this can't fail.
             let _ = commands.register(*command);
         }
+        let mut board_commands = Commands::new();
+        for command in imaginarium_canvas::commands::board_commands() {
+            // The board's ids are distinct (its own tests check it).
+            let _ = board_commands.register(*command);
+        }
+        let listed =
+            |id: imaginarium_commands::CommandId,
+             meta: &imaginarium_commands::CommandMeta,
+             args: &imaginarium_commands::ArgsSchema| palette::Listed {
+                id: id.as_str(),
+                meta: *meta,
+                needs_args: args.args.iter().any(|arg| arg.required),
+            };
+        let catalog = Catalog::new(
+            board_commands
+                .commands()
+                .map(|command| listed(command.id(), command.meta(), command.args()))
+                .chain(
+                    commands
+                        .commands()
+                        .map(|command| listed(command.id(), command.meta(), command.args())),
+                )
+                .collect::<Vec<_>>(),
+            &settings.borrow(),
+        );
         let settings_changed = Arc::new(AtomicBool::new(false));
         let flag = settings_changed.clone();
         let subscription = settings.borrow_mut().subscribe(move |change| {
@@ -191,6 +237,11 @@ impl BoardWindow {
             chrome,
             tools,
             commands,
+            board_commands,
+            keymap: shell_keys,
+            catalog,
+            usage: UsageStats::new(),
+            palette: None,
             stage,
             placing: None,
             zones,
@@ -406,6 +457,104 @@ impl BoardWindow {
                     self.show_drop(None, Point::ZERO);
                 }
                 self.move_bar(dock);
+            }
+            Ask::OpenPalette => self.open_palette(),
+            Ask::PaletteQuery(query) => {
+                let board_keys = self.board().map(|board| board.keymap().clone());
+                let settings = self.settings.clone();
+                let settings = settings.borrow();
+                let (Some(palette), Some(board_keys)) = (&mut self.palette, board_keys) else {
+                    return;
+                };
+                let sources = Sources {
+                    catalog: &self.catalog,
+                    settings: &settings,
+                    keymaps: [&board_keys, &self.keymap],
+                    usage: &self.usage,
+                    now: now(),
+                    asks: &self.asks,
+                };
+                palette.search(&mut self.ui, &query, &sources);
+            }
+            Ask::PaletteMove(by) => {
+                if let Some(row) = self.palette.as_mut().and_then(|palette| palette.step(by)) {
+                    self.ui.reveal(&mut self.fonts, row);
+                }
+            }
+            Ask::PaletteRun(row) => self.run_palette(row, false),
+            Ask::PaletteTab => self.run_palette(None, true),
+            Ask::PaletteClosed => self.palette = None,
+        }
+    }
+
+    /// Opens the command palette, or puts the keys back in its field.
+    fn open_palette(&mut self) {
+        if let Some(palette) = &self.palette {
+            let field = palette.field();
+            self.ui.set_focus(&mut self.fonts, Some(field));
+            return;
+        }
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let board_keys = board.keymap().clone();
+        let availability = self
+            .board_commands
+            .availability(board)
+            .into_iter()
+            .map(|(id, availability)| (id.as_str(), availability))
+            .collect();
+        let settings = self.settings.clone();
+        let settings = settings.borrow();
+        let sources = Sources {
+            catalog: &self.catalog,
+            settings: &settings,
+            keymaps: [&board_keys, &self.keymap],
+            usage: &self.usage,
+            now: now(),
+            asks: &self.asks,
+        };
+        let (width, height) = (self.size.width, self.size.height);
+        self.palette = Some(Palette::open(
+            &mut self.ui,
+            width,
+            height,
+            availability,
+            &sources,
+        ));
+    }
+
+    /// Runs a palette row: a command closes the palette and runs; a
+    /// setting changes in place (Enter and Tab alike). `tab`: only a
+    /// setting's value changes.
+    fn run_palette(&mut self, row: Option<usize>, tab: bool) {
+        let Some(palette) = &self.palette else {
+            return;
+        };
+        let Some(at) = palette.item(row) else {
+            return;
+        };
+        let (kind, id) = self.catalog.item(at);
+        match kind {
+            Kind::Command if !tab => {
+                if !palette.available(id) {
+                    return;
+                }
+                let layer = palette.layer;
+                self.ui.close_layer(&mut self.fonts, layer);
+                self.palette = None;
+                self.usage
+                    .record(imaginarium_commands::CommandId::new(id), now());
+                let _ = self.execute(id, &Args::new());
+            }
+            Kind::Command => {}
+            Kind::Setting => {
+                let settings = self.settings.clone();
+                let mut settings = settings.borrow_mut();
+                if let Some(value) = palette::next_value(&settings, id) {
+                    let _ = settings.set_value(id, value);
+                }
+                palette.show_value(at, &settings, &self.catalog);
             }
         }
     }
@@ -717,6 +866,13 @@ impl Drop for BoardWindow {
     }
 }
 
+/// Now, for the palette's frecency (seconds).
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 fn full() -> taffy::Rect<taffy::LengthPercentageAuto> {
     taffy::Rect {
         left: length(0.0),
@@ -741,6 +897,37 @@ impl View for BoardWindow {
     }
 
     fn input(&mut self, input: &Input) -> bool {
+        // The shell's own shortcuts (Ctrl+K) work wherever the keys are.
+        if let Input::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = input
+            && let Some(press) = imaginarium_canvas::keys::key_press(key, *modifiers)
+            && let Some(command) = self.keymap.command_for_press(press)
+        {
+            self.ui.note_keyboard();
+            let _ = self.execute(command.as_str(), &Args::new());
+            return true;
+        }
+        // A click beside the palette closes it, as Esc does.
+        if let Input::PointerButton {
+            pressed: true,
+            position,
+            ..
+        } = input
+            && let Some(palette) = &self.palette
+            && self
+                .ui
+                .bounds(palette.panel)
+                .is_some_and(|panel| !panel.contains(*position))
+        {
+            let layer = palette.layer;
+            self.ui.close_layer(&mut self.fonts, layer);
+            self.handle_asks();
+            return true;
+        }
         let mut handled = self.ui.input(&mut self.fonts, input);
         self.handle_asks();
         // A panel control with the keys (reached with Tab) has no use for

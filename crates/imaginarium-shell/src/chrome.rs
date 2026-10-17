@@ -30,7 +30,6 @@ pub(crate) enum Placeholder {
     MainMenu,
     Title,
     Save,
-    Search,
     Ai,
     Share,
     Help,
@@ -52,10 +51,6 @@ impl Placeholder {
                 "Saving",
                 "Saving to a file comes in M3.6. Until then this board lives only in this \
                  window, and closing it loses it.",
-            ),
-            Placeholder::Search => (
-                "Search",
-                "The command palette comes next: every command and setting, found by name.",
             ),
             Placeholder::Ai => (
                 "AI assistant",
@@ -171,12 +166,13 @@ pub(crate) fn chrome(
     ui: &mut Ui,
     name: &str,
     status: Signal<BoardStatus>,
-    keymap: &Keymap,
+    keymaps: [&Keymap; 2],
     asks: &Asks,
 ) -> Chrome {
+    let [keymap, shell_keys] = keymaps;
     let mut anchors = HashMap::new();
     let pill = pill(ui, name, asks, &mut anchors);
-    let top_right = top_right(ui, keymap, asks, &mut anchors);
+    let top_right = top_right(ui, shell_keys, asks, &mut anchors);
     let spring = ui.add(through(taffy::FlexDirection::Row).grow(1.0));
     let top = ui.add_with_children(
         through(taffy::FlexDirection::Row).style(|style| {
@@ -397,7 +393,10 @@ fn top_right(
         ButtonBox::new(
             format!("Search commands and settings ({keys})"),
             panel_colors(),
-            explain(asks, Placeholder::Search),
+            {
+                let asks = asks.clone();
+                move || asks.borrow_mut().push(Ask::OpenPalette)
+            },
         )
         .size(176.0, 44.0)
         .padding(12.0, 8.0)
@@ -407,7 +406,6 @@ fn top_right(
         .keep_focus(),
         &[search_icon, search_text, chip],
     );
-    anchors.insert(Placeholder::Search, search);
     let sparkles = ui.add(Icon::named("sparkles", 19.0, Token::AccentInk));
     let ai_keys = mod_key(keymap, "J");
     let ai = ui.add_with_children(

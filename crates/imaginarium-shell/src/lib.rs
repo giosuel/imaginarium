@@ -17,14 +17,16 @@
 //!   id, and the tool bar, zoom and undo follow the board's signals.
 //! - Moves the tool bar: dragged by its grip, it snaps to the nearest edge
 //!   or floats ([`TOOLBAR_POSITION`]).
+//! - The command palette (`Ctrl+K`): the board's and the shell's commands
+//!   and the settings, found by name.
 //! - Declares the shell's settings ([`SETTINGS`]).
 //!
 //! # Boundaries
 //! - Does NOT change documents itself: every change is a board command
 //!   (`imaginarium-canvas`), so the palette and the AI can do the same.
-//! - Does NOT open, save or name files (M3.6), search (the palette, next),
-//!   run the AI (M6) or share (M8). Their buttons are placeholders that
-//!   say what is coming when clicked.
+//! - Does NOT open, save or name files (M3.6), run the AI (M6) or share
+//!   (M8). Their buttons are placeholders that say what is coming when
+//!   clicked.
 //! - No contextual toolbar, inspector, context menu or start window yet
 //!   (later steps of M3.4).
 //!
@@ -34,6 +36,7 @@
 
 mod chrome;
 mod commands;
+mod palette;
 mod toolbar;
 mod window;
 

@@ -524,3 +524,116 @@ fn a_floating_setting_survives_the_start() {
         Dock::Floating
     );
 }
+
+/// Ctrl+K (⌘K on macOS).
+fn mod_k() -> Input {
+    let mac = cfg!(target_os = "macos");
+    Input::Key {
+        key: imaginarium_ui::Key::Character("k".into()),
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            ctrl: !mac,
+            meta: mac,
+            ..Modifiers::default()
+        },
+    }
+}
+
+fn type_text(window: &mut Harness, text: &str) {
+    for c in text.chars() {
+        let c = c.to_string();
+        window.input(key_input(
+            imaginarium_ui::Key::Character(c.clone()),
+            Some(&c),
+        ));
+    }
+}
+
+fn palette_open(window: &mut Harness) -> bool {
+    let (ui, fonts) = window.window.ui();
+    ui.find_by_label(fonts, "Command palette").is_some()
+}
+
+#[test]
+fn ctrl_k_finds_a_command_and_enter_runs_it() {
+    let mut window = Harness::with(imaginarium_canvas::demo::launch_plan().unwrap());
+    window.input(mod_k());
+    assert!(palette_open(&mut window));
+    type_text(&mut window, "select all");
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+    assert!(!palette_open(&mut window), "running closes it");
+    assert!(
+        window.board().selection().get_untracked().len() > 5,
+        "Select all ran"
+    );
+    // Opened again without a query, it lists what was used first.
+    window.input(mod_k());
+    let texts = window.texts();
+    let heading = |name: &str| texts.iter().position(|text| text == name);
+    assert!(heading("Recent") < heading("Arrange"), "{texts:?}");
+    let first = heading("Recent").unwrap() + 1;
+    assert_eq!(texts.get(first).map(String::as_str), Some("Select all"));
+}
+
+#[test]
+fn a_command_that_cant_run_says_why_and_stays() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "redo");
+    let (ui, fonts) = window.window.ui();
+    assert!(
+        ui.find_by_label(fonts, "Redo, unavailable: Nothing to redo")
+            .is_some()
+    );
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+    assert!(palette_open(&mut window));
+    // Esc closes it and the keys go back to the board.
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    assert!(!palette_open(&mut window));
+    let board = window.window.board_widget();
+    assert_eq!(window.window.ui().0.focused(), Some(board));
+}
+
+#[test]
+fn a_setting_changes_in_place_and_the_bar_follows() {
+    let mut window = Harness::new();
+    let search = window.named("Search commands and settings (Ctrl+K)");
+    let at = window.bounds(search).center();
+    window.click(at);
+    assert!(palette_open(&mut window));
+    type_text(&mut window, "tool bar position");
+    assert!(window.texts().contains(&"Left".to_owned()));
+    window.input(key_input(imaginarium_ui::Key::Tab, None));
+    assert!(palette_open(&mut window), "a setting keeps it open");
+    assert!(window.texts().contains(&"Top".to_owned()));
+    window.frame();
+    assert_eq!(window.window.dock(), Dock::Top);
+    // A click beside it closes it.
+    window.click(Point::new(40.0, 800.0));
+    assert!(!palette_open(&mut window));
+}
+
+#[test]
+fn arrows_pick_the_row_enter_runs() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "zoom");
+    let texts = window.texts();
+    let first = texts
+        .iter()
+        .position(|text| text.starts_with("Zoom"))
+        .unwrap();
+    let second = texts[first + 1..]
+        .iter()
+        .find(|text| text.starts_with("Zoom"))
+        .unwrap()
+        .clone();
+    window.input(key_input(imaginarium_ui::Key::ArrowDown, None));
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+    assert!(!palette_open(&mut window));
+    // The second zoom command ran: the view changed (or stayed, for
+    // "Zoom to 100 %" on a new board), and nothing else happened.
+    assert!(second.starts_with("Zoom"));
+}
