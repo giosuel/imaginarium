@@ -481,6 +481,9 @@ pub struct RunStats {
     pub gpu: Option<GpuInfo>,
     /// The monitor the window was last on, if the window system says.
     pub monitor: Option<MonitorInfo>,
+    /// Windows that closed because they failed (no surface, no GPU); the
+    /// others stayed open.
+    pub window_errors: Vec<String>,
 }
 
 /// A monitor, as the window system describes it.
@@ -509,15 +512,44 @@ impl MonitorInfo {
 }
 
 thread_local! {
+    /// A frame for every window (asked outside any window's view).
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    /// Frames for these windows.
+    static WINDOW_FRAMES: std::cell::RefCell<Vec<WindowId>> = const { std::cell::RefCell::new(Vec::new()) };
     static SCALE_FACTOR: Cell<f64> = const { Cell::new(1.0) };
+    /// The input method starts over in every window.
     static IME_RESET: Cell<bool> = const { Cell::new(false) };
+    /// The input method starts over in these windows.
+    static IME_RESETS: std::cell::RefCell<Vec<WindowId>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The keyboard focus moved: the input method starts over, so a
 /// composition begun in one field can't be committed into the next.
 pub(crate) fn reset_ime() {
-    IME_RESET.with(|reset| reset.set(true));
+    match CURRENT.with(Cell::get) {
+        Some(window) => IME_RESETS.with(|resets| resets.borrow_mut().push(window)),
+        None => IME_RESET.with(|reset| reset.set(true)),
+    }
+}
+
+/// A call into the view of window `id`: the frames it asks for, the scale
+/// it reads and the input method it resets are that window's. Undone when
+/// dropped.
+struct Entered {
+    previous: Option<WindowId>,
+}
+
+fn enter(id: WindowId, scale: f64) -> Entered {
+    SCALE_FACTOR.with(|factor| factor.set(scale));
+    Entered {
+        previous: CURRENT.with(|current| current.replace(Some(id))),
+    }
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        CURRENT.with(|current| current.set(self.previous));
+    }
 }
 
 /// How long to wait before drawing again after the GPU gave no texture in
@@ -530,11 +562,15 @@ pub fn scale_factor() -> f64 {
     SCALE_FACTOR.with(Cell::get)
 }
 
-/// Asks for a frame of the current thread's windows. Effects call this
-/// when what they show changed; the request is collected before the event
-/// loop goes back to sleep.
+/// Asks for a frame: of the window whose view is running (its input, its
+/// timers, its painting), else of every window on this thread. Effects
+/// call this when what they show changed; the request is collected before
+/// the event loop goes back to sleep.
 pub fn request_frame() {
-    FRAME_REQUESTED.with(|requested| requested.set(true));
+    match CURRENT.with(Cell::get) {
+        Some(window) => WINDOW_FRAMES.with(|frames| frames.borrow_mut().push(window)),
+        None => FRAME_REQUESTED.with(|requested| requested.set(true)),
+    }
 }
 
 thread_local! {
@@ -569,10 +605,14 @@ pub(crate) fn unbind_tree(tree: u64) {
     });
 }
 
-/// A frame for tree `tree`'s window. Until frames are asked per window,
-/// every window draws.
-pub(crate) fn request_frame_for_tree(_tree: u64) {
-    request_frame();
+/// A frame for tree `tree`'s window (a signal changed by another window's
+/// input can show in this one), or as [`request_frame`] for a tree not
+/// laid out in a window yet.
+pub(crate) fn request_frame_for_tree(tree: u64) {
+    match TREES.with(|trees| trees.borrow().get(&tree).copied()) {
+        Some(window) => WINDOW_FRAMES.with(|frames| frames.borrow_mut().push(window)),
+        None => request_frame(),
+    }
 }
 
 /// Opens a window showing `view` and runs until it is closed (by the user
@@ -654,6 +694,8 @@ struct WindowState<'v> {
     frames: u64,
     /// It asked to close (or the user did).
     closing: bool,
+    /// It closes because it failed (no surface, no GPU).
+    failed: Option<UiError>,
 }
 
 /// The event loop's state: every window, and the GPU they share.
@@ -721,6 +763,14 @@ impl WindowState<'_> {
         self.ime = area;
     }
 
+    /// Turns the input method off (its window lost the keys while a field
+    /// had them).
+    fn ime_off(&mut self) {
+        if self.ime.take().is_some() {
+            self.window.set_ime_allowed(false);
+        }
+    }
+
     /// Sends the view's accessibility tree, if a screen reader listens.
     fn update_access(&mut self) {
         let (view, title, scale) = (&mut self.view, &self.options.title, self.scale);
@@ -744,11 +794,25 @@ impl<'v> Shell<'v> {
         event_loop.exit();
     }
 
-    /// Opens the windows asked for.
+    /// Closes window `id` because it failed. The others stay open; the
+    /// run fails if it was the last.
+    fn fail_window(&mut self, id: WindowId, err: UiError) {
+        self.stats.window_errors.push(err.to_string());
+        if let Some(state) = self.windows.get_mut(&id) {
+            state.closing = true;
+            state.failed = Some(err);
+        }
+    }
+
+    /// Opens the windows asked for. One that can't be opened is left out
+    /// (the run fails if no window is left).
     fn open_pending(&mut self, event_loop: &ActiveEventLoop) {
         for (options, view) in std::mem::take(&mut self.pending) {
             if let Err(err) = self.open(event_loop, options, view) {
-                return self.fail(event_loop, err);
+                self.stats.window_errors.push(err.to_string());
+                if self.windows.is_empty() {
+                    return self.fail(event_loop, err);
+                }
             }
         }
     }
@@ -819,6 +883,7 @@ impl<'v> Shell<'v> {
             ime_resend: false,
             frames: 0,
             closing: false,
+            failed: None,
         };
         self.windows.insert(id, state);
         self.focused.get_or_insert(id);
@@ -827,7 +892,8 @@ impl<'v> Shell<'v> {
 
     /// The windows' requests: windows to open, and windows to close.
     fn handle_requests(&mut self) {
-        for state in self.windows.values_mut() {
+        for (id, state) in &mut self.windows {
+            let _entered = enter(*id, state.scale);
             for request in state.view.take_requests() {
                 match request {
                     WindowRequest::Open(options, view) => self.pending.push((options, view)),
@@ -867,7 +933,7 @@ impl<'v> Shell<'v> {
         Ok(renderer)
     }
 
-    fn redraw(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
+    fn redraw(&mut self, id: WindowId) {
         let start = Instant::now();
         let Some(state) = self.windows.get_mut(&id) else {
             return;
@@ -878,14 +944,14 @@ impl<'v> Shell<'v> {
             f64::from(physical.height) / state.scale,
         );
         state.scene.clear();
-        SCALE_FACTOR.with(|scale| scale.set(state.scale));
+        let _entered = enter(id, state.scale);
         state.view.paint(&mut state.scene, size);
         let paint = start.elapsed();
         if state.renderer.is_none() {
             let opening = Instant::now();
             let renderer = match self.renderer_for(id) {
                 Ok(renderer) => renderer,
-                Err(err) => return self.fail(event_loop, err),
+                Err(err) => return self.fail_window(id, err),
             };
             let first = self.first == Some(id);
             if first {
@@ -921,7 +987,7 @@ impl<'v> Shell<'v> {
                     Skip::Reconfigured => state.window.request_redraw(),
                     Skip::Lost => match renderer.recreate_surface(state.window.clone()) {
                         Ok(()) => state.window.request_redraw(),
-                        Err(err) => self.fail(event_loop, err.into()),
+                        Err(err) => self.fail_window(id, err.into()),
                     },
                     // Asking again at once would spin while it's minimized
                     // (winit delivers redraws to hidden windows too).
@@ -931,7 +997,7 @@ impl<'v> Shell<'v> {
                 return;
             }
             Err(err) => {
-                self.fail(event_loop, err.into());
+                self.fail_window(id, err.into());
                 return;
             }
         };
@@ -984,7 +1050,10 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
                         .copied()
                         .find(|id| Some(u64::from(*id)) == asked)
                         .or(self.focused);
-                    if let Some(state) = target.and_then(|id| self.windows.get_mut(&id)) {
+                    if let Some(id) = target
+                        && let Some(state) = self.windows.get_mut(&id)
+                    {
+                        let _entered = enter(id, state.scale);
                         state.deliver(Input::Paste(text));
                     }
                 }
@@ -994,6 +1063,7 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
         let Some(state) = self.windows.get_mut(&event.window_id) else {
             return;
         };
+        let _entered = enter(event.window_id, state.scale);
         match event.window_event {
             accesskit_winit::WindowEvent::InitialTreeRequested => state.update_access(),
             accesskit_winit::WindowEvent::ActionRequested(request) => {
@@ -1006,13 +1076,14 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if matches!(event, WindowEvent::RedrawRequested) {
-            return self.redraw(event_loop, id);
+            return self.redraw(id);
         }
         let Some(state) = self.windows.get_mut(&id) else {
             return;
         };
+        let _entered = enter(id, state.scale);
         state.access.process_event(&state.window, &event);
         match event {
             WindowEvent::CloseRequested => {
@@ -1040,6 +1111,9 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
                 // new physical size follows as a `Resized` event.
                 state.scale = scale_factor;
                 state.ime_resend = true;
+                if self.first == Some(id) {
+                    self.stats.monitor = state.monitor().or(self.stats.monitor.take());
+                }
                 state.request_redraw(Cause::Resize);
             }
             WindowEvent::Occluded(false) if state.occluded => {
@@ -1125,13 +1199,13 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        let requested = FRAME_REQUESTED.with(|requested| requested.replace(false));
         let mut wake_at: Option<Instant> = None;
-        for state in self.windows.values_mut() {
+        for (id, state) in &mut self.windows {
             if state.retry_at.is_some_and(|at| at <= now) {
                 state.retry_at = None;
                 state.window.request_redraw();
             }
+            let _entered = enter(*id, state.scale);
             let mut wake = state.view.wake_at();
             if wake.is_some_and(|at| at <= now) {
                 if state.view.wake(now) {
@@ -1143,11 +1217,13 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
                 wake_at = Some(wake_at.map_or(at, |soonest| soonest.min(at)));
             }
         }
-        // After the timers, which may have asked for a frame too. Which
-        // window's content asked isn't known: they all draw (one that
-        // didn't change draws the same).
-        if requested || FRAME_REQUESTED.with(|requested| requested.replace(false)) {
-            for state in self.windows.values_mut() {
+        // After the timers, which may have asked for frames too: each
+        // window draws when its own view asked, all of them when the
+        // request came from outside any window (a theme switch).
+        let everyone = FRAME_REQUESTED.with(|requested| requested.replace(false));
+        let asked = WINDOW_FRAMES.with(|frames| std::mem::take(&mut *frames.borrow_mut()));
+        for (id, state) in &mut self.windows {
+            if everyone || asked.contains(id) {
                 state.request_redraw(Cause::Request);
             }
         }
@@ -1160,29 +1236,46 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
             .filter(|(_, state)| state.closing)
             .map(|(id, _)| *id)
             .collect();
+        let mut failed = None;
         for id in closing {
+            let Some(mut state) = self.windows.remove(&id) else {
+                continue;
+            };
+            failed = state.failed.take().or(failed);
             // Its Vello renderer serves the next window (the start window's
             // goes to the board it opens).
-            if let Some(state) = self.windows.remove(&id)
-                && let (Some(renderer), Some(shared)) = (state.renderer, &mut self.shared)
-            {
+            if let (Some(renderer), Some(shared)) = (state.renderer.take(), &mut self.shared) {
                 renderer.recycle(shared);
             }
         }
+        // The keys go somewhere else only when the window system says so.
         if self
             .focused
             .is_some_and(|id| !self.windows.contains_key(&id))
         {
-            self.focused = self.windows.keys().next().copied();
+            self.focused = None;
         }
         self.open_pending(event_loop);
         if self.windows.is_empty() {
+            // Ended by a failure, the run fails.
+            if let Some(err) = failed {
+                self.error.get_or_insert(err);
+            }
             event_loop.exit();
             return;
         }
-        let reset = IME_RESET.with(|reset| reset.replace(false));
-        if let Some(state) = self.focused.and_then(|id| self.windows.get_mut(&id)) {
-            state.update_ime(reset);
+        let everyone = IME_RESET.with(|reset| reset.replace(false));
+        let resets = IME_RESETS.with(|resets| std::mem::take(&mut *resets.borrow_mut()));
+        let focused = self.focused;
+        for (id, state) in &mut self.windows {
+            let reset = everyone || resets.contains(id);
+            let _entered = enter(*id, state.scale);
+            if focused == Some(*id) {
+                state.update_ime(reset);
+            } else if reset {
+                // Off where the keys aren't; on again when they come back.
+                state.ime_off();
+            }
         }
         // Sleep until input arrives or a view's timer runs out: nothing is
         // drawn unless something changed (gate criterion 6).
@@ -1338,6 +1431,66 @@ impl ClickCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(key: u64) -> WindowId {
+        WindowId::from(key)
+    }
+
+    fn take_frames() -> (bool, Vec<WindowId>) {
+        (
+            FRAME_REQUESTED.with(|requested| requested.replace(false)),
+            WINDOW_FRAMES.with(|frames| std::mem::take(&mut *frames.borrow_mut())),
+        )
+    }
+
+    #[test]
+    fn a_frame_is_asked_of_the_window_whose_view_runs() {
+        take_frames();
+        {
+            let _entered = enter(window(1), 2.0);
+            request_frame();
+            assert_eq!(scale_factor(), 2.0);
+        }
+        assert_eq!(take_frames(), (false, vec![window(1)]));
+        // Outside any view (a theme switch): every window.
+        request_frame();
+        assert_eq!(take_frames(), (true, vec![]));
+    }
+
+    #[test]
+    fn a_tree_asks_its_own_window_for_frames() {
+        take_frames();
+        {
+            let _entered = enter(window(7), 1.0);
+            bind_tree(42);
+        }
+        // A signal changed by window 8's input shows in window 7's tree.
+        {
+            let _entered = enter(window(8), 1.0);
+            request_frame_for_tree(42);
+        }
+        assert_eq!(take_frames(), (false, vec![window(7)]));
+        unbind_tree(42);
+        {
+            let _entered = enter(window(8), 1.0);
+            request_frame_for_tree(42);
+        }
+        assert_eq!(take_frames(), (false, vec![window(8)]));
+    }
+
+    #[test]
+    fn the_input_method_resets_in_the_window_that_moved_the_focus() {
+        IME_RESETS.with(|resets| resets.borrow_mut().clear());
+        {
+            let _entered = enter(window(3), 1.0);
+            reset_ime();
+        }
+        assert_eq!(
+            IME_RESETS.with(|resets| std::mem::take(&mut *resets.borrow_mut())),
+            vec![window(3)]
+        );
+        assert!(!IME_RESET.with(Cell::get));
+    }
 
     #[test]
     fn shortcuts_on_non_latin_layouts_use_the_latin_letter() {

@@ -2136,3 +2136,46 @@ fn a_slider_hands_on_one_value_per_drag_and_steps_with_arrows() {
     ui.input(&mut fonts, &key(Key::ArrowLeft));
     assert_eq!(changes.borrow().last().copied(), Some(0.45));
 }
+
+#[test]
+fn a_signal_marks_its_widget_in_its_own_tree() {
+    // Two windows' trees: a change watched in `a` must not be taken by
+    // `b`, which lays out first, or `a` keeps its stale paint.
+    use imaginarium_reactive::signal;
+    struct Counter(Rc<Cell<u32>>);
+    impl Widget for Counter {
+        fn style(&self) -> taffy::Style {
+            taffy::Style {
+                size: taffy::Size {
+                    width: length(80.0),
+                    height: length(30.0),
+                },
+                ..taffy::Style::default()
+            }
+        }
+        fn paint(&mut self, _cx: &mut Cx<'_>, _scene: &mut imaginarium_render::Scene) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let mut fonts = Fonts::bundled_only();
+    let selected = signal(false);
+    let painted = Rc::new(Cell::new(0));
+    let mut a = Ui::new();
+    let widget = a.add(Counter(painted.clone()));
+    a.watch(widget, false, move || {
+        selected.get();
+    });
+    let root = a.add_with_children(Flex::column().fill(), &[widget]);
+    a.set_root(root);
+    let mut b = Ui::new();
+    let other = b.add(Counter(Rc::default()));
+    let root = b.add_with_children(Flex::column().fill(), &[other]);
+    b.set_root(root);
+    frame(&mut a, &mut fonts);
+    frame(&mut b, &mut fonts);
+    let before = painted.get();
+    selected.set(true);
+    frame(&mut b, &mut fonts);
+    frame(&mut a, &mut fonts);
+    assert_eq!(painted.get(), before + 1, "a repaints its widget");
+}
