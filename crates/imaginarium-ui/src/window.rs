@@ -582,6 +582,9 @@ thread_local! {
     /// Frames for these windows.
     static WINDOW_FRAMES: std::cell::RefCell<Vec<WindowId>> = const { std::cell::RefCell::new(Vec::new()) };
     static SCALE_FACTOR: Cell<f64> = const { Cell::new(1.0) };
+    /// The interface size (`ui.scale`): logical pixels are this much
+    /// bigger than the system makes them.
+    static INTERFACE_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The input method starts over in every window.
     static IME_RESET: Cell<bool> = const { Cell::new(false) };
     /// The input method starts over in these windows.
@@ -624,9 +627,30 @@ impl Drop for Entered {
 const RETRY_AFTER_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// The window's scale factor (device pixels per logical pixel), for
-/// content that snaps to device pixels (canvas tiles).
+/// content that snaps to device pixels (canvas tiles). It includes the
+/// [`interface_scale`].
 pub fn scale_factor() -> f64 {
     SCALE_FACTOR.with(Cell::get)
+}
+
+/// The interface size: how much bigger than the system's every logical
+/// pixel is (1 is the system's). Content that keeps its own size, the
+/// board, divides by it.
+pub fn interface_scale() -> f64 {
+    INTERFACE_SCALE.with(Cell::get)
+}
+
+/// Sets the [`interface_scale`] (0.5 to 3): every window lays out again
+/// at it, and windows of a fixed size grow or shrink with it.
+pub fn set_interface_scale(scale: f64) {
+    let scale = if scale.is_finite() {
+        scale.clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    if INTERFACE_SCALE.with(|current| current.replace(scale)) != scale {
+        request_frame_everywhere();
+    }
 }
 
 /// Asks for a frame: of the window whose view is running (its input, its
@@ -753,7 +777,13 @@ struct WindowState<'v> {
     /// Why the next frame is drawn.
     causes: FrameCauses,
     scene: Scene,
+    /// Device pixels per logical pixel: the system's, times the interface
+    /// scale.
     scale: f64,
+    /// The system's part of it (the monitor's).
+    os_scale: f64,
+    /// The interface scale it was worked out with.
+    interface: f64,
     /// The surface size in physical pixels, from `Resized` (asking the
     /// window costs a round trip to the X server).
     physical: PhysicalSize<u32>,
@@ -912,7 +942,10 @@ impl<'v> Shell<'v> {
         let attributes = Window::default_attributes()
             .with_visible(false)
             .with_title(options.title.clone())
-            .with_inner_size(LogicalSize::new(options.size.width, options.size.height))
+            .with_inner_size(LogicalSize::new(
+                options.size.width * interface_scale(),
+                options.size.height * interface_scale(),
+            ))
             .with_resizable(options.resizable)
             .with_fullscreen(
                 options
@@ -952,7 +985,9 @@ impl<'v> Shell<'v> {
         let state = WindowState {
             options,
             view,
-            scale: window.scale_factor(),
+            scale: window.scale_factor() * interface_scale(),
+            os_scale: window.scale_factor(),
+            interface: interface_scale(),
             physical: window.inner_size(),
             window,
             renderer: None,
@@ -1021,6 +1056,20 @@ impl<'v> Shell<'v> {
         let Some(state) = self.windows.get_mut(&id).filter(|state| !state.closing) else {
             return;
         };
+        // The interface size changed: the window lays out at it, and one of
+        // a fixed size (the start window) grows or shrinks with it.
+        let interface = interface_scale();
+        if state.interface != interface {
+            state.interface = interface;
+            state.scale = state.os_scale * interface;
+            state.ime_resend = true;
+            if !state.options.resizable {
+                let _ = state.window.request_inner_size(LogicalSize::new(
+                    state.options.size.width * interface,
+                    state.options.size.height * interface,
+                ));
+            }
+        }
         let physical = state.physical;
         let size = Size::new(
             f64::from(physical.width) / state.scale,
@@ -1216,7 +1265,8 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // A move to a monitor with another scale (criterion 5). The
                 // new physical size follows as a `Resized` event.
-                state.scale = scale_factor;
+                state.os_scale = scale_factor;
+                state.scale = scale_factor * state.interface;
                 state.ime_resend = true;
                 if self.first == Some(id) {
                     self.stats.monitor = state.monitor().or(self.stats.monitor.take());

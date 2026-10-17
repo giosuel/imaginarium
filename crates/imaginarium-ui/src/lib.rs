@@ -89,6 +89,7 @@ pub use theme::{DEFAULT_ACCENT, Paint, Theme, ThemeKind, Token, contrast, mix, s
 
 pub use window::{
     FrameCauses, FrameInfo, Ime, Input, Key, Modifiers, MonitorInfo, RunStats, UiError, View,
-    WindowOptions, WindowRequest, file_drops_supported, frame_waker, request_frame,
-    request_frame_everywhere, run, run_with_gpu, scale_factor, window_waker,
+    WindowOptions, WindowRequest, file_drops_supported, frame_waker, interface_scale,
+    request_frame, request_frame_everywhere, run, run_with_gpu, scale_factor, set_interface_scale,
+    window_waker,
 };
