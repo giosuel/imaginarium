@@ -440,8 +440,9 @@ open it), one at a time:
   unreadable.
 - **The board background** (`board.background`, declared in
   `imaginarium-canvas`, shown in Appearance as the mockup's Dots, Grid
-  and Plain): every board window follows it at once. The grid is 1 px
-  lines at the dots' pitch, fainter than the dots.
+  and Plain): every board window follows it at once, even during a tool
+  bar drag. The grid's lines are one device pixel wide at the dots'
+  pitch (snapped at any scale), fainter than the dots.
 - **Not yet:** the scope tabs For me and This board (part 4), the
   mockup's theme cards and accent swatches (with the theme settings,
   M3.7: following the system, light, high contrast and reduced motion
