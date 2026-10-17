@@ -2300,6 +2300,7 @@ dependencies = [
  "accesskit",
  "imaginarium-canvas",
  "imaginarium-commands",
+ "imaginarium-io-native",
  "imaginarium-model",
  "imaginarium-reactive",
  "imaginarium-render",

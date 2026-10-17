@@ -81,6 +81,113 @@ pub(crate) struct Chrome {
     /// The panels in the corners, which a docked tool bar keeps clear of:
     /// top left, top right, bottom left, bottom right.
     pub(crate) corners: [WidgetId; 4],
+    /// The pill's save state, filled again when it changes
+    /// ([`save_state`]).
+    pub(crate) save_slot: WidgetId,
+}
+
+/// What the document pill says about the file (`shell.md` §3.1, the
+/// SaveStates mockup).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SaveShown {
+    /// A new board without a file: "Not saved" and Save….
+    Draft,
+    /// Every change is in the file.
+    Saved,
+    /// A write takes a while.
+    Saving,
+    /// The write failed; it is retried.
+    Failed(String),
+    /// Opened read-only (made with a newer version).
+    ReadOnly,
+}
+
+/// The pill's save state as widgets, for its slot. The Save… button is
+/// the placeholder's anchor.
+pub(crate) fn save_state(
+    ui: &mut Ui,
+    shown: &SaveShown,
+    asks: &Asks,
+    anchors: &mut HashMap<Placeholder, WidgetId>,
+) -> Vec<WidgetId> {
+    let status = |ui: &mut Ui, icon: &str, text: &str, ink: Token, weight: f32| {
+        let icon = ui.add(Icon::named(icon, 14.0, ink));
+        let label = ui.add(
+            Label::new(text, body().weight(weight))
+                .color(ink)
+                .single_line(),
+        );
+        ui.add_with_children(Flex::row().gap(6.0), &[icon, label])
+    };
+    match shown {
+        SaveShown::Saved => vec![status(ui, "check", "Saved", Token::TextMuted, 400.0)],
+        SaveShown::Saving => vec![status(
+            ui,
+            "loader-circle",
+            "Saving…",
+            Token::TextMuted,
+            400.0,
+        )],
+        SaveShown::Failed(reason) => {
+            let row = status(
+                ui,
+                "triangle-alert",
+                "Can't save · retrying",
+                Token::Warning,
+                500.0,
+            );
+            // Why, for the pointer and for screen readers.
+            vec![ui.add_with_children(
+                Flex::row().role(accesskit::Role::Status, format!("Can't save: {reason}")),
+                &[row],
+            )]
+        }
+        SaveShown::ReadOnly => vec![status(
+            ui,
+            "lock",
+            "Read-only · made with a newer version",
+            Token::TextMuted,
+            400.0,
+        )],
+        SaveShown::Draft => {
+            // A new board has no file yet: "Not saved" and Save….
+            let badge_text = ui.add(
+                Label::new("Not saved", TextStyle::new(12.0).weight(600.0))
+                    .color(Token::OnWarningSoft)
+                    .single_line(),
+            );
+            let badge = ui.add_with_children(
+                Flex::row()
+                    .height(22.0)
+                    .padding(8.0, 0.0)
+                    .radius(6.0)
+                    .background(Token::WarningSoft),
+                &[badge_text],
+            );
+            let save_text = ui.add(
+                Label::new("Save…", body().weight(600.0))
+                    .color(Token::AccentInk)
+                    .single_line(),
+            );
+            let save = ui.add_with_children(
+                ButtonBox::new(
+                    "Save…",
+                    ButtonColors {
+                        text: Token::AccentInk.into(),
+                        border: Some(Token::AccentLine.into()),
+                        ..ButtonColors::quiet()
+                    },
+                    explain(asks, Placeholder::Save),
+                )
+                .height(28.0)
+                .padding(10.0, 10.0)
+                .keep_focus(),
+                &[save_text],
+            );
+            anchors.insert(Placeholder::Save, save);
+            vec![badge, save]
+        }
+    }
 }
 
 fn body() -> TextStyle {
@@ -171,7 +278,7 @@ pub(crate) fn chrome(
 ) -> Chrome {
     let [keymap, shell_keys] = keymaps;
     let mut anchors = HashMap::new();
-    let pill = pill(ui, name, asks, &mut anchors);
+    let (pill, save_slot) = pill(ui, name, asks, &mut anchors);
     let top_right = top_right(ui, shell_keys, asks, &mut anchors);
     let spring = ui.add(through(taffy::FlexDirection::Row).grow(1.0));
     let top = ui.add_with_children(
@@ -267,6 +374,7 @@ pub(crate) fn chrome(
         anchors,
         zoom,
         corners: [pill, top_right, bottom_left, help],
+        save_slot,
     }
 }
 
@@ -276,7 +384,7 @@ fn pill(
     name: &str,
     asks: &Asks,
     anchors: &mut HashMap<Placeholder, WidgetId>,
-) -> WidgetId {
+) -> (WidgetId, WidgetId) {
     let logo = ui.add(Logo);
     let menu = ui.add_with_children(
         ButtonBox::new(
@@ -310,43 +418,9 @@ fn pill(
     );
     anchors.insert(Placeholder::Title, rename);
     let line = divider(ui, 0.0);
-    // A new board has no file yet: "Not saved" and Save… (shell.md §3.1).
-    let badge_text = ui.add(
-        Label::new("Not saved", TextStyle::new(12.0).weight(600.0))
-            .color(Token::OnWarningSoft)
-            .single_line(),
-    );
-    let badge = ui.add_with_children(
-        Flex::row()
-            .height(22.0)
-            .padding(8.0, 0.0)
-            .radius(6.0)
-            .background(Token::WarningSoft),
-        &[badge_text],
-    );
-    let save_text = ui.add(
-        Label::new("Save…", body().weight(600.0))
-            .color(Token::AccentInk)
-            .single_line(),
-    );
-    let save = ui.add_with_children(
-        ButtonBox::new(
-            "Save…",
-            ButtonColors {
-                text: Token::AccentInk.into(),
-                border: Some(Token::AccentLine.into()),
-                ..ButtonColors::quiet()
-            },
-            explain(asks, Placeholder::Save),
-        )
-        .height(28.0)
-        .padding(10.0, 10.0)
-        .keep_focus(),
-        &[save_text],
-    );
-    anchors.insert(Placeholder::Save, save);
-    let state = ui.add_with_children(Flex::row().gap(8.0), &[badge, save]);
-    ui.add_with_children(
+    let shown = save_state(ui, &SaveShown::Draft, asks, anchors);
+    let state = ui.add_with_children(Flex::row().gap(8.0), &shown);
+    let pill = ui.add_with_children(
         Flex::row()
             .height(44.0)
             .gap(8.0)
@@ -359,7 +433,8 @@ fn pill(
                 style.padding.right = length(12.0);
             }),
         &[menu, rename, line, state],
-    )
+    );
+    (pill, state)
 }
 
 /// Search, the AI assistant and Share.

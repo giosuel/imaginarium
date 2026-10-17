@@ -4,6 +4,7 @@
 //! their buttons ask for.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +12,7 @@ use std::time::Instant;
 
 use imaginarium_canvas::{BACKGROUND, BoardCanvas};
 use imaginarium_commands::{Args, CommandError, Keymap, Outcome, Registry as Commands, UsageStats};
+use imaginarium_io_native::{Autosave, SaveState};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Point, Rect, Size};
 use imaginarium_settings::{Registry, SubscriptionId};
@@ -28,6 +30,25 @@ use crate::contextbar::{self, ContextBar, Control};
 use crate::inspector::{self, Field, Inspector, Popup};
 use crate::palette::{self, Catalog, Kind, Palette, Sources};
 use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
+
+/// A snapshot instead of an update after this many records in the
+/// file's head, so the file opens without replaying them all.
+const SNAPSHOT_AFTER: usize = 200;
+
+/// Saving… shows only after this long (`shell.md` §3.1).
+const SAVING_SHOWN_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The file a board window saves into.
+struct FileLink {
+    path: PathBuf,
+    autosave: Autosave,
+    /// The document's version last sent to the saving thread.
+    saved: imaginarium_model::Version,
+    /// The board's revision then (a cheap check for changes).
+    revision: u64,
+    /// Records in the file's head: its snapshot and the updates since.
+    head: usize,
+}
 
 /// What a panel's button asked for. The window does it after the input
 /// that asked, when it can reach the board and the tree.
@@ -189,6 +210,10 @@ pub struct BoardWindow {
     frames: u64,
     /// The app it is a window of, if any (not in tests).
     app: Option<Rc<App>>,
+    /// The file the board is saved into, if it has one.
+    file: Option<FileLink>,
+    /// What the pill says about the file now.
+    shown: chrome::SaveShown,
     /// What Settings sees of this board ("This board").
     link: Rc<crate::app::BoardLink>,
     /// The board's revision `link` was last brought up to date at.
@@ -344,6 +369,8 @@ impl BoardWindow {
             close_after: None,
             frames: 0,
             app: None,
+            file: None,
+            shown: chrome::SaveShown::Draft,
             link: Rc::default(),
             link_seen: None,
             requests: Vec::new(),
@@ -365,6 +392,128 @@ impl BoardWindow {
             old.board_closed();
         }
         self
+    }
+
+    /// Saves every change of the board into the file at `path`, through
+    /// `autosave` (its thread). A file that was recovered (its last save
+    /// torn) gets a fresh snapshot first, as the format asks (spec §9.5).
+    pub fn saved_in(mut self, path: PathBuf, autosave: Autosave, recovered: bool) -> Self {
+        let document = self
+            .ui
+            .widget::<BoardCanvas>(self.board)
+            .map(BoardCanvas::document);
+        let (saved, revision) = match document {
+            Some(document) => {
+                if recovered && let Ok(snapshot) = document.export_snapshot() {
+                    autosave.snapshot(snapshot);
+                }
+                (document.version(), self.board_revision())
+            }
+            None => return self,
+        };
+        self.file = Some(FileLink {
+            path,
+            autosave,
+            saved,
+            revision,
+            head: 1,
+        });
+        self.update_save_state();
+        self
+    }
+
+    /// The file the board is saved into, if it has one.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.file.as_ref().map(|file| file.path.as_path())
+    }
+
+    fn board_revision(&self) -> u64 {
+        self.ui
+            .widget::<BoardCanvas>(self.board)
+            .map_or(0, BoardCanvas::revision)
+    }
+
+    /// Sends the board's changes since the last time to the file's saving
+    /// thread: as one update, or every so often as a snapshot, so the file
+    /// opens without replaying hundreds of updates.
+    fn save_changes(&mut self) {
+        let revision = self.board_revision();
+        let Some(file) = &mut self.file else {
+            return;
+        };
+        if file.revision == revision {
+            return;
+        }
+        file.revision = revision;
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        let document = board.document();
+        let version = document.version();
+        if version == file.saved {
+            return;
+        }
+        if file.head >= SNAPSHOT_AFTER
+            && let Ok(snapshot) = document.export_snapshot()
+        {
+            file.autosave.snapshot(snapshot);
+            file.head = 1;
+        } else if let Ok(update) = document.export_updates_since(&file.saved) {
+            file.autosave.update(update);
+            file.head += 1;
+        }
+        file.saved = version;
+    }
+
+    /// Shows in the pill how the file is doing, when that changed. Saving…
+    /// only after a while, so quick saves don't flicker (`shell.md` §3.1).
+    fn update_save_state(&mut self) {
+        let read_only = self
+            .ui
+            .widget::<BoardCanvas>(self.board)
+            .is_some_and(|board| {
+                !matches!(board.document().mode(), imaginarium_model::Mode::Editable)
+            });
+        let shown = match &self.file {
+            _ if read_only => chrome::SaveShown::ReadOnly,
+            None => chrome::SaveShown::Draft,
+            Some(file) => match file.autosave.state() {
+                SaveState::Saved => chrome::SaveShown::Saved,
+                SaveState::Saving(since) if since.elapsed() >= SAVING_SHOWN_AFTER => {
+                    chrome::SaveShown::Saving
+                }
+                // Not long yet: still the state before.
+                SaveState::Saving(_) => match &self.shown {
+                    chrome::SaveShown::Draft => chrome::SaveShown::Saved,
+                    shown => shown.clone(),
+                },
+                SaveState::Failed(reason) => chrome::SaveShown::Failed(reason),
+            },
+        };
+        if shown == self.shown {
+            return;
+        }
+        self.shown = shown;
+        let slot = self.chrome.save_slot;
+        let old: Vec<WidgetId> = self.ui.children(slot).to_vec();
+        for widget in old {
+            self.ui.remove(widget);
+        }
+        let new = chrome::save_state(
+            &mut self.ui,
+            &self.shown,
+            &self.asks,
+            &mut self.chrome.anchors,
+        );
+        self.ui.set_children(slot, &new);
+    }
+
+    /// When the pill should show Saving… if the save still runs then.
+    fn saving_deadline(&self) -> Option<Instant> {
+        match self.file.as_ref()?.autosave.state() {
+            SaveState::Saving(since) => Some(since + SAVING_SHOWN_AFTER),
+            SaveState::Saved | SaveState::Failed(_) => None,
+        }
     }
 
     /// Closes the window after `frames` frames (for scripted runs).
@@ -506,6 +655,8 @@ impl BoardWindow {
     pub fn draw(&mut self, scene: &mut Scene, size: Size) {
         self.size = size;
         self.sync_link();
+        self.save_changes();
+        self.update_save_state();
         if let Some(palette) = &mut self.palette {
             palette.resize(&mut self.ui, size.width, size.height);
         }
@@ -1736,7 +1887,10 @@ impl View for BoardWindow {
     }
 
     fn wake_at(&mut self) -> Option<Instant> {
-        self.ui.wake_at()
+        [self.ui.wake_at(), self.saving_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn wake(&mut self, now: Instant) -> bool {

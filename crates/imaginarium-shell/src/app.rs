@@ -222,6 +222,35 @@ impl App {
         Ok(self.board_window(document, "Untitled board"))
     }
 
+    /// A window on the board in the file at `path`, saving every change
+    /// into it. A file from a newer version opens read-only, without
+    /// saving.
+    ///
+    /// # Errors
+    /// If the file can't be opened or read, as a sentence to show.
+    pub fn open_board(self: &Rc<Self>, path: &std::path::Path) -> Result<BoardWindow, String> {
+        let name = path.file_stem().map_or_else(
+            || "Board".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let (opened, session) = imaginarium_io_native::Session::open(path)
+            .map_err(|err| format!("{} can't be opened: {err}", path.display()))?;
+        let read_only = !matches!(opened.document.mode(), imaginarium_model::Mode::Editable);
+        let recovered = opened.recovery.is_some();
+        let window = self.board_window(opened.document, &name);
+        if read_only {
+            // Nothing is written into a file this version doesn't fully
+            // understand.
+            return Ok(window);
+        }
+        let autosave = imaginarium_io_native::Autosave::start(
+            session,
+            path.to_owned(),
+            imaginarium_ui::frame_waker(),
+        );
+        Ok(window.saved_in(path.to_owned(), autosave, recovered))
+    }
+
     /// A window on `document`, named `name`.
     pub fn board_window(self: &Rc<Self>, document: Document, name: &str) -> BoardWindow {
         let board = BoardCanvas::new(document).with_workers(self.workers.clone());
@@ -958,5 +987,49 @@ mod tests {
             .map(|setting| setting.key())
             .collect();
         assert_eq!(declared, taken);
+    }
+
+    #[test]
+    fn a_board_opened_from_a_file_saves_every_change() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch")
+            .join(format!("shell-autosave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Launch plan.imag");
+        imaginarium_io_native::save_new_path(
+            &path,
+            &Document::new(DocumentKind::Board).unwrap(),
+            &imaginarium_io_native::SaveOptions {
+                protection: imaginarium_io_native::Protection::None,
+                created_with: "imaginarium tests".into(),
+            },
+        )
+        .unwrap();
+        let app = app();
+        let mut board = app.open_board(&path).unwrap();
+        assert_eq!(board.options().title, "Launch plan — Imaginarium");
+        board_draw(&mut board);
+        // Two shapes, then the window closes.
+        for _ in 0..2 {
+            board
+                .execute("board.insert_frame", &imaginarium_commands::Args::new())
+                .unwrap();
+            board_draw(&mut board);
+        }
+        let shapes = board.board().unwrap().document().view().node_count();
+        assert_eq!(shapes, 2);
+        drop(board);
+        let reopened =
+            imaginarium_io_native::open_path(&path, imaginarium_io_native::Credentials::None)
+                .unwrap();
+        assert_eq!(reopened.document.view().node_count(), 2);
+        // The pill says Saved, not Not saved, for a board with a file.
+        let mut board = app.open_board(&path).unwrap();
+        board_draw(&mut board);
+        let (ui, fonts) = board.ui();
+        assert!(ui.find_by_label(fonts, "Save…").is_none());
+        drop(board);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

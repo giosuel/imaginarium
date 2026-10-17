@@ -13,6 +13,7 @@ publish.workspace = true
 accesskit.workspace = true
 imaginarium-canvas.workspace = true
 imaginarium-commands.workspace = true
+imaginarium-io-native.workspace = true
 imaginarium-model.workspace = true
 imaginarium-reactive.workspace = true
 imaginarium-render.workspace = true
