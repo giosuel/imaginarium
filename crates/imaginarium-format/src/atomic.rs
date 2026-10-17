@@ -20,8 +20,9 @@ const TEMP_ATTEMPTS: usize = 8;
 ///   file or symlink someone left at a predictable name is never written
 ///   through, and two saves never share one temporary file.
 /// - It takes the replaced file's permissions, so a private, unencrypted
-///   document doesn't become readable by others. (Owner, extended
-///   attributes and ACLs aren't copied.)
+///   document doesn't become readable by others, and its group where the
+///   user may set it (a shared folder's members keep their access). (Owner,
+///   extended attributes and ACLs aren't copied.)
 /// - A `target` that is a symlink is resolved: the file it points to is
 ///   replaced, and the link stays a link.
 pub struct AtomicFile {
@@ -59,6 +60,14 @@ impl AtomicFile {
                 Ok(file) => {
                     if let Some(existing) = &existing {
                         file.set_permissions(existing.permissions())?;
+                        // The replaced file's group too, so a shared folder's
+                        // members keep their access (best effort: only a
+                        // group the user is in can be set).
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            let _ = std::os::unix::fs::fchown(&file, None, Some(existing.gid()));
+                        }
                     }
                     return Ok(Self {
                         file: Some(file),
