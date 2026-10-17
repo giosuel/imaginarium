@@ -308,3 +308,21 @@ fn a_failed_save_is_retried_until_it_works() {
     .unwrap();
     assert_eq!(reopened.document.view(), document.view());
 }
+
+/// Writes an empty board to `$IMAGINARIUM_SAMPLE` (for trying the app by
+/// hand): `IMAGINARIUM_SAMPLE=board.imag cargo test -p imaginarium-io-native
+/// --test autosave write_a_sample -- --ignored`.
+#[test]
+#[ignore = "writes a file for trying the app"]
+fn write_a_sample() {
+    let path = PathBuf::from(std::env::var_os("IMAGINARIUM_SAMPLE").unwrap());
+    save_new_path(
+        &path,
+        &Document::new(DocumentKind::Board).unwrap(),
+        &SaveOptions {
+            protection: Protection::None,
+            created_with: "imaginarium tests".into(),
+        },
+    )
+    .unwrap();
+}
