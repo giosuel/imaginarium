@@ -11,11 +11,12 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.4 part 2, the command palette** (`Ctrl+K`) on
-  the board's real registry, opened by the Search button. Part 1 is done
-  (2026-10-17): the board window (`imaginarium-shell`; `imaginarium-app`
-  opens it), reviewed by a fresh agent, stacked on M3.3's PRs. M3.3 is
-  done (2026-10-17): the board's commands, tools and
+- **Next step:** **M3.4 part 3, the contextual toolbar** for the
+  selection (`shell.md` §3.5, the PartContextBar mockup). Parts 1 and 2
+  are done (2026-10-17): the board window
+  (https://github.com/giosuel/imaginarium/pull/56) and the command
+  palette, each reviewed by a fresh agent, stacked on M3.3's PRs.
+  M3.3 is done (2026-10-17): the board's commands, tools and
   clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
   `imaginarium-canvas` shows and edits a board. Each part was reviewed by
   a fresh agent; the PRs are stacked on M3.1's
@@ -1066,6 +1067,10 @@ What M3 builds on:
     pointer through, clicks that keep the focus, the window's app ID
     (`ch.giosuel.Imaginarium`). Left for later parts: arrow keys in the
     tool bar, `F6`, double-click to keep a tool;
+  - [x] **part 2, the command palette** (2026-10-17, `shell.md` §3.7
+    "As built"): commands and settings in one search, highlighted
+    matches, availability with reasons, settings changed in place,
+    recent first. Not yet: arguments typed inline;
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;

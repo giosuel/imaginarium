@@ -198,6 +198,26 @@ command with arguments takes them inline (`Set corner radius` › `12 px`,
 list. The footer lists the keys (↑↓ choose, ↵ run, Tab argument, Esc
 close).
 
+**As built (M3.4, the palette).** `Ctrl+K` (a shell keymap with the
+command `palette.open`, so it works wherever the keys are) or the
+Search button opens it as a lightly dimmed dialog.
+- **What it finds.** The board's and the shell's commands that run
+  without arguments, and the boolean and enum settings, in one index
+  (`SearchIndex`); `SearchIndex::explain` gives the matched letters,
+  or the synonym, for the rows shown ("G**rou**p", "· also **rou**nd
+  corners"). Results sit under their categories; without a query, the
+  recent commands come first, then everything.
+- **Availability** is a snapshot taken when it opens. Hidden commands
+  aren't listed; a disabled one is greyed and says why ("Nothing to
+  redo"), and Enter does nothing.
+- **Keys.** ↑↓ move (the row scrolls into view), Enter runs a command
+  and closes the palette, or changes a setting in place; Tab changes a
+  setting's value (an enum steps to its next value); Esc or a click
+  beside it closes it, and the keys go back to the board.
+- **Not yet:** arguments typed inline (`Set corner radius` › `12 px`):
+  commands with required arguments aren't listed. Templates, help and
+  AI actions come with their milestones.
+
 ### 3.8 The context menu
 
 Right-click on a selection or the board. The same commands as the
