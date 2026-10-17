@@ -152,6 +152,38 @@ pub(crate) static PREVIOUS_AREA: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
     },
 );
 
+/// `file.new_board`.
+pub(crate) static NEW_BOARD: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "file.new_board",
+    CommandMeta::new(
+        "New board",
+        "Open a new, empty board in a window of its own.",
+    )
+    .category("File")
+    .synonyms(&["new", "new window", "blank board", "create board"])
+    .icon("plus"),
+    |cx, _args| {
+        cx.asks.push(Ask::NewBoard);
+        Ok(Outcome::Done)
+    },
+);
+
+/// `window.close`.
+pub(crate) static CLOSE_WINDOW: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "window.close",
+    CommandMeta::new(
+        "Close window",
+        "Close this board's window. When it is the last board open, the start window opens.",
+    )
+    .category("File")
+    .synonyms(&["close", "close board"])
+    .icon("x"),
+    |cx, _args| {
+        cx.asks.push(Ask::CloseWindow);
+        Ok(Outcome::Done)
+    },
+);
+
 /// The shell's shortcuts (the board has its own keymap).
 pub(crate) fn shell_keymap(
     platform: imaginarium_commands::Platform,
@@ -170,6 +202,14 @@ pub(crate) fn shell_keymap(
         "Mod+I",
         imaginarium_commands::CommandId::new("view.inspector"),
     );
+    let _ = keymap.bind(
+        "Mod+N",
+        imaginarium_commands::CommandId::new("file.new_board"),
+    );
+    let _ = keymap.bind(
+        "Mod+W",
+        imaginarium_commands::CommandId::new("window.close"),
+    );
     let _ = keymap.bind("F6", imaginarium_commands::CommandId::new("view.next_area"));
     let _ = keymap.bind(
         "Shift+F6",
@@ -183,7 +223,9 @@ pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 7] = [
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 9] = [
+    &NEW_BOARD,
+    &CLOSE_WINDOW,
     &TOGGLE_INSPECTOR,
     &CONTEXT_MENU,
     &NEXT_AREA,

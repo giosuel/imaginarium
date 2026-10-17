@@ -17,10 +17,11 @@ use imaginarium_settings::{Registry, SubscriptionId};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Flex, FrameInfo, Input, Key, Label, LayerId, LayerOptions, Placement,
-    Token, Ui, View, WidgetId, WindowOptions, theme,
+    Token, Ui, View, WidgetId, WindowOptions, WindowRequest, theme,
 };
 use taffy::prelude::length;
 
+use crate::app::App;
 use crate::chrome::{self, Chrome, Placeholder};
 use crate::commands::{ShellCx, shell_commands, shell_keymap};
 use crate::contextbar::{self, ContextBar, Control};
@@ -34,6 +35,10 @@ use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
 pub(crate) enum Ask {
     /// Run a command, the board's or the shell's.
     Run(&'static str),
+    /// Open a window on a new board.
+    NewBoard,
+    /// Close this window.
+    CloseWindow,
     /// Show what a placeholder will do.
     Explain(Placeholder),
     /// Open the zoom menu.
@@ -177,6 +182,12 @@ pub struct BoardWindow {
     size: Size,
     close_after: Option<u64>,
     frames: u64,
+    /// The app it is a window of, if any (not in tests).
+    app: Option<Rc<App>>,
+    /// Windows to open, or this one to close.
+    requests: Vec<WindowRequest>,
+    /// It asked to close, or was asked to.
+    closed: bool,
 }
 
 impl BoardWindow {
@@ -313,11 +324,24 @@ impl BoardWindow {
             size: Size::new(1440.0, 900.0),
             close_after: None,
             frames: 0,
+            app: None,
+            requests: Vec::new(),
+            closed: false,
         };
         // Shown where the setting says, without writing it back.
         window.put_bar(dock);
         window.ui.set_focus(&mut window.fonts, Some(board));
         window
+    }
+
+    /// Makes it a window of `app`: New board (`Ctrl+N`) opens another one,
+    /// and closing the last board opens the start window.
+    pub fn in_app(mut self, app: Rc<App>) -> Self {
+        app.board_opened();
+        if let Some(old) = self.app.replace(app) {
+            old.board_closed();
+        }
+        self
     }
 
     /// Closes the window after `frames` frames (for scripted runs).
@@ -659,6 +683,35 @@ impl BoardWindow {
                 self.refresh_inspector();
             }
             Ask::FocusStep(forward) => self.ui.focus_next(&mut self.fonts, forward),
+            Ask::NewBoard => {
+                let Some(app) = &self.app else {
+                    return;
+                };
+                if let Ok(window) = app.new_board() {
+                    self.requests
+                        .push(WindowRequest::Open(window.options(), Box::new(window)));
+                }
+            }
+            Ask::CloseWindow => {
+                self.closing();
+                self.requests.push(WindowRequest::Close);
+            }
+        }
+    }
+
+    /// The window closes: the start window opens if it was the last board.
+    fn closing(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        // It stops counting at once: several boards closing in one go
+        // (before any is dropped) see each other gone.
+        if let Some(app) = &self.app
+            && app.board_closed() == 0
+        {
+            let start = app.start_window();
+            self.requests
+                .push(WindowRequest::Open(start.options(), Box::new(start)));
         }
     }
 
@@ -1413,6 +1466,11 @@ impl Drop for BoardWindow {
         if let Ok(mut settings) = self.settings.try_borrow_mut() {
             settings.unsubscribe(self.subscription);
         }
+        if let Some(app) = &self.app
+            && !self.closed
+        {
+            app.board_closed();
+        }
     }
 }
 
@@ -1539,6 +1597,15 @@ impl View for BoardWindow {
 
     fn should_close(&mut self) -> bool {
         self.close_after.is_some_and(|frames| self.frames >= frames)
+    }
+
+    fn close_requested(&mut self) -> bool {
+        self.closing();
+        true
+    }
+
+    fn take_requests(&mut self) -> Vec<WindowRequest> {
+        std::mem::take(&mut self.requests)
     }
 
     fn wake_at(&mut self) -> Option<Instant> {

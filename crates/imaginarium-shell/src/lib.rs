@@ -38,20 +38,25 @@
 //! - [`BoardWindow`]: a board window's view.
 //! - [`Dock`]: where the tool bar is.
 
+mod app;
 mod chrome;
 mod commands;
 mod contextbar;
 mod inspector;
 mod menu;
 mod palette;
+mod start;
 mod toolbar;
 mod window;
 
 #[cfg(test)]
 mod tests;
 
+pub use app::{App, SHOW_START_WINDOW};
+pub use start::StartWindow;
 pub use toolbar::{Dock, TOOLBAR_POSITION};
 pub use window::BoardWindow;
 
 /// The shell's settings, for the app to register.
-pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] = &[&TOOLBAR_POSITION];
+pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] =
+    &[&TOOLBAR_POSITION, &SHOW_START_WINDOW];
