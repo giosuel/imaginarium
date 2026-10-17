@@ -460,25 +460,36 @@ enum UserEvent {
     Access(accesskit_winit::Event),
     /// The clipboard's thread read a text.
     Pasted,
-    /// Another thread asked for frames ([`frame_waker`]).
-    Wake,
+    /// Another thread asked for frames ([`frame_waker`]): of one window,
+    /// or of every one.
+    Wake(Option<WindowId>),
 }
 
 /// Wakes the event loop from another thread.
-type Waker = Box<dyn Fn() + Send>;
+type Waker = Box<dyn Fn(Option<WindowId>) + Send>;
 static FRAME_WAKER: std::sync::Mutex<Option<Waker>> = std::sync::Mutex::new(None);
 
-/// Something another thread can call to have every window draw again (a
-/// file saved on its thread, so the document pill shows it). Safe to call
-/// before the event loop runs (it does nothing then) or after it ended.
-pub fn frame_waker() -> impl Fn() + Send + Sync + Clone + 'static {
-    || {
-        if let Ok(waker) = FRAME_WAKER.lock()
-            && let Some(wake) = waker.as_ref()
-        {
-            wake();
-        }
+fn wake_from_another_thread(window: Option<WindowId>) {
+    if let Ok(waker) = FRAME_WAKER.lock()
+        && let Some(wake) = waker.as_ref()
+    {
+        wake(window);
     }
+}
+
+/// Something another thread can call to have every window draw again.
+/// Safe to call before the event loop runs (it does nothing then) or after
+/// it ended.
+pub fn frame_waker() -> impl Fn() + Send + Sync + Clone + 'static {
+    || wake_from_another_thread(None)
+}
+
+/// [`frame_waker`] for the window whose view is running now (a file saved
+/// on its thread, so that window's pill shows it): only it draws. `None`
+/// outside a window's view.
+pub fn window_waker() -> Option<impl Fn() + Send + Sync + Clone + 'static> {
+    let window = CURRENT.with(Cell::get)?;
+    Some(move || wake_from_another_thread(Some(window)))
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -677,8 +688,8 @@ pub fn run_with_gpu<'v>(
     });
     let frames = proxy.clone();
     if let Ok(mut slot) = FRAME_WAKER.lock() {
-        *slot = Some(Box::new(move || {
-            let _ = frames.send_event(UserEvent::Wake);
+        *slot = Some(Box::new(move |window| {
+            let _ = frames.send_event(UserEvent::Wake(window));
         }));
     }
     let mut shell = Shell {
@@ -1087,9 +1098,11 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
     fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
             UserEvent::Access(event) => event,
-            UserEvent::Wake => {
-                for state in self.windows.values_mut() {
-                    state.request_redraw(Cause::Request);
+            UserEvent::Wake(window) => {
+                for (id, state) in &mut self.windows {
+                    if window.is_none_or(|window| window == *id) {
+                        state.request_redraw(Cause::Request);
+                    }
                 }
                 return;
             }
