@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accesskit::{Action, ActionData, ActionRequest, NodeId, TextPosition, TextSelection};
@@ -2099,4 +2099,40 @@ fn a_disabled_button_box_does_nothing_and_is_skipped() {
         .map(|(_, node)| node)
         .unwrap();
     assert!(node.is_disabled());
+}
+
+#[test]
+fn a_slider_hands_on_one_value_per_drag_and_steps_with_arrows() {
+    use crate::widgets::Slider;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    let seen = changes.clone();
+    let slider = ui.add(Slider::new(
+        "Opacity",
+        0.0,
+        1.0,
+        || 0.5,
+        move |value| seen.borrow_mut().push(value),
+    ));
+    let root = ui.add_with_children(Flex::row().width(216.0).padding(0.0, 10.0), &[slider]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let bounds = ui.bounds(slider).unwrap();
+    let start = Point::new(bounds.x0 + 8.0, bounds.center().y);
+    ui.input(&mut fonts, &pointer(start, true, true));
+    for step in 1..=5 {
+        ui.input(
+            &mut fonts,
+            &Input::PointerMoved(start + (20.0 * f64::from(step), 0.0)),
+        );
+    }
+    ui.input(
+        &mut fonts,
+        &pointer(Point::new(bounds.x1 - 8.0, start.y), true, false),
+    );
+    assert_eq!(*changes.borrow(), vec![1.0], "one change, at the release");
+    ui.set_focus(&mut fonts, Some(slider));
+    ui.input(&mut fonts, &key(Key::ArrowLeft));
+    assert_eq!(changes.borrow().last().copied(), Some(0.45));
 }

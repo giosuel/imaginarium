@@ -1772,6 +1772,193 @@ impl Widget for Swatch {
     }
 }
 
+/// A value on a track (corner radius, opacity): drag the knob or click the
+/// track; ←→ step it by a twentieth. It shows its own value while
+/// dragged and hands the value on when the press ends, so a drag is one
+/// change, not one per pointer move.
+pub struct Slider {
+    label: String,
+    range: (f64, f64),
+    value: Rc<dyn Fn() -> f64>,
+    on_change: Box<dyn FnMut(f64)>,
+    /// The value while dragging, before it is handed on.
+    dragging: Option<f64>,
+}
+
+impl Slider {
+    /// A slider named `label` over `min..=max`, showing `value`, that
+    /// calls `on_change` with a new value.
+    pub fn new(
+        label: impl Into<String>,
+        min: f64,
+        max: f64,
+        value: impl Fn() -> f64 + 'static,
+        on_change: impl FnMut(f64) + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            range: (min, max.max(min + f64::EPSILON)),
+            value: Rc::new(value),
+            on_change: Box::new(on_change),
+            dragging: None,
+        }
+    }
+
+    /// Adds it to `ui`, repainting it when what `value` reads changes.
+    pub fn add_to(self, ui: &mut Ui) -> WidgetId {
+        let value = self.value.clone();
+        let id = ui.add(self);
+        ui.watch(id, false, move || {
+            value();
+        });
+        id
+    }
+
+    fn shown(&self) -> f64 {
+        let (min, max) = self.range;
+        self.dragging
+            .unwrap_or_else(|| (self.value)())
+            .clamp(min, max)
+    }
+
+    /// The value at window x `x` on a track in `bounds`.
+    fn at(&self, bounds: Rect, x: f64) -> f64 {
+        let (min, max) = self.range;
+        let inner = bounds.inset(-8.0);
+        let t = ((x - inner.x0) / inner.width().max(1.0)).clamp(0.0, 1.0);
+        min + t * (max - min)
+    }
+}
+
+impl Widget for Slider {
+    fn style(&self) -> Style {
+        Style {
+            size: taffy::Size {
+                width: taffy::Dimension::auto(),
+                height: length(16.0),
+            },
+            flex_grow: 1.0,
+            min_size: taffy::Size {
+                width: length(48.0),
+                height: length(16.0),
+            },
+            ..Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        use crate::theme::Token;
+        let bounds = cx.bounds();
+        let theme = theme();
+        let (min, max) = self.range;
+        let t = (self.shown() - min) / (max - min);
+        let inner = bounds.inset(-8.0);
+        let y = bounds.center().y;
+        let x = inner.x0 + t * inner.width();
+        let track = RoundedRect::new(inner.x0, y - 2.0, inner.x1, y + 2.0, 2.0);
+        scene.fill(&track, theme.color(Token::ControlBorder));
+        let filled = RoundedRect::new(inner.x0, y - 2.0, x, y + 2.0, 2.0);
+        scene.fill(&filled, theme.color(Token::Accent));
+        let knob = imaginarium_render::kurbo::Circle::new((x, y), 7.25);
+        scene.fill(&knob, theme.color(Token::PanelBg));
+        scene.stroke(&knob, 1.5, theme.color(Token::Accent));
+        if cx.is_focus_visible() {
+            scene.stroke(
+                &imaginarium_render::kurbo::Circle::new((x, y), 10.5),
+                2.0,
+                theme.color(Token::AccentInk),
+            );
+        }
+    }
+
+    fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        let bounds = cx.bounds();
+        match input {
+            Input::PointerButton {
+                primary: true,
+                pressed: true,
+                position,
+                ..
+            } => {
+                self.dragging = Some(self.at(bounds, position.x));
+                cx.request_paint();
+                true
+            }
+            Input::PointerMoved(position) if self.dragging.is_some() => {
+                self.dragging = Some(self.at(bounds, position.x));
+                cx.request_paint();
+                true
+            }
+            Input::PointerButton {
+                primary: true,
+                pressed: false,
+                position,
+                ..
+            } => {
+                if self.dragging.take().is_some() {
+                    let value = self.at(bounds, position.x);
+                    (self.on_change)(value);
+                    cx.request_paint();
+                }
+                true
+            }
+            Input::Key {
+                key, pressed: true, ..
+            } if *key == Key::ArrowLeft || *key == Key::ArrowRight => {
+                let (min, max) = self.range;
+                let step = (max - min) / 20.0;
+                let by = if *key == Key::ArrowLeft { -step } else { step };
+                let value = (self.shown() + by).clamp(min, max);
+                (self.on_change)(value);
+                cx.request_paint();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn capture_lost(&mut self, cx: &mut Cx<'_>) {
+        // The press ended elsewhere: the value goes back.
+        self.dragging = None;
+        cx.request_paint();
+    }
+
+    fn focusable(&self) -> bool {
+        true
+    }
+
+    fn focus_on_click(&self) -> bool {
+        false
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        let (min, max) = self.range;
+        let mut node = Node::new(Role::Slider);
+        node.set_label(self.label.clone());
+        node.set_numeric_value(self.shown());
+        node.set_min_numeric_value(min);
+        node.set_max_numeric_value(max);
+        node.set_bounds(access_rect(cx.bounds()));
+        node.add_action(Action::SetValue);
+        Some(node)
+    }
+
+    fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
+        match (request.action, &request.data) {
+            (Action::SetValue, Some(accesskit::ActionData::NumericValue(value))) => {
+                let (min, max) = self.range;
+                (self.on_change)(value.clamp(min, max));
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Callbacks of a [`TextInput`].
 type TextCallback = Box<dyn FnMut(&str)>;
 
