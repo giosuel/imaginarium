@@ -559,3 +559,104 @@ fn write_a_sample() {
     )
     .unwrap();
 }
+
+/// A new board's snapshot, for keeping it.
+fn new_board() -> (Document, Vec<u8>) {
+    let document = Document::new(DocumentKind::Board).unwrap();
+    let snapshot = document.export_snapshot().unwrap();
+    (document, snapshot)
+}
+
+#[test]
+fn an_untitled_board_is_kept_in_a_file_made_with_its_first_change() {
+    let dir = scratch_dir("kept");
+    let folder = dir.join("recovery");
+    let path = folder.join("untitled.imag");
+    let (mut document, snapshot) = new_board();
+    let autosave = Autosave::create(path.clone(), &snapshot, "tests".into(), || {});
+    // Nothing yet: an empty board leaves nothing behind.
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!folder.exists());
+    autosave.update(add_shape(&mut document, 0.0));
+    assert_eq!(
+        wait_for(&autosave, |s| *s == SaveState::Saved),
+        SaveState::Saved
+    );
+    assert_eq!(reopened(&path).view().node_count(), 1);
+    // Later changes go into the same file.
+    autosave.update(add_shape(&mut document, 20.0));
+    assert!(autosave.finish().is_none());
+    assert_eq!(reopened(&path).view().node_count(), 2);
+}
+
+#[test]
+fn a_discarded_board_leaves_no_file_and_writes_nothing_more() {
+    let dir = scratch_dir("discard");
+    let path = dir.join("untitled.imag");
+    let (mut document, snapshot) = new_board();
+    let autosave = Autosave::create(path.clone(), &snapshot, "tests".into(), || {});
+    autosave.update(add_shape(&mut document, 0.0));
+    wait_for(&autosave, |s| *s == SaveState::Saved);
+    assert!(path.exists());
+    autosave.update(add_shape(&mut document, 20.0));
+    assert!(autosave.discard_in_background().join().unwrap().is_none());
+    assert!(!path.exists());
+    // Discarding a board that never changed: nothing to delete, no error.
+    let (_, snapshot) = new_board();
+    let untouched = Autosave::create(dir.join("other.imag"), &snapshot, "tests".into(), || {});
+    assert!(untouched.discard_in_background().join().unwrap().is_none());
+}
+
+#[test]
+fn boards_left_behind_are_found_but_not_those_still_open() {
+    let dir = scratch_dir("found");
+    let (mut first, snapshot) = new_board();
+    let left = Autosave::create(dir.join("left.imag"), &snapshot, "tests".into(), || {});
+    left.update(add_shape(&mut first, 0.0));
+    // The app "crashes": the saving stops, the file stays.
+    assert!(left.finish().is_none());
+    let (mut second, snapshot) = new_board();
+    let open = Autosave::create(dir.join("open.imag"), &snapshot, "tests".into(), || {});
+    open.update(add_shape(&mut second, 0.0));
+    wait_for(&open, |s| *s == SaveState::Saved);
+    // Neither lock files nor temporary files count.
+    std::fs::write(dir.join(".~left.imag.lock"), "").unwrap();
+    std::fs::write(dir.join(".left.imag.1234.tmp"), "").unwrap();
+    let kept = imaginarium_io_native::kept_boards(&dir);
+    let names: Vec<_> = kept
+        .iter()
+        .map(|kept| kept.path.file_name().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["left.imag"]);
+    assert_eq!(kept[0].opened.document.view().node_count(), 1);
+    // Found means held: a second look (another app) doesn't take it too.
+    assert!(imaginarium_io_native::kept_boards(&dir).is_empty());
+    drop(kept);
+    assert_eq!(imaginarium_io_native::kept_boards(&dir).len(), 1);
+    assert!(imaginarium_io_native::kept_boards(&dir.join("missing")).is_empty());
+    drop(open);
+}
+
+#[test]
+fn a_board_that_cant_be_kept_yet_is_tried_again() {
+    let dir = scratch_dir("blocked");
+    // A file where the folder should be.
+    let blocked = dir.join("recovery");
+    std::fs::write(&blocked, "").unwrap();
+    let path = blocked.join("untitled.imag");
+    let (mut document, snapshot) = new_board();
+    let autosave = Autosave::create(path.clone(), &snapshot, "tests".into(), || {});
+    autosave.update(add_shape(&mut document, 0.0));
+    assert!(matches!(
+        wait_for(&autosave, |s| matches!(s, SaveState::Failed(_))),
+        SaveState::Failed(_)
+    ));
+    std::fs::remove_file(&blocked).unwrap();
+    autosave.update(add_shape(&mut document, 20.0));
+    let start = Instant::now();
+    while wait_for(&autosave, |s| *s == SaveState::Saved) != SaveState::Saved
+        && start.elapsed() < Duration::from_secs(10)
+    {}
+    assert_eq!(autosave.state(), SaveState::Saved);
+    assert_eq!(reopened(&path).view().node_count(), 2);
+}

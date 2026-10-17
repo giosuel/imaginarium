@@ -25,10 +25,12 @@
 
 mod autosave;
 mod error;
+mod kept;
 mod session;
 
 pub use autosave::{Autosave, Compact, RETRY_AFTER, SNAPSHOT_AFTER, SaveState, Storage};
 pub use error::{NativeError, Result};
+pub use kept::{KeptBoard, kept_boards};
 pub use session::{FileId, Opening, Session};
 
 use std::collections::HashMap;

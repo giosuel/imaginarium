@@ -12,6 +12,10 @@
 //!   that could lose something;
 //! - says how it goes ([`SaveState`]) and wakes the UI when that changes.
 //!
+//! A board without a file of its own yet (untitled) is kept in one anyway,
+//! for crash recovery ([`Autosave::create`]): the thread creates it with
+//! the first change, and [`Autosave::discard_in_background`] deletes it.
+//!
 //! A snapshot never drops what is in the file: before one, the thread
 //! merges the file's head into its copy (another writer may have changed
 //! the file while this one couldn't write). A failed save is retried every
@@ -56,6 +60,8 @@ const COMPACT_FROM: u64 = 1 << 20;
 enum Job {
     Update(Vec<u8>),
     Stop,
+    /// Stop without writing, and let go of the file (it is deleted).
+    Discard,
 }
 
 /// The storage a saving thread writes to, and what only a real file can
@@ -89,11 +95,16 @@ type Reopen<F> = Box<dyn FnMut() -> crate::Result<Session<F>> + Send>;
 /// Compacts the storage (for files): `None` where it can't.
 pub type Compact = Option<Box<dyn FnMut() -> crate::Result<()> + Send>>;
 
+/// Creates the storage with a document in it, and opens it to save into.
+type Create<F> = Box<dyn FnMut(&Document) -> crate::Result<Session<F>> + Send>;
+
 /// The saving thread of one open document.
 pub struct Autosave {
     sender: Sender<Job>,
     shared: Arc<Mutex<Shared>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The file, for [`Autosave::discard_in_background`].
+    path: Option<std::path::PathBuf>,
 }
 
 /// What the UI and the saving thread share, under one lock (Saved must
@@ -118,22 +129,67 @@ impl Autosave {
     /// saving thread) when the state changes, to wake the UI.
     pub fn start(session: Session, id: FileId, notify: impl Fn() + Send + Sync + 'static) -> Self {
         let reopen_id = id.clone();
-        let compact_path = id.path;
-        Self::start_with(
+        let mut autosave = Self::start_with(
             session,
             move || Session::reopen(&reopen_id.path, &reopen_id.doc_id),
-            Some(Box::new(move || {
-                imaginarium_format::compact_file(
-                    &compact_path,
-                    None,
-                    imaginarium_format::CompactionPlan::default(),
-                    None,
-                )
-                .map(|_| ())
-                .map_err(NativeError::from)
-            })),
+            compact_at(id.path.clone()),
             notify,
-        )
+        );
+        autosave.path = Some(id.path);
+        autosave
+    }
+
+    /// Keeps a document that has no file yet in a new one at `path` (for
+    /// crash recovery), from `snapshot` (the document as it is now). The
+    /// file, and its folder, are made with the first update; until then
+    /// nothing is written. `created_with` goes into its `META`.
+    pub fn create(
+        path: std::path::PathBuf,
+        snapshot: &[u8],
+        created_with: String,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        // Its id is the file's, known once the thread has made it.
+        let doc_id = Arc::new(Mutex::new(None));
+        let made = doc_id.clone();
+        let create_path = path.clone();
+        let create: Create<File> = Box::new(move |document| {
+            if let Some(folder) = create_path.parent() {
+                std::fs::create_dir_all(folder)?;
+            }
+            let options = crate::SaveOptions {
+                protection: crate::Protection::None,
+                created_with: created_with.clone(),
+            };
+            crate::save_new_path(&create_path, document, &options)?;
+            match Session::open(&create_path)? {
+                crate::Opening::Editable(_, session) => {
+                    if let Ok(mut id) = made.lock() {
+                        *id = Some(session.doc_id());
+                    }
+                    Ok(*session)
+                }
+                crate::Opening::ReadOnly(_) => Err(NativeError::CantSave(crate::session::IN_USE)),
+            }
+        });
+        let reopen_path = path.clone();
+        let reopen = move || {
+            let id = doc_id.lock().ok().and_then(|id| *id);
+            match id {
+                Some(id) => Session::reopen(&reopen_path, &id),
+                None => Err(NativeError::CantSave("the file isn't made yet")),
+            }
+        };
+        let mut autosave = Self::spawn(
+            None,
+            vec![snapshot.to_vec()],
+            Box::new(reopen),
+            compact_at(path.clone()),
+            Some(create),
+            notify,
+        );
+        autosave.path = Some(path);
+        autosave
     }
 
     /// [`Autosave::start`] on any storage: `reopen` opens it again by its
@@ -144,6 +200,43 @@ impl Autosave {
         compact: Compact,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        let parts = session.take_parts();
+        Self::spawn(
+            Some(session),
+            parts,
+            Box::new(reopen),
+            compact,
+            None,
+            notify,
+        )
+    }
+
+    /// [`Autosave::create`] on any storage: `create` makes it with the
+    /// document in it (when the first update comes) and opens it.
+    pub fn create_with<F: Storage>(
+        snapshot: &[u8],
+        create: impl FnMut(&Document) -> crate::Result<Session<F>> + Send + 'static,
+        reopen: impl FnMut() -> crate::Result<Session<F>> + Send + 'static,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::spawn(
+            None,
+            vec![snapshot.to_vec()],
+            Box::new(reopen),
+            None,
+            Some(Box::new(create)),
+            notify,
+        )
+    }
+
+    fn spawn<F: Storage>(
+        session: Option<Session<F>>,
+        parts: Vec<Vec<u8>>,
+        reopen: Reopen<F>,
+        compact: Compact,
+        create: Option<Create<F>>,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
             state: SaveState::Saved,
@@ -151,7 +244,6 @@ impl Autosave {
             written: 0,
         }));
         let thread_shared = shared.clone();
-        let parts = session.take_parts();
         let thread = std::thread::Builder::new()
             .name("autosave".into())
             .spawn(move || {
@@ -160,10 +252,11 @@ impl Autosave {
                 let wake = notify.clone();
                 let ran = std::panic::catch_unwind(AssertUnwindSafe(move || {
                     let mut saver = Saver {
-                        session: Some(session),
+                        session,
                         broken: false,
                         replica: replica(&parts),
-                        reopen: Box::new(reopen),
+                        reopen,
+                        create,
                         compact,
                         pending: Vec::new(),
                         snapshot_due: false,
@@ -196,6 +289,7 @@ impl Autosave {
             sender,
             shared,
             thread,
+            path: None,
         }
     }
 
@@ -244,6 +338,37 @@ impl Autosave {
             .unwrap_or_else(|_| std::thread::spawn(|| Some("no thread to finish saving".into())))
     }
 
+    /// Stops without writing what is pending and deletes the file (an
+    /// untitled board closed without keeping it), on a thread of its own;
+    /// then why the file couldn't be deleted, if it couldn't. Join it
+    /// before the program exits.
+    pub fn discard_in_background(mut self) -> std::thread::JoinHandle<Option<String>> {
+        let _ = self.sender.send(Job::Discard);
+        let thread = self.thread.take();
+        let path = self.path.take();
+        std::thread::Builder::new()
+            .name("autosave-discard".into())
+            .spawn(move || {
+                // The thread lets go of the file (and its lock) first.
+                let joined = thread.is_none_or(|thread| thread.join().is_ok());
+                let removed = match &path {
+                    Some(path) => match std::fs::remove_file(path) {
+                        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                            Some(format!("{} can't be deleted: {err}", path.display()))
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                };
+                if joined {
+                    removed
+                } else {
+                    removed.or_else(|| Some("saving stopped after an error".into()))
+                }
+            })
+            .unwrap_or_else(|_| std::thread::spawn(|| Some("no thread to discard with".into())))
+    }
+
     /// Stops the thread; whether it ended well.
     fn stop(&mut self) -> bool {
         let _ = self.sender.send(Job::Stop);
@@ -257,6 +382,20 @@ impl Drop for Autosave {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Compacts the file at `path` (spec §9.4).
+fn compact_at(path: std::path::PathBuf) -> Compact {
+    Some(Box::new(move || {
+        imaginarium_format::compact_file(
+            &path,
+            None,
+            imaginarium_format::CompactionPlan::default(),
+            None,
+        )
+        .map(|_| ())
+        .map_err(NativeError::from)
+    }))
 }
 
 /// Sets the state; whether it changed.
@@ -291,6 +430,8 @@ struct Saver<F: Storage> {
     /// updates are written, never a snapshot).
     replica: Option<Document>,
     reopen: Reopen<F>,
+    /// Makes the file, if it doesn't exist yet (an untitled board's).
+    create: Option<Create<F>>,
     compact: Compact,
     /// Updates not yet in the file.
     pending: Vec<Vec<u8>>,
@@ -327,6 +468,10 @@ impl<F: Storage> Saver<F> {
             for job in std::iter::once(first).chain(receiver.try_iter()) {
                 match job {
                     Job::Stop => stopping = true,
+                    Job::Discard => {
+                        self.session = None;
+                        return;
+                    }
                     Job::Update(update) => {
                         // The copy follows every update, so a snapshot of
                         // it holds what was sent.
@@ -434,6 +579,20 @@ impl<F: Storage> Saver<F> {
     }
 
     fn write(&mut self) -> Result<(), String> {
+        // No file yet: it is made with the copy, which holds every pending
+        // update.
+        if let Some(create) = &mut self.create {
+            let Some(replica) = &self.replica else {
+                return Err("the board can't be kept".into());
+            };
+            self.session = Some(create(replica).map_err(|err| err.to_string())?);
+            self.create = None;
+            self.snapshot_due = false;
+            if let Some(session) = &mut self.session {
+                session.take_parts();
+            }
+            return Ok(());
+        }
         self.trusted_session()?;
         let snapshot_due = self.snapshot_due;
         let pending_len = self.pending.len();
