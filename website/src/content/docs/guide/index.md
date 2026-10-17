@@ -27,7 +27,9 @@ Imaginarium opens with its **start window**: **New board** (`Ctrl+N` /
 too. Turn off **Show at startup** to go straight to a new board.
 
 **Settings** (`Ctrl+,` / `⌘,`) has every setting by section, with a
-search across them; changes apply right away. Your settings are saved as
+search across them; changes apply right away. Some settings, like the
+board's background, can also differ per board: pick **This board** to
+change them for the board you're working on only. Your settings are saved as
 you change them, in `settings.toml` in your
 configuration folder (`~/.config/imaginarium/` on Linux,
 `~/Library/Application Support/Imaginarium/` on macOS,

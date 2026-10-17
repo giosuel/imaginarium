@@ -443,8 +443,16 @@ open it), one at a time:
   and Plain): every board window follows it at once, even during a tool
   bar drag. The grid's lines are one device pixel wide at the dots'
   pitch (snapped at any scale), fainter than the dots.
-- **Not yet:** the scope tabs For me and This board (part 4), the
-  mockup's theme cards and accent swatches (with the theme settings,
+- **For me and This board** (M3.5 part 4): a setting declared
+  `.per_document()` (so far `board.background`) can have a board's own
+  value, stored in the document (`meta.settings`, schema-v1.md §4). In a
+  section with such settings, and once a board window was used, Settings
+  shows the mockup's tabs. This board edits the board window used last
+  (its name is in the subtitle) through its command `board.set_setting`,
+  so it is one undo step on that board and syncs with it; Reset lets the
+  board follow your setting again. A board's value this version can't use
+  is ignored, and kept in the file.
+- **Not yet:** the mockup's theme cards and accent swatches (with the theme settings,
   M3.7: following the system, light, high contrast and reduced motion
   are that milestone's), ↑↓ in a dropdown's list (Tab moves through it), and
   bringing an open Settings window to the front (`Ctrl+,` does nothing

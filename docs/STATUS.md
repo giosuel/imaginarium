@@ -11,11 +11,14 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.5 part 4, This board** (below): a board's own
-  settings, stored in the document. Parts 1 (the settings file,
-  https://github.com/giosuel/imaginarium/pull/61), 2 (the Settings
-  window, https://github.com/giosuel/imaginarium/pull/62) and 3 (the
-  board background) are done (2026-10-17). M3.4 is done (2026-10-17), in
+- **Next step:** **M3.6, Files** (below): autosave and crash recovery,
+  open and save dialogs, recent files, which fill the start window's
+  placeholders. (M3.7, themes, may come first: M3.5 to M3.7 are in any
+  order.) M3.5 is done (2026-10-17), in four stacked parts, each reviewed
+  by a fresh agent: the settings file
+  (https://github.com/giosuel/imaginarium/pull/61), the Settings window
+  (https://github.com/giosuel/imaginarium/pull/62), the board background
+  and This board. M3.4 is done (2026-10-17), in
   six parts, each reviewed by a fresh agent and stacked: the board window
   (https://github.com/giosuel/imaginarium/pull/56), the command palette
   (https://github.com/giosuel/imaginarium/pull/57), the contextual
@@ -1105,7 +1108,7 @@ What M3 builds on:
   - one window per document;
   - the app's startup: settings, commands, fonts and the GPU in parallel,
     under 400 ms to an interactive empty board (PLAN §10).
-- [ ] **M3.5 Settings UI**, generated from the registry, in parts:
+- [x] **M3.5 Settings UI**, generated from the registry, done 2026-10-17, in parts:
   - [x] **part 1, the settings file** (2026-10-17, `shell.md` §5 "As
     built"): read at startup, written after every change on a thread of
     its own, an unreadable file moved aside instead of overwritten;
@@ -1117,7 +1120,10 @@ What M3 builds on:
     (theme, accent, reduce motion, interface size) and the mockup's theme
     cards and swatches go with M3.7, which has following the system,
     light, high contrast and reduced motion;
-  - part 4, the This board scope, stored in the document;
+  - [x] **part 4, This board** (2026-10-17, `shell.md` §5 "As built"):
+    a board's own settings in the document (`meta.settings`, additive in
+    schema v1), set with `board.set_setting`, in Settings' This board
+    tab;
   - search, scopes and every kind of setting;
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
