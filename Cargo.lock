@@ -2117,6 +2117,16 @@ dependencies = [
 [[package]]
 name = "imaginarium-app"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "imaginarium-canvas",
+ "imaginarium-model",
+ "imaginarium-render",
+ "imaginarium-settings",
+ "imaginarium-shell",
+ "imaginarium-text",
+ "imaginarium-ui",
+]
 
 [[package]]
 name = "imaginarium-canvas"
@@ -2281,6 +2291,22 @@ version = "0.0.1"
 dependencies = [
  "thiserror 2.0.21",
  "toml",
+]
+
+[[package]]
+name = "imaginarium-shell"
+version = "0.0.1"
+dependencies = [
+ "accesskit",
+ "imaginarium-canvas",
+ "imaginarium-commands",
+ "imaginarium-model",
+ "imaginarium-reactive",
+ "imaginarium-render",
+ "imaginarium-settings",
+ "imaginarium-text",
+ "imaginarium-ui",
+ "taffy",
 ]
 
 [[package]]

@@ -33,6 +33,7 @@ imaginarium-profiling = { path = "crates/imaginarium-profiling" }
 imaginarium-reactive = { path = "crates/imaginarium-reactive" }
 imaginarium-render = { path = "crates/imaginarium-render" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
+imaginarium-shell = { path = "crates/imaginarium-shell" }
 imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
 imaginarium-text = { path = "crates/imaginarium-text" }
 imaginarium-ui = { path = "crates/imaginarium-ui" }

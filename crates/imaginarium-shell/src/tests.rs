@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Tests of the board window: the panels drive the board through its
+//! commands, the tool bar docks where it is dropped, placeholders say
+//! what is coming.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use imaginarium_canvas::{BoardCanvas, Preset, Tool};
+use imaginarium_model::{Document, DocumentKind};
+use imaginarium_render::Scene;
+use imaginarium_render::kurbo::{Point, Rect, Size};
+use imaginarium_settings::Registry;
+use imaginarium_text::Fonts;
+use imaginarium_ui::{AccessTree, Input, Modifiers, View, WidgetId};
+
+use crate::{BoardWindow, Dock, TOOLBAR_POSITION};
+
+const SIZE: Size = Size::new(1440.0, 900.0);
+
+struct Harness {
+    window: BoardWindow,
+    settings: Rc<RefCell<Registry>>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self::with(Document::new(DocumentKind::Board).unwrap())
+    }
+
+    fn with(document: Document) -> Self {
+        let mut registry = Registry::new();
+        registry.register_all(crate::SETTINGS).unwrap();
+        let settings = Rc::new(RefCell::new(registry));
+        let board = BoardCanvas::new(document);
+        let window = BoardWindow::new(
+            board,
+            "Untitled board",
+            Fonts::bundled_only(),
+            settings.clone(),
+        );
+        let mut harness = Self { window, settings };
+        harness.frame();
+        harness
+    }
+
+    fn frame(&mut self) {
+        let mut scene = Scene::new();
+        self.window.draw(&mut scene, SIZE);
+    }
+
+    fn input(&mut self, input: Input) {
+        self.window.input(&input);
+        self.frame();
+    }
+
+    fn press(&mut self, at: Point, pressed: bool, clicks: u8, shift: bool) {
+        self.input(Input::PointerButton {
+            primary: true,
+            pressed,
+            position: at,
+            clicks,
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::default()
+            },
+        });
+    }
+
+    fn click(&mut self, at: Point) {
+        self.input(Input::PointerMoved(at));
+        self.press(at, true, 1, false);
+        self.press(at, false, 1, false);
+    }
+
+    fn drag(&mut self, from: Point, to: Point, shift: bool) {
+        self.input(Input::PointerMoved(from));
+        self.press(from, true, 1, false);
+        for step in 1..=8 {
+            let t = f64::from(step) / 8.0;
+            self.input(Input::PointerMoved(from.lerp(to, t)));
+        }
+        self.press(to, false, 1, shift);
+    }
+
+    fn key(&mut self, character: &str) {
+        self.input(Input::Key {
+            key: imaginarium_ui::Key::Character(character.into()),
+            text: Some(character.into()),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    fn bounds(&mut self, id: WidgetId) -> Rect {
+        let (ui, _) = self.window.ui();
+        ui.bounds(id).unwrap()
+    }
+
+    fn board(&self) -> &BoardCanvas {
+        self.window.board().unwrap()
+    }
+
+    /// The widget a screen reader would call `label`.
+    fn named(&mut self, label: &str) -> WidgetId {
+        let (ui, fonts) = self.window.ui();
+        ui.find_by_label(fonts, label)
+            .unwrap_or_else(|| panic!("no widget named {label:?}"))
+    }
+
+    /// Every label's text, as a screen reader reads them.
+    fn texts(&mut self) -> Vec<String> {
+        let (ui, fonts) = self.window.ui();
+        let mut tree = AccessTree::default();
+        ui.access(fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::Label)
+            .filter_map(|(_, node)| node.value().map(str::to_owned))
+            .collect()
+    }
+}
+
+#[test]
+fn a_tool_button_picks_the_tool_and_leaves_the_keys_to_the_board() {
+    let mut window = Harness::new();
+    let rectangle = window.named("Rectangle");
+    let at = window.bounds(rectangle).center();
+    window.click(at);
+    assert_eq!(
+        window.board().tool().get_untracked(),
+        Tool::Shape(Preset::Rectangle)
+    );
+    // The board still has the keyboard: V picks Select again.
+    window.key("v");
+    assert_eq!(window.board().tool().get_untracked(), Tool::Select);
+}
+
+#[test]
+fn undo_and_redo_buttons_follow_the_board() {
+    let mut window = Harness::new();
+    let rectangle = window.named("Rectangle");
+    let at = window.bounds(rectangle).center();
+    window.click(at);
+    // Draw a shape on the board, between the panels.
+    window.drag(Point::new(500.0, 300.0), Point::new(700.0, 420.0), false);
+    assert_eq!(window.board().document().view().node_count(), 1);
+    let undo = window.named("Undo");
+    let redo = window.named("Redo");
+    let (undo_at, redo_at) = (window.bounds(undo).center(), window.bounds(redo).center());
+    // Redo can't run yet: a click does nothing.
+    window.click(redo_at);
+    assert_eq!(window.board().document().view().node_count(), 1);
+    window.click(undo_at);
+    assert_eq!(window.board().document().view().node_count(), 0);
+    window.click(redo_at);
+    assert_eq!(window.board().document().view().node_count(), 1);
+}
+
+#[test]
+fn zoom_buttons_and_the_zoom_menu_change_the_view() {
+    let mut window = Harness::new();
+    let zoom_in = window.named("Zoom in");
+    let at = window.bounds(zoom_in).center();
+    window.click(at);
+    let zoom = window.board().zoom();
+    assert!(zoom > 1.0, "{zoom}");
+    assert!(
+        window.texts().contains(&format!("{:.0} %", zoom * 100.0)),
+        "the percentage follows"
+    );
+    let percent = window.named("Zoom: fit, 100 % or the selection");
+    let at = window.bounds(percent).center();
+    window.click(at);
+    let hundred = window.named("Zoom to 100 %");
+    let at = window.bounds(hundred).center();
+    window.click(at);
+    assert_eq!(window.board().zoom(), 1.0);
+    let (ui, fonts) = window.window.ui();
+    assert!(
+        ui.find_by_label(fonts, "Zoom to 100 %").is_none(),
+        "the menu closed"
+    );
+}
+
+#[test]
+fn placeholders_say_what_is_coming() {
+    let mut window = Harness::new();
+    for (button, words) in [
+        ("Share", "Hub in M8"),
+        ("Save…", "M3.6"),
+        ("Help and shortcuts", "M3.9"),
+    ] {
+        let id = window.named(button);
+        let at = window.bounds(id).center();
+        window.click(at);
+        let texts = window.texts();
+        assert!(
+            texts.iter().any(|text| text.contains(words)),
+            "{button}: {texts:?}"
+        );
+        window.input(Input::Key {
+            key: imaginarium_ui::Key::Escape,
+            text: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+    }
+    // Nothing changed on the board.
+    assert_eq!(window.board().document().view().node_count(), 0);
+}
+
+#[test]
+fn the_tool_bar_docks_where_it_is_dropped_and_floats_elsewhere() {
+    let mut window = Harness::new();
+    assert_eq!(window.window.dock(), Dock::Left);
+    let grip = window.named("Move the tool bar: drag it to an edge");
+    let bar = window.named("Tools");
+    let left = window.bounds(bar);
+    assert!(left.x0 <= 17.0 && left.height() > left.width(), "{left:?}");
+    // Near the right edge: docked there, a column against it.
+    let from = window.bounds(grip).center();
+    window.drag(from, Point::new(1400.0, 450.0), false);
+    assert_eq!(window.window.dock(), Dock::Right);
+    let right = window.bounds(bar);
+    assert!((right.x1 - (SIZE.width - 16.0)).abs() < 1.0, "{right:?}");
+    assert_eq!(
+        window.settings.borrow().get(&TOOLBAR_POSITION).unwrap(),
+        Dock::Right
+    );
+    // Near the bottom: a row, centered.
+    let from = window.bounds(grip).center();
+    window.drag(from, Point::new(720.0, 880.0), false);
+    assert_eq!(window.window.dock(), Dock::Bottom);
+    let bottom = window.bounds(bar);
+    assert!(bottom.width() > bottom.height());
+    assert!((bottom.center().x - SIZE.width / 2.0).abs() < 1.0);
+    assert!((bottom.y1 - (SIZE.height - 16.0)).abs() < 1.0);
+    // In the middle: it floats where it was dropped.
+    let from = window.bounds(grip).center();
+    let corner = bottom.origin();
+    window.drag(from, Point::new(700.0, 400.0), false);
+    assert_eq!(window.window.dock(), Dock::Floating);
+    let floating = window.bounds(bar);
+    let moved = Point::new(700.0, 400.0) - from;
+    assert!((floating.origin() - (corner + moved)).hypot() < 1.0);
+    // Shift keeps it floating even near an edge.
+    let from = window.bounds(grip).center();
+    window.drag(from, Point::new(30.0, 450.0), true);
+    assert_eq!(window.window.dock(), Dock::Floating);
+    let shifted = window.bounds(bar);
+    assert!(shifted.x0 >= 0.0, "kept inside the window: {shifted:?}");
+    // A double-click on the grip puts it back on the left.
+    let at = window.bounds(grip).center();
+    window.input(Input::PointerMoved(at));
+    window.press(at, true, 1, false);
+    window.press(at, false, 1, false);
+    window.press(at, true, 2, false);
+    window.press(at, false, 2, false);
+    assert_eq!(window.window.dock(), Dock::Left);
+}
+
+#[test]
+fn a_dragged_tool_bar_stays_in_the_window() {
+    let mut window = Harness::new();
+    let grip = window.named("Move the tool bar: drag it to an edge");
+    let bar = window.named("Tools");
+    let from = window.bounds(grip).center();
+    window.input(Input::PointerMoved(from));
+    window.press(from, true, 1, false);
+    window.input(Input::PointerMoved(Point::new(700.0, 2000.0)));
+    let dragged = window.bounds(bar);
+    assert!(dragged.y1 <= SIZE.height, "{dragged:?}");
+    window.press(Point::new(700.0, 2000.0), false, 1, true);
+}
+
+#[test]
+fn snapping_picks_the_nearest_edge_in_the_outer_quarter() {
+    use crate::toolbar::snap;
+    assert_eq!(snap(Point::new(30.0, 450.0), SIZE), Some(Dock::Left));
+    assert_eq!(snap(Point::new(346.0, 396.0), SIZE), Some(Dock::Left));
+    assert_eq!(snap(Point::new(1430.0, 10.0), SIZE), Some(Dock::Right));
+    assert_eq!(snap(Point::new(700.0, 20.0), SIZE), Some(Dock::Top));
+    assert_eq!(snap(Point::new(720.0, 450.0), SIZE), None);
+}
+
+#[test]
+fn the_window_is_named_after_the_board() {
+    let window = Harness::new();
+    let options = window.window.options();
+    assert_eq!(options.title, "Untitled board — Imaginarium");
+    assert_eq!(options.app_id.as_deref(), Some("ch.giosuel.Imaginarium"));
+}
+
+#[test]
+fn esc_closes_a_note_and_the_next_click_works() {
+    let mut window = Harness::with(imaginarium_canvas::demo::launch_plan().unwrap());
+    let share = window.named("Share");
+    let at = window.bounds(share).center();
+    window.click(at);
+    assert!(window.texts().iter().any(|text| text.contains("Hub in M8")));
+    // The pointer moves on, then Esc: the note goes, though the board has
+    // the keys.
+    window.input(Input::PointerMoved(Point::new(1300.0, 300.0)));
+    window.input(Input::Key {
+        key: imaginarium_ui::Key::Escape,
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::default(),
+    });
+    assert!(!window.texts().iter().any(|text| text.contains("Hub in M8")));
+    // So the next click reaches its button instead of closing the note.
+    let zoom_in = window.named("Zoom in");
+    let at = window.bounds(zoom_in).center();
+    window.click(at);
+    assert!(window.board().zoom() > 1.0);
+}
