@@ -20,9 +20,10 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, Anchor, Button, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon, IconButton,
-    Input, InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme, ThemeKind, Token,
-    Ui, UiError, View, VirtualList, WidgetId, WindowOptions, animation, set_theme, theme,
+    AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, TextInput, Theme,
+    ThemeKind, Token, Ui, UiError, View, VirtualList, WidgetId, WindowOptions, animation,
+    set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -403,6 +404,69 @@ fn main() -> Result<(), UiError> {
         &icon_buttons,
     );
 
+    // Button boxes: buttons holding other widgets, as the board window's
+    // top right draws them.
+    let panel_colors = ButtonColors {
+        border: Some(Token::PanelBorder.into()),
+        ..ButtonColors::quiet()
+    };
+    let search_icon = ui.add(Icon::named("search", 16.0, Token::TextMuted));
+    let search_text = ui.add(
+        Label::new("Search", body())
+            .color(Token::TextMuted)
+            .single_line()
+            .grow(1.0),
+    );
+    let chip_text = ui.add(
+        Label::new("Ctrl K", TextStyle::new(11.0).weight(500.0))
+            .color(Token::TextMuted)
+            .single_line(),
+    );
+    let chip = ui.add_with_children(
+        Flex::row()
+            .padding(6.0, 2.0)
+            .border(1.0, Token::PanelBorder)
+            .radius(5.0),
+        &[chip_text],
+    );
+    let search = ui.add_with_children(
+        ButtonBox::new("Search commands and settings (Ctrl+K)", panel_colors, || {})
+            .size(176.0, 44.0)
+            .padding(12.0, 8.0)
+            .start()
+            .radius(12.0)
+            .shadow(),
+        &[search_icon, search_text, chip],
+    );
+    let sparkles = ui.add(Icon::named("sparkles", 19.0, Token::AccentInk));
+    let ai = ui.add_with_children(
+        ButtonBox::new("AI assistant (Ctrl+J)", panel_colors, || {})
+            .size(44.0, 44.0)
+            .radius(12.0)
+            .shadow()
+            .tooltip("AI assistant · Ctrl J"),
+        &[sparkles],
+    );
+    let users = ui.add(Icon::named("users", 17.0, Token::OnAccent));
+    let share_text = ui.add(
+        Label::new("Share", TextStyle::new(14.0).weight(600.0))
+            .color(Token::OnAccent)
+            .single_line(),
+    );
+    let share = ui.add_with_children(
+        ButtonBox::new("Share", ButtonColors::primary(), || {})
+            .height(44.0)
+            .padding(16.0, 16.0)
+            .radius(12.0)
+            .shadow(),
+        &[users, share_text],
+    );
+    let boxes = section(
+        &mut ui,
+        "Button boxes · a search field, an icon, an icon and a label",
+        &[search, ai, share],
+    );
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -554,6 +618,7 @@ fn main() -> Result<(), UiError> {
             header,
             buttons,
             icon_buttons,
+            boxes,
             inputs,
             text,
             layers,
