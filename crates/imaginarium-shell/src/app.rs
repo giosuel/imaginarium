@@ -37,6 +37,17 @@ pub struct App {
     version: String,
     /// The board windows open now.
     boards: Cell<usize>,
+    /// The Settings window is open.
+    settings_open: Cell<bool>,
+    /// Whether the settings file is saved, and a notice from reading it.
+    saving: RefCell<Saving>,
+}
+
+/// What the Settings window says about the settings file.
+#[derive(Default)]
+struct Saving {
+    status: Option<imaginarium_settings::SaveStatus>,
+    notice: Option<String>,
 }
 
 impl App {
@@ -54,7 +65,44 @@ impl App {
             workers,
             version: version.into(),
             boards: Cell::new(0),
+            settings_open: Cell::new(false),
+            saving: RefCell::default(),
         })
+    }
+
+    /// Tells the Settings window how saving goes (`status`), and what
+    /// happened reading the file at startup (`notice`: it was unreadable
+    /// and moved aside), so users who never see standard error learn it.
+    pub fn report_saving(
+        &self,
+        status: Option<imaginarium_settings::SaveStatus>,
+        notice: Option<String>,
+    ) {
+        *self.saving.borrow_mut() = Saving { status, notice };
+    }
+
+    /// What the Settings window shows about the file: a failed save, else
+    /// the notice from startup.
+    pub(crate) fn save_notice(&self) -> Option<String> {
+        let saving = self.saving.borrow();
+        saving
+            .status
+            .as_ref()
+            .and_then(imaginarium_settings::SaveStatus::error)
+            .map(|error| format!("Settings can't be saved: {error}"))
+            .or_else(|| saving.notice.clone())
+    }
+
+    /// The Settings window, unless one is open already.
+    pub fn settings_window(self: &Rc<Self>) -> Option<crate::settings::SettingsWindow> {
+        if self.settings_open.replace(true) {
+            return None;
+        }
+        Some(crate::settings::SettingsWindow::new(self.clone()))
+    }
+
+    pub(crate) fn settings_closed(&self) {
+        self.settings_open.set(false);
     }
 
     /// The first window: the start window, or a new board when `new` or
@@ -382,5 +430,162 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// The middle of the control a screen reader calls `label`.
+    fn center(
+        window: &mut crate::settings::SettingsWindow,
+        label: &str,
+    ) -> Option<imaginarium_render::kurbo::Point> {
+        let (ui, fonts) = window.ui();
+        let widget = ui.find_by_label(fonts, label)?;
+        Some(ui.bounds(widget)?.center())
+    }
+
+    fn settings_frame(window: &mut crate::settings::SettingsWindow) {
+        let mut scene = Scene::new();
+        window.paint(&mut scene, Size::new(1120.0, 720.0));
+    }
+
+    fn has(window: &mut crate::settings::SettingsWindow, label: &str) -> bool {
+        let (ui, fonts) = window.ui();
+        ui.find_by_label(fonts, label).is_some()
+    }
+
+    fn press(window: &mut crate::settings::SettingsWindow, label: &str) {
+        let at = center(window, label).unwrap_or_else(|| panic!("no {label:?}"));
+        for pressed in [true, false] {
+            window.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        settings_frame(window);
+    }
+
+    #[test]
+    fn settings_show_by_section_and_a_switch_changes_one() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        // General: Show at startup, as a switch.
+        assert!(has(&mut window, "Show the start window at startup"));
+        assert!(!has(&mut window, "Reset Show the start window at startup"));
+        press(&mut window, "Show the start window at startup");
+        assert!(!app.shows_start_window());
+        // Changed, with a reset button that puts it back.
+        assert!(has(&mut window, "Reset Show the start window at startup"));
+        press(&mut window, "Reset Show the start window at startup");
+        assert!(app.shows_start_window());
+        // Appearance has the tool bar's position, as a dropdown.
+        press(&mut window, "Appearance");
+        assert!(has(&mut window, "Tool bar position"));
+        assert!(!has(&mut window, "Show the start window at startup"));
+    }
+
+    #[test]
+    fn a_dropdown_lists_the_values_and_sets_one() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        press(&mut window, "Tool bar position");
+        settings_frame(&mut window);
+        press(&mut window, "Top");
+        assert_eq!(
+            app.settings()
+                .borrow()
+                .get(&crate::TOOLBAR_POSITION)
+                .unwrap(),
+            crate::Dock::Top
+        );
+        // The list closed.
+        assert!(!has(&mut window, "Floating"));
+    }
+
+    #[test]
+    fn the_search_finds_settings_and_shortcuts() {
+        let app = app();
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        let at = center(&mut window, "Search settings").unwrap();
+        window.input(&Input::PointerButton {
+            primary: true,
+            pressed: true,
+            position: at,
+            clicks: 1,
+            modifiers: Modifiers::default(),
+        });
+        for c in "dock".chars() {
+            window.input(&Input::Key {
+                key: Key::Character(c.to_string()),
+                text: Some(c.to_string()),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            });
+        }
+        settings_frame(&mut window);
+        // By a synonym, from another section.
+        assert!(has(&mut window, "Tool bar position"));
+        assert!(!has(&mut window, "Show the start window at startup"));
+    }
+
+    #[test]
+    fn one_settings_window_at_a_time() {
+        let app = app();
+        let first = app.settings_window();
+        assert!(first.is_some());
+        assert!(app.settings_window().is_none());
+        drop(first);
+        assert!(app.settings_window().is_some());
+    }
+
+    #[test]
+    fn ctrl_comma_opens_settings_from_a_board_and_the_start_window() {
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        board.input(&ctrl(","));
+        let requests = board.take_requests();
+        assert_eq!(names(&requests), ["Open(\"Settings — Imaginarium\")"]);
+        drop(requests);
+        let mut start = app.start_window();
+        start.input(&ctrl(","));
+        assert_eq!(
+            names(&start.take_requests()),
+            ["Open(\"Settings — Imaginarium\")"]
+        );
+    }
+
+    #[test]
+    fn a_failed_save_shows_in_settings() {
+        let app = app();
+        app.report_saving(None, Some("Your settings file couldn't be read.".into()));
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        assert!(has(&mut window, "Your settings file couldn't be read."));
+    }
+
+    #[test]
+    fn the_start_windows_switch_follows_a_change_in_settings() {
+        let app = app();
+        let mut start = app.start_window();
+        frame(&mut start);
+        app.settings()
+            .borrow_mut()
+            .set(&SHOW_START_WINDOW, false)
+            .unwrap();
+        frame(&mut start);
+        let mut tree = imaginarium_ui::AccessTree::default();
+        start.accessibility(&mut tree);
+        let toggled = tree
+            .nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some("Show at startup") && node.toggled().is_some())
+            .and_then(|(_, node)| node.toggled());
+        assert_eq!(toggled, Some(accesskit::Toggled::False));
     }
 }

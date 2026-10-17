@@ -197,6 +197,23 @@ pub(crate) static CLOSE_WINDOW: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
 )
 .availability(in_app);
 
+/// `settings.open`.
+pub(crate) static OPEN_SETTINGS: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "settings.open",
+    CommandMeta::new(
+        "Open settings",
+        "Open the Settings window, with every setting of the app by section and a search across them.",
+    )
+    .category("File")
+    .synonyms(&["settings", "preferences", "options", "einstellungen", "configure"])
+    .icon("sliders-horizontal"),
+    |cx, _args| {
+        cx.asks.push(Ask::OpenSettings);
+        Ok(Outcome::Done)
+    },
+)
+.availability(in_app);
+
 /// The shell's shortcuts (the board has its own keymap).
 pub(crate) fn shell_keymap(
     platform: imaginarium_commands::Platform,
@@ -223,6 +240,10 @@ pub(crate) fn shell_keymap(
         "Mod+W",
         imaginarium_commands::CommandId::new("window.close"),
     );
+    let _ = keymap.bind(
+        "Mod+,",
+        imaginarium_commands::CommandId::new("settings.open"),
+    );
     let _ = keymap.bind("F6", imaginarium_commands::CommandId::new("view.next_area"));
     let _ = keymap.bind(
         "Shift+F6",
@@ -236,9 +257,10 @@ pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 9] = [
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 10] = [
     &NEW_BOARD,
     &CLOSE_WINDOW,
+    &OPEN_SETTINGS,
     &TOGGLE_INSPECTOR,
     &CONTEXT_MENU,
     &NEXT_AREA,

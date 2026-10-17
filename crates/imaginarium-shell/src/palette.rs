@@ -713,7 +713,7 @@ fn room(height: f64) -> f64 {
 }
 
 /// A key's chip ("Esc", "Ctrl+G").
-fn chip(ui: &mut Ui, text: &str) -> WidgetId {
+pub(crate) fn chip(ui: &mut Ui, text: &str) -> WidgetId {
     let text = ui.add(
         Label::new(text, TextStyle::new(11.0).weight(500.0))
             .color(Token::TextMuted)
@@ -807,7 +807,7 @@ pub(crate) fn step_value(settings: &Registry, key: &str, forward: bool) -> Optio
 }
 
 /// The first sentence of a description, for the one line a row has.
-fn first_sentence(text: &str) -> &str {
+pub(crate) fn first_sentence(text: &str) -> &str {
     match text.find(". ") {
         Some(end) => &text[..end],
         None => text.strip_suffix('.').unwrap_or(text),

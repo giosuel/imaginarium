@@ -14,7 +14,10 @@ use std::time::Instant;
 
 use accesskit::Role;
 use imaginarium_commands::{Keymap, Platform};
-use imaginarium_reactive::signal;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use imaginarium_reactive::{Signal, signal};
 use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
@@ -31,6 +34,8 @@ use crate::toolbar::shortcut;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StartAsk {
     NewBoard,
+    /// Open Settings at this section.
+    Settings(crate::settings::Section),
 }
 
 type StartAsks = Rc<RefCell<Vec<StartAsk>>>;
@@ -45,6 +50,10 @@ pub struct StartWindow {
     keymap: Keymap,
     new_board: WidgetId,
     requests: Vec<WindowRequest>,
+    /// Show at startup, as the switch shows it.
+    shown: Signal<bool>,
+    startup_changed: Arc<AtomicBool>,
+    subscription: imaginarium_settings::SubscriptionId,
     /// It asked to close (after New board).
     closing: bool,
     close_after: Option<u64>,
@@ -63,7 +72,21 @@ impl StartWindow {
             "Mod+N",
             imaginarium_commands::CommandId::new("file.new_board"),
         );
-        let (side, new_board) = side(&mut ui, &app, &keymap, &asks);
+        let _ = keymap.bind(
+            "Mod+,",
+            imaginarium_commands::CommandId::new("settings.open"),
+        );
+        let shown = signal(app.shows_start_window());
+        let (side, new_board) = side(&mut ui, &app, &keymap, &asks, shown);
+        // Show at startup changed elsewhere (Settings): the switch follows.
+        let startup_changed = Arc::new(AtomicBool::new(false));
+        let flag = startup_changed.clone();
+        let subscription = app.settings().borrow_mut().subscribe(move |change| {
+            if change.key == SHOW_START_WINDOW.key() {
+                flag.store(true, Ordering::Relaxed);
+                imaginarium_ui::request_frame_everywhere();
+            }
+        });
         let divider = ui.add(Flex::column().width(1.0).background(Token::Divider));
         let recent = recent(&mut ui);
         let root = ui.add_with_children(
@@ -84,6 +107,9 @@ impl StartWindow {
             keymap,
             new_board,
             requests: Vec::new(),
+            shown,
+            startup_changed,
+            subscription,
             closing: false,
             close_after: None,
             frames: 0,
@@ -129,17 +155,30 @@ impl StartWindow {
         }
     }
 
+    /// Opens the Settings window at `section`, unless it is open.
+    fn open_settings(&mut self, section: crate::settings::Section) {
+        if let Some(mut window) = self.app.settings_window() {
+            window.show(section);
+            self.requests
+                .push(WindowRequest::Open(window.options(), Box::new(window)));
+        }
+    }
+
     /// The New board button, for tests.
     pub fn new_board_button(&self) -> WidgetId {
         self.new_board
     }
 
     fn handle_asks(&mut self) -> bool {
+        if self.startup_changed.swap(false, Ordering::Relaxed) {
+            self.shown.set(self.app.shows_start_window());
+        }
         let asks = std::mem::take(&mut *self.asks.borrow_mut());
         let asked = !asks.is_empty();
         for ask in asks {
             match ask {
                 StartAsk::NewBoard => self.new_board(),
+                StartAsk::Settings(section) => self.open_settings(section),
             }
         }
         asked
@@ -157,7 +196,13 @@ fn padding(left: f32, right: f32, top: f32, bottom: f32) -> taffy::Rect<taffy::L
 }
 
 /// The left side: the name, New board and Open…, Show at startup.
-fn side(ui: &mut Ui, app: &App, keymap: &Keymap, asks: &StartAsks) -> (WidgetId, WidgetId) {
+fn side(
+    ui: &mut Ui,
+    app: &App,
+    keymap: &Keymap,
+    asks: &StartAsks,
+    shown: Signal<bool>,
+) -> (WidgetId, WidgetId) {
     let logo = ui.add(Logo::new(44.0));
     let name = ui.add(
         Label::new("Imaginarium", TextStyle::new(20.0).weight(700.0))
@@ -198,7 +243,6 @@ fn side(ui: &mut Ui, app: &App, keymap: &Keymap, asks: &StartAsks) -> (WidgetId,
     let buttons = ui.add_with_children(Flex::column().gap(6.0), &[new_board, open]);
 
     let settings = app.settings().clone();
-    let shown = signal(settings.borrow().get(&SHOW_START_WINDOW).unwrap_or(true));
     let switch = Switch::new(
         "Show at startup",
         move || shown.get(),
@@ -215,11 +259,20 @@ fn side(ui: &mut Ui, app: &App, keymap: &Keymap, asks: &StartAsks) -> (WidgetId,
             .color(Token::TextSecondary)
             .single_line(),
     );
-    let startup = ui.add_with_children(
-        Flex::row().gap(8.0).align_center().style(|style| {
+    let startup =
+        ui.add_with_children(Flex::row().gap(8.0).align_center(), &[switch, switch_label]);
+    // The mockup's links; What's new comes with the release notes.
+    let links = [
+        ("Settings", crate::settings::Section::General),
+        ("Shortcuts", crate::settings::Section::Shortcuts),
+    ]
+    .map(|(title, section)| link(ui, title, asks, StartAsk::Settings(section)));
+    let links = ui.add_with_children(Flex::row().gap(14.0), &links);
+    let footer = ui.add_with_children(
+        Flex::column().gap(10.0).style(|style| {
             style.margin.top = taffy::LengthPercentageAuto::auto();
         }),
-        &[switch, switch_label],
+        &[startup, links],
     );
 
     let side = ui.add_with_children(
@@ -231,9 +284,27 @@ fn side(ui: &mut Ui, app: &App, keymap: &Keymap, asks: &StartAsks) -> (WidgetId,
                 style.padding = padding(28.0, 24.0, 28.0, 20.0);
                 style.flex_shrink = 0.0;
             }),
-        &[brand, buttons, startup],
+        &[brand, buttons, footer],
     );
     (side, new_board)
+}
+
+/// A link: accent text that runs `ask`.
+fn link(ui: &mut Ui, title: &str, asks: &StartAsks, ask: StartAsk) -> WidgetId {
+    let text = ui.add(
+        Label::new(title, TextStyle::new(13.0))
+            .color(Token::AccentInk)
+            .single_line(),
+    );
+    let asks = asks.clone();
+    ButtonBox::new(title, ButtonColors::quiet(), move || {
+        asks.borrow_mut().push(ask);
+    })
+    .height(22.0)
+    .padding(2.0, 2.0)
+    .radius(4.0)
+    .role(Role::Link)
+    .add_to(ui, &[text])
 }
 
 /// `Ctrl+<key>`, or `⌘<key>` on macOS, as the menus show shortcuts.
@@ -363,13 +434,14 @@ impl View for StartWindow {
             ..
         } = input
             && let Some(press) = imaginarium_canvas::keys::key_press(key, *modifiers)
-            && self
-                .keymap
-                .command_for_press(press)
-                .is_some_and(|command| command.as_str() == "file.new_board")
+            && let Some(command) = self.keymap.command_for_press(press)
         {
             self.ui.note_keyboard();
-            self.new_board();
+            match command.as_str() {
+                "file.new_board" => self.new_board(),
+                "settings.open" => self.open_settings(crate::settings::Section::General),
+                _ => {}
+            }
             return true;
         }
         let handled = self.ui.input(&mut self.fonts, input);
@@ -409,5 +481,13 @@ impl View for StartWindow {
 
     fn take_requests(&mut self) -> Vec<WindowRequest> {
         std::mem::take(&mut self.requests)
+    }
+}
+
+impl Drop for StartWindow {
+    fn drop(&mut self) {
+        if let Ok(mut settings) = self.app.settings().try_borrow_mut() {
+            settings.unsubscribe(self.subscription);
+        }
     }
 }

@@ -39,6 +39,8 @@ pub(crate) enum Ask {
     NewBoard,
     /// Close this window.
     CloseWindow,
+    /// Open the Settings window.
+    OpenSettings,
     /// Show what a placeholder will do.
     Explain(Placeholder),
     /// Open the zoom menu.
@@ -702,6 +704,12 @@ impl BoardWindow {
             Ask::CloseWindow => {
                 self.closing();
                 self.requests.push(WindowRequest::Close);
+            }
+            Ask::OpenSettings => {
+                if let Some(window) = self.app.as_ref().and_then(App::settings_window) {
+                    self.requests
+                        .push(WindowRequest::Open(window.options(), Box::new(window)));
+                }
             }
         }
     }

@@ -49,6 +49,7 @@ mod contextbar;
 mod inspector;
 mod menu;
 mod palette;
+mod settings;
 mod start;
 mod toolbar;
 mod window;
@@ -57,6 +58,7 @@ mod window;
 mod tests;
 
 pub use app::{App, SHOW_START_WINDOW};
+pub use settings::SettingsWindow;
 pub use start::StartWindow;
 pub use toolbar::{Dock, TOOLBAR_POSITION};
 pub use window::BoardWindow;
