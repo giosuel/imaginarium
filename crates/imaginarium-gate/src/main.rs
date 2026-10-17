@@ -1169,6 +1169,7 @@ fn main() -> anyhow::Result<()> {
         gpu,
         background: Color::WHITE,
         fullscreen: args.fullscreen,
+        app_id: None,
     };
     let fonts_started = Instant::now();
     let fonts = Fonts::new();
