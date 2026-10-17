@@ -53,6 +53,9 @@ pub struct WindowOptions {
     /// (`ch.giosuel.Imaginarium`), which window rules match. Ignored on
     /// Windows and macOS.
     pub app_id: Option<String>,
+    /// Whether the user can resize it. A window of fixed size (the start
+    /// window) floats on tiling compositors (Hyprland, Sway), as dialogs do.
+    pub resizable: bool,
 }
 
 impl Default for WindowOptions {
@@ -64,6 +67,7 @@ impl Default for WindowOptions {
             background: Color::WHITE,
             fullscreen: false,
             app_id: None,
+            resizable: true,
         }
     }
 }
@@ -339,6 +343,13 @@ pub trait View {
     fn take_requests(&mut self) -> Vec<WindowRequest> {
         Vec::new()
     }
+
+    /// The user asked to close the window (its close button, the window
+    /// manager). Return `false` to keep it open; requests made now
+    /// ([`View::take_requests`]) are still handled.
+    fn close_requested(&mut self) -> bool {
+        true
+    }
 }
 
 impl<V: View + ?Sized> View for &mut V {
@@ -375,6 +386,9 @@ impl<V: View + ?Sized> View for &mut V {
     fn take_requests(&mut self) -> Vec<WindowRequest> {
         (**self).take_requests()
     }
+    fn close_requested(&mut self) -> bool {
+        (**self).close_requested()
+    }
 }
 
 impl<V: View + ?Sized> View for Box<V> {
@@ -410,6 +424,9 @@ impl<V: View + ?Sized> View for Box<V> {
     }
     fn take_requests(&mut self) -> Vec<WindowRequest> {
         (**self).take_requests()
+    }
+    fn close_requested(&mut self) -> bool {
+        (**self).close_requested()
     }
 }
 
@@ -706,6 +723,7 @@ impl<'v> Shell<'v> {
             .with_visible(false)
             .with_title(options.title.clone())
             .with_inner_size(LogicalSize::new(options.size.width, options.size.height))
+            .with_resizable(options.resizable)
             .with_fullscreen(
                 options
                     .fullscreen
@@ -948,7 +966,11 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
         };
         state.access.process_event(&state.window, &event);
         match event {
-            WindowEvent::CloseRequested => state.closing = true,
+            WindowEvent::CloseRequested => {
+                if state.view.close_requested() {
+                    state.closing = true;
+                }
+            }
             WindowEvent::Resized(size) => {
                 // Compositors repeat the size (Hyprland on focus changes):
                 // nothing to draw then.

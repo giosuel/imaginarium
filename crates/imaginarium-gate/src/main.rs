@@ -1170,6 +1170,7 @@ fn main() -> anyhow::Result<()> {
         background: Color::WHITE,
         fullscreen: args.fullscreen,
         app_id: None,
+        resizable: true,
     };
     let fonts_started = Instant::now();
     let fonts = Fonts::new();
