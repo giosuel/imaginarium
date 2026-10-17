@@ -110,6 +110,8 @@ pub struct SearchHit {
 #[derive(Clone, Debug)]
 struct Entry {
     id: CommandId,
+    /// How many of `fields` are synonyms (they come first).
+    synonyms: usize,
     title_len: usize,
     title: Field,
     fields: Vec<(Field, f64)>,
@@ -192,6 +194,7 @@ impl SearchIndex {
         }
         self.entries.push(Entry {
             id,
+            synonyms: synonyms.len(),
             title_len: title.chars().count(),
             title: Field::new(title),
             fields,
@@ -268,6 +271,108 @@ impl SearchIndex {
         hits.sort_by(order);
         hits.into_iter().map(|(hit, _)| hit).collect()
     }
+}
+
+/// Where a query matched one command, for highlighting it
+/// ([`SearchIndex::explain`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Explanation {
+    /// The matched characters of the title, as character indices, in
+    /// order. (Indices into the lowercased title, which are the title's own
+    /// for all but a few scripts.)
+    pub title: Vec<usize>,
+    /// The synonym that matched words the title didn't, if any: its index
+    /// among the command's synonyms, and its matched characters.
+    pub synonym: Option<(usize, Vec<usize>)>,
+}
+
+impl SearchIndex {
+    /// Where `query` matches the command `id`: for each word, the field it
+    /// matched best, as [`SearchIndex::search`] scores it. `None` if `id`
+    /// isn't indexed or the query doesn't match it. For the few rows a
+    /// palette shows, not for every command per keystroke.
+    pub fn explain(&self, id: CommandId, query: &str) -> Option<Explanation> {
+        let entry = self.entries.iter().find(|entry| entry.id == id)?;
+        let query: String = query.chars().flat_map(char::to_lowercase).collect();
+        let mut explanation = Explanation::default();
+        for word in query.split(is_separator).filter(|w| !w.is_empty()) {
+            let word: Vec<char> = word.chars().collect();
+            let title = fuzzy_match(&word, &entry.title).map(|(s, at)| (s * WEIGHT_TITLE, at));
+            let other = entry
+                .fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (field, weight))| {
+                    fuzzy_match(&word, field).map(|(s, at)| (s * weight, index, at))
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0));
+            let title_wins = match (&title, &other) {
+                (Some((title, _)), Some((other, _, _))) => title >= other,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            match (title, other) {
+                (Some((_, at)), _) if title_wins => explanation.title.extend(at),
+                (_, Some((_, index, at))) => {
+                    if index < entry.synonyms && explanation.synonym.is_none() {
+                        explanation.synonym = Some((index, at));
+                    }
+                }
+                _ => return None,
+            }
+        }
+        explanation.title.sort_unstable();
+        explanation.title.dedup();
+        Some(explanation)
+    }
+}
+
+/// [`fuzzy_score`], with the matched positions of its best start. Kept
+/// apart so the search itself allocates nothing per field; a test checks
+/// that both agree.
+fn fuzzy_match(word: &[char], field: &Field) -> Option<(f64, Vec<usize>)> {
+    let (&first, rest) = word.split_first()?;
+    let text = &field.chars;
+    if word.len() > text.len() {
+        return None;
+    }
+    let mut best: Option<(f64, Vec<usize>)> = None;
+    for start in (0..text.len()).filter(|&i| text[i] == first) {
+        let mut score = SCORE_MATCH + start_bonus(field, start);
+        if start == 0 {
+            score += BONUS_FIELD_START;
+        }
+        let mut positions = vec![start];
+        let mut previous = start;
+        let mut matched = true;
+        let mut contiguous = field.word_start[start];
+        for &c in rest {
+            let Some(offset) = text[previous + 1..].iter().position(|&t| t == c) else {
+                matched = false;
+                break;
+            };
+            let position = previous + 1 + offset;
+            score += SCORE_MATCH + start_bonus(field, position);
+            if offset == 0 {
+                score += BONUS_CONSECUTIVE;
+            } else {
+                contiguous = false;
+                score -= (offset as f64 * PENALTY_GAP).min(MAX_GAP_PENALTY);
+            }
+            positions.push(position);
+            previous = position;
+        }
+        if !matched {
+            break;
+        }
+        if contiguous {
+            score += BONUS_WORD_PREFIX;
+        }
+        if best.as_ref().is_none_or(|(b, _)| score > *b) {
+            best = Some((score, positions));
+        }
+    }
+    best
 }
 
 /// Total text score of an entry, or `None` if any query word doesn't match.
@@ -563,5 +668,44 @@ mod tests {
                 "table.insert_bold_row"
             ]
         );
+    }
+
+    #[test]
+    fn explain_points_at_the_matched_title_letters_or_synonym() {
+        let index = index();
+        let bold = index.explain(CommandId::new("text.bold"), "bo").unwrap();
+        assert_eq!(bold.title, vec![0, 1]);
+        assert_eq!(bold.synonym, None);
+        // "fett" is a synonym of Bold: the synonym is named, the title not.
+        let fett = index.explain(CommandId::new("text.bold"), "fett").unwrap();
+        assert!(fett.title.is_empty());
+        assert_eq!(fett.synonym, Some((0, vec![0, 1, 2, 3])));
+        let table = index
+            .explain(CommandId::new("table.insert"), "ins tab")
+            .unwrap();
+        assert_eq!(table.title, vec![0, 1, 2, 7, 8, 9]);
+        assert!(index.explain(CommandId::new("text.bold"), "zzz").is_none());
+        assert!(index.explain(CommandId::new("no.such"), "bo").is_none());
+    }
+
+    #[test]
+    fn explain_scores_as_the_search_does() {
+        let words = ["al", "cen", "bo", "ins", "tb", "xyz", "save", "row", "ow"];
+        let fields = [
+            "Align center",
+            "Insert bold header row",
+            "Save as…",
+            "table.insert",
+        ];
+        for field in fields {
+            let field = Field::new(field);
+            for word in words {
+                let word: Vec<char> = word.chars().collect();
+                assert_eq!(
+                    fuzzy_score(&word, &field),
+                    fuzzy_match(&word, &field).map(|(score, _)| score)
+                );
+            }
+        }
     }
 }
