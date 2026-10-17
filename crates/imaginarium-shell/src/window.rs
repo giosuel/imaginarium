@@ -57,8 +57,9 @@ pub(crate) enum Ask {
     PaletteMove(i32),
     /// Run the palette's row (the active one: `None`).
     PaletteRun(Option<usize>),
-    /// Change the active row's value (a setting).
-    PaletteTab,
+    /// Change the active row's value (a setting): forward, or back with
+    /// Shift.
+    PaletteTab(bool),
     /// The palette closed (Esc, a click outside, a command run).
     PaletteClosed,
 }
@@ -324,6 +325,9 @@ impl BoardWindow {
     /// Lays the window out and draws it into `scene` at `size`.
     pub fn draw(&mut self, scene: &mut Scene, size: Size) {
         self.size = size;
+        if let Some(palette) = &mut self.palette {
+            palette.resize(&mut self.ui, size.width, size.height);
+        }
         if self.settings_changed.swap(false, Ordering::Relaxed) && self.drag.is_none() {
             let dock = self
                 .settings
@@ -481,9 +485,13 @@ impl BoardWindow {
                     self.ui.reveal(&mut self.fonts, row);
                 }
             }
-            Ask::PaletteRun(row) => self.run_palette(row, false),
-            Ask::PaletteTab => self.run_palette(None, true),
-            Ask::PaletteClosed => self.palette = None,
+            Ask::PaletteRun(row) => self.run_palette(row, None),
+            Ask::PaletteTab(forward) => self.run_palette(None, Some(forward)),
+            Ask::PaletteClosed => {
+                if let Some(palette) = self.palette.take() {
+                    palette.dispose(&mut self.ui);
+                }
+            }
         }
     }
 
@@ -525,9 +533,9 @@ impl BoardWindow {
     }
 
     /// Runs a palette row: a command closes the palette and runs; a
-    /// setting changes in place (Enter and Tab alike). `tab`: only a
-    /// setting's value changes.
-    fn run_palette(&mut self, row: Option<usize>, tab: bool) {
+    /// setting changes in place. `tab`: only a setting's value changes,
+    /// forward (or back).
+    fn run_palette(&mut self, row: Option<usize>, tab: Option<bool>) {
         let Some(palette) = &self.palette else {
             return;
         };
@@ -536,22 +544,24 @@ impl BoardWindow {
         };
         let (kind, id) = self.catalog.item(at);
         match kind {
-            Kind::Command if !tab => {
+            Kind::Command if tab.is_none() => {
                 if !palette.available(id) {
                     return;
                 }
+                // Closing it queues PaletteClosed, which disposes it.
                 let layer = palette.layer;
                 self.ui.close_layer(&mut self.fonts, layer);
-                self.palette = None;
-                self.usage
-                    .record(imaginarium_commands::CommandId::new(id), now());
-                let _ = self.execute(id, &Args::new());
+                if self.execute(id, &Args::new()).is_ok() {
+                    self.usage
+                        .record(imaginarium_commands::CommandId::new(id), now());
+                }
             }
             Kind::Command => {}
             Kind::Setting => {
                 let settings = self.settings.clone();
                 let mut settings = settings.borrow_mut();
-                if let Some(value) = palette::next_value(&settings, id) {
+                let forward = tab.unwrap_or(true);
+                if let Some(value) = palette::step_value(&settings, id, forward) {
                     let _ = settings.set_value(id, value);
                 }
                 palette.show_value(at, &settings, &self.catalog);

@@ -5,11 +5,13 @@
 //! `Ctrl+K` or the Search button opens it; ↑↓ move, Enter runs, Tab
 //! changes a setting's value, Esc closes it.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use accesskit::Role;
 use imaginarium_commands::{Availability, CommandId, Keymap, SearchIndex, UsageStats};
-use imaginarium_reactive::{Signal, signal};
+use imaginarium_reactive::{Scope, Signal, signal};
 use imaginarium_render::kurbo::{Point, Rect};
 use imaginarium_settings::{Registry, Value, ValueKind};
 use imaginarium_text::TextStyle;
@@ -130,10 +132,16 @@ impl Catalog {
     }
 }
 
-/// A row the palette shows: the item, its widget, and the value it shows
-/// (a setting's).
+/// A row the palette built for an item, reused for every query while it
+/// is open: only its highlights and its place change.
 struct Row {
-    item: usize,
+    widget: WidgetId,
+    title: WidgetId,
+    /// "· also <synonym>" when a synonym matched, apart from the
+    /// description so the description clips first.
+    also: WidgetId,
+    /// Its place among the rows listed now (what Enter and a click run).
+    position: Rc<Cell<usize>>,
     value: Option<Signal<String>>,
     on: Option<Signal<bool>>,
 }
@@ -145,15 +153,21 @@ pub(crate) struct Palette {
     pub(crate) panel: WidgetId,
     field: WidgetId,
     list: WidgetId,
-    /// The groups and rows listed now, removed when the query changes.
-    shown: Vec<WidgetId>,
-    row_widgets: Vec<WidgetId>,
-    rows: Vec<Row>,
+    scroll: WidgetId,
+    /// Owns the rows' signals, disposed when the palette closes.
+    scope: Scope,
+    /// The rows built so far, by item, and the headings by name.
+    rows: HashMap<usize, Row>,
+    headings: HashMap<&'static str, WidgetId>,
+    nothing: Option<WidgetId>,
+    /// The items listed now, in their order.
+    listed: Vec<usize>,
     active: Signal<usize>,
     /// The commands' availability when it opened (`Registry::availability`
     /// is a snapshot by design: cheap checks, taken once).
     availability: HashMap<&'static str, Availability>,
     query: String,
+    size: (f64, f64),
 }
 
 /// Keys the palette's field passes on, for the palette to move and run.
@@ -180,7 +194,10 @@ impl Widget for PaletteKeys {
 
     fn event(&mut self, _cx: &mut Cx<'_>, input: &Input) -> bool {
         let Input::Key {
-            key, pressed: true, ..
+            key,
+            pressed: true,
+            modifiers,
+            ..
         } = input
         else {
             return false;
@@ -189,7 +206,7 @@ impl Widget for PaletteKeys {
             Key::ArrowUp => Ask::PaletteMove(-1),
             Key::ArrowDown => Ask::PaletteMove(1),
             Key::Enter => Ask::PaletteRun(None),
-            Key::Tab => Ask::PaletteTab,
+            Key::Tab => Ask::PaletteTab(!modifiers.shift),
             _ => return false,
         };
         self.asks.borrow_mut().push(ask);
@@ -240,15 +257,20 @@ impl Palette {
             &[icon, field, esc],
         );
         let line = ui.add(Flex::row().height(1.0).background(Token::Divider));
-        let list = ui.add(Flex::column().gap(2.0).style(|style| {
-            style.padding = taffy::Rect {
-                left: length(8.0),
-                right: length(8.0),
-                top: length(6.0),
-                bottom: length(8.0),
-            };
-        }));
-        let room = (height - 96.0 - 56.0 - 40.0 - 48.0).clamp(160.0, 560.0);
+        let list = ui.add(
+            Flex::column()
+                .gap(2.0)
+                .role(Role::ListBox, "Results")
+                .style(|style| {
+                    style.padding = taffy::Rect {
+                        left: length(8.0),
+                        right: length(8.0),
+                        top: length(6.0),
+                        bottom: length(8.0),
+                    };
+                }),
+        );
+        let room = room(height);
         let scroll = ui.add_with_children(
             Scroll::new()
                 .label("Results")
@@ -271,27 +293,30 @@ impl Palette {
         let content = ui.add_with_children(PaletteKeys { asks: asks.clone() }, &[panel]);
         let on_close = asks.clone();
         let options = LayerOptions::modal()
-            .anchored(Anchor::Rect(Rect::from_points(
-                Point::new(width / 2.0, 96.0),
-                Point::new(width / 2.0, 96.0),
-            )))
+            .anchored(anchor(width))
             .placement(Placement::Below)
             .gap(0.0)
             .scrim(0.16)
             .focus(input)
             .on_close(move || on_close.borrow_mut().push(Ask::PaletteClosed));
         let layer = ui.open_layer(content, options);
+        let scope = Scope::new();
+        let active = scope.run(|| signal(0));
         let mut palette = Self {
             layer,
             panel,
             field: input,
             list,
-            shown: Vec::new(),
-            row_widgets: Vec::new(),
-            rows: Vec::new(),
-            active: signal(0),
+            scroll,
+            scope,
+            rows: HashMap::new(),
+            headings: HashMap::new(),
+            nothing: None,
+            listed: Vec::new(),
+            active,
             availability,
             query: String::new(),
+            size: (width, height),
         };
         palette.fill(ui, sources);
         palette
@@ -308,22 +333,50 @@ impl Palette {
         self.fill(ui, sources);
     }
 
+    /// Places it for a window `width` × `height` (after a resize).
+    pub(crate) fn resize(&mut self, ui: &mut Ui, width: f64, height: f64) {
+        if self.size == (width, height) {
+            return;
+        }
+        self.size = (width, height);
+        ui.move_layer(self.layer, anchor(width));
+        if let Some(scroll) = ui.widget_mut::<Scroll>(self.scroll) {
+            scroll.style_mut().max_size.height = length(room(height) as f32);
+        }
+    }
+
+    /// Removes its rows (also those not listed now) and disposes their
+    /// signals; the layer itself is closed by then.
+    pub(crate) fn dispose(self, ui: &mut Ui) {
+        for row in self.rows.values() {
+            ui.remove(row.widget);
+        }
+        for heading in self.headings.values() {
+            ui.remove(*heading);
+        }
+        if let Some(nothing) = self.nothing {
+            ui.remove(nothing);
+        }
+        self.scope.dispose();
+    }
+
     /// Moves the active row by `by`, wrapping, and brings it into view.
     pub(crate) fn step(&mut self, by: i32) -> Option<WidgetId> {
-        let count = self.rows.len();
+        let count = self.listed.len();
         if count == 0 {
             return None;
         }
         let at = self.active.get_untracked() as i64 + i64::from(by);
         let at = at.rem_euclid(count as i64) as usize;
         self.active.set(at);
-        self.row_widgets.get(at).copied()
+        let item = self.listed.get(at)?;
+        self.rows.get(item).map(|row| row.widget)
     }
 
     /// The item of the active row (or of row `row`), if any.
     pub(crate) fn item(&self, row: Option<usize>) -> Option<usize> {
         let row = row.unwrap_or_else(|| self.active.get_untracked());
-        self.rows.get(row).map(|row| row.item)
+        self.listed.get(row).copied()
     }
 
     /// Whether the command `id` can run now.
@@ -335,24 +388,19 @@ impl Palette {
 
     /// Shows a setting's new value in its row.
     pub(crate) fn show_value(&self, item: usize, settings: &Registry, catalog: &Catalog) {
-        for row in self.rows.iter().filter(|row| row.item == item) {
-            let id = catalog.items[item].id;
-            if let Some(on) = row.on {
-                on.set(matches!(settings.value(id), Ok(Value::Bool(true))));
-            }
-            if let Some(value) = row.value {
-                value.set(value_label(settings, id));
-            }
+        let Some(row) = self.rows.get(&item) else {
+            return;
+        };
+        let id = catalog.items[item].id;
+        if let Some(on) = row.on {
+            on.set(matches!(settings.value(id), Ok(Value::Bool(true))));
+        }
+        if let Some(value) = row.value {
+            value.set(value_label(settings, id));
         }
     }
 
     fn fill(&mut self, ui: &mut Ui, sources: &Sources<'_>) {
-        for widget in self.shown.drain(..) {
-            ui.remove(widget);
-        }
-        self.rows.clear();
-        self.row_widgets.clear();
-        self.active.set(0);
         let catalog = sources.catalog;
         let query = self.query.trim().to_owned();
         // Which items, in which order: for a query the search's ranking;
@@ -364,7 +412,6 @@ impl Palette {
             .iter()
             .filter_map(|hit| catalog.by_id.get(hit.id.as_str()).copied());
         let mut order: Vec<(usize, &'static str)> = if query.is_empty() {
-            // The recent ones first, then everything in its group.
             let recent: Vec<usize> = found.take(5).collect();
             let rest = (0..catalog.items.len()).filter(|at| !recent.contains(at));
             recent
@@ -390,61 +437,126 @@ impl Palette {
             }
         }
         let mut children = Vec::new();
+        self.listed.clear();
         if groups.is_empty() {
-            let none = ui.add(
-                Label::new(format!("Nothing found for “{query}”"), TextStyle::new(13.0))
-                    .color(Token::TextMuted),
-            );
-            let none = ui.add_with_children(Flex::row().padding(8.0, 16.0), &[none]);
-            children.push(none);
+            let nothing = match self.nothing {
+                Some(nothing) => nothing,
+                None => {
+                    let text = ui.add(
+                        Label::new("Nothing found", TextStyle::new(13.0)).color(Token::TextMuted),
+                    );
+                    ui.add_with_children(Flex::row().padding(8.0, 16.0), &[text])
+                }
+            };
+            self.nothing = Some(nothing);
+            children.push(nothing);
         }
         for (name, items) in groups {
-            let heading = ui.add(
-                Label::new(name, TextStyle::new(12.0).weight(600.0))
-                    .color(Token::TextSubtle)
-                    .single_line(),
-            );
-            let heading = ui.add_with_children(
-                Flex::row().style(|style| {
-                    style.padding = taffy::Rect {
-                        left: length(8.0),
-                        right: length(8.0),
-                        top: length(if children.is_empty() { 8.0 } else { 10.0 }),
-                        bottom: length(4.0),
-                    };
-                }),
-                &[heading],
-            );
+            let heading = match self.headings.get(name) {
+                Some(heading) => *heading,
+                None => {
+                    let text = ui.add(
+                        Label::new(name, TextStyle::new(12.0).weight(600.0))
+                            .color(Token::TextSubtle)
+                            .single_line(),
+                    );
+                    let heading = ui.add_with_children(
+                        Flex::row().style(|style| {
+                            style.padding = taffy::Rect {
+                                left: length(8.0),
+                                right: length(8.0),
+                                top: length(9.0),
+                                bottom: length(4.0),
+                            };
+                        }),
+                        &[text],
+                    );
+                    self.headings.insert(name, heading);
+                    heading
+                }
+            };
             children.push(heading);
             for at in items {
-                let row = self.row(ui, at, &query, sources);
+                let position = self.listed.len();
+                let row = self.row(ui, at, sources);
+                self.mark(ui, at, &query, catalog);
+                if let Some(built) = self.rows.get(&at) {
+                    built.position.set(position);
+                }
+                self.listed.push(at);
                 children.push(row);
             }
         }
+        // One replacement of the list: rows not listed now stay built,
+        // detached, for the next query.
         ui.set_children(self.list, &children);
-        self.shown = children;
+        // Every row repaints (its place may have changed); the list starts
+        // at the top again, with the first row active.
+        self.active.set(0);
+        if let Some(scroll) = ui.widget_mut::<Scroll>(self.scroll) {
+            scroll.set_offset(0.0);
+        }
     }
 
-    fn row(&mut self, ui: &mut Ui, at: usize, query: &str, sources: &Sources<'_>) -> WidgetId {
-        let catalog = sources.catalog;
+    /// Highlights what `query` matched in item `at`'s row.
+    fn mark(&mut self, ui: &mut Ui, at: usize, query: &str, catalog: &Catalog) {
+        let Some(row) = self.rows.get(&at) else {
+            return;
+        };
         let item = &catalog.items[at];
-        let index = self.rows.len();
-        let enabled = item.kind == Kind::Setting || self.available(item.id);
         let explanation = if query.is_empty() {
             None
         } else {
             catalog.index.explain(CommandId::new(item.id), query)
         };
+        let title_marks = explanation
+            .as_ref()
+            .map(|explained| byte_ranges(item.title, &explained.title))
+            .unwrap_or_default();
+        if let Some(title) = ui.widget_mut::<Label>(row.title) {
+            title.set_highlights(title_marks);
+        }
+        let disabled = matches!(
+            self.availability.get(item.id),
+            Some(Availability::Disabled(_))
+        );
+        let (also, marks) = match explanation.and_then(|explained| explained.synonym) {
+            Some((synonym, at)) if !disabled => {
+                let synonym = item.synonyms.get(synonym).copied().unwrap_or("");
+                let start = " · also ";
+                let marks = byte_ranges(synonym, &at)
+                    .into_iter()
+                    .map(|range| range.start + start.len()..range.end + start.len())
+                    .collect();
+                (format!("{start}{synonym}"), marks)
+            }
+            _ => (String::new(), Vec::new()),
+        };
+        if let Some(label) = ui.widget_mut::<Label>(row.also) {
+            label.set_text(also);
+            label.set_highlights(marks);
+        }
+    }
+
+    /// The row of item `at`, built the first time it is listed.
+    fn row(&mut self, ui: &mut Ui, at: usize, sources: &Sources<'_>) -> WidgetId {
+        if let Some(row) = self.rows.get(&at) {
+            return row.widget;
+        }
+        let catalog = sources.catalog;
+        let item = &catalog.items[at];
+        let enabled = item.kind == Kind::Setting || self.available(item.id);
         let ink = if enabled {
             Token::Text
         } else {
             Token::TextSubtle
         };
-        let icon = ui.add(Icon::named(
-            item.icon.unwrap_or("chevron-right"),
-            16.0,
-            Token::TextSecondary,
-        ));
+        // An add-on may name an icon we don't have: a plain chevron then.
+        let icon_name = item
+            .icon
+            .filter(|name| imaginarium_ui::icons::icon_paths(name).is_some())
+            .unwrap_or("chevron-right");
+        let icon = ui.add(Icon::named(icon_name, 16.0, Token::TextSecondary));
         let tile = ui.add_with_children(
             Flex::row()
                 .width(32.0)
@@ -458,71 +570,74 @@ impl Palette {
                 }),
             &[icon],
         );
-        let title_text = match item.kind {
-            Kind::Setting => item.title.to_owned(),
-            Kind::Command => item.title.to_owned(),
-        };
-        let marks = explanation
-            .as_ref()
-            .map(|explained| byte_ranges(&title_text, &explained.title))
-            .unwrap_or_default();
         let title = ui.add(
-            Label::new(title_text, TextStyle::new(14.0).weight(500.0))
+            Label::new(item.title, TextStyle::new(14.0).weight(500.0))
                 .color(ink)
                 .single_line()
-                .highlight(marks, 600.0, Token::AccentInk),
+                .highlight(Vec::new(), 600.0, Token::AccentInk),
         );
-        // The second line: why it can't run, or what it does, and the
-        // synonym that matched.
+        // The second line: why it can't run, or what it does; then the
+        // synonym that matched, which stays when the line is too long.
         let reason = match self.availability.get(item.id) {
             Some(Availability::Disabled(reason)) => Some(*reason),
             _ => None,
         };
-        let (line, marks) = match (reason, explanation.and_then(|explained| explained.synonym)) {
-            (Some(reason), _) => (reason.to_owned(), Vec::new()),
-            (None, Some((synonym, at))) => {
-                let synonym = item.synonyms.get(synonym).copied().unwrap_or("");
-                let start = format!("{} · also ", first_sentence(item.description));
-                let offset = start.len();
-                let marks = byte_ranges(synonym, &at)
-                    .into_iter()
-                    .map(|range| range.start + offset..range.end + offset)
-                    .collect();
-                (format!("{start}{synonym}"), marks)
-            }
-            (None, None) => (first_sentence(item.description).to_owned(), Vec::new()),
-        };
+        let line = reason.map_or_else(
+            || first_sentence(item.description).to_owned(),
+            str::to_owned,
+        );
         let description = ui.add(
             Label::new(line, TextStyle::new(12.0))
                 .color(Token::TextMuted)
+                .single_line(),
+        );
+        let description = ui.add_with_children(
+            Flex::row().clip().style(|style| {
+                style.flex_shrink = 1.0;
+                style.min_size.width = length(0.0);
+            }),
+            &[description],
+        );
+        let also = ui.add(
+            Label::new("", TextStyle::new(12.0))
+                .color(Token::TextMuted)
                 .single_line()
-                .highlight(marks, 600.0, Token::AccentInk),
+                .highlight(Vec::new(), 600.0, Token::AccentInk),
         );
+        let second = ui.add_with_children(Flex::row(), &[description, also]);
         let texts = ui.add_with_children(
-            Flex::column().gap(2.0).grow(1.0).clip(),
-            &[title, description],
+            Flex::column()
+                .gap(2.0)
+                .grow(1.0)
+                .clip()
+                .style(|style| style.min_size.width = length(0.0)),
+            &[title, second],
         );
+        let position = Rc::new(Cell::new(0));
         let mut children = vec![tile, texts];
         let mut value = None;
         let mut on = None;
         match item.kind {
             Kind::Setting => match sources.settings.value(item.id) {
                 Ok(Value::Bool(current)) => {
-                    let state = signal(current);
+                    let state = self.scope.run(|| signal(current));
                     on = Some(state);
                     let asks = sources.asks.clone();
+                    let place = position.clone();
                     let switch = Switch::new(
                         item.title,
                         move || state.get(),
                         move || {
-                            asks.borrow_mut().push(Ask::PaletteRun(Some(index)));
+                            asks.borrow_mut().push(Ask::PaletteRun(Some(place.get())));
                         },
                     )
                     .add_to(ui);
                     children.push(switch);
                 }
                 Ok(_) => {
-                    let shown = signal(value_label(sources.settings, item.id));
+                    let shown = self
+                        .scope
+                        .run(|| signal(value_label(sources.settings, item.id)));
                     value = Some(shown);
                     let text = label(ui, TextStyle::new(12.0), Token::Text, move || shown.get());
                     let chip = ui.add_with_children(
@@ -531,7 +646,8 @@ impl Palette {
                             .padding(8.0, 0.0)
                             .radius(7.0)
                             .background(Token::PanelBg)
-                            .border(1.0, Token::ControlBorder),
+                            .border(1.0, Token::ControlBorder)
+                            .style(|style| style.flex_shrink = 0.0),
                         &[text],
                     );
                     children.push(chip);
@@ -551,12 +667,15 @@ impl Palette {
         }
         let active = self.active;
         let asks = sources.asks.clone();
-        let label_text = match reason {
-            Some(reason) => format!("{}, unavailable: {reason}", item.title),
-            None => item.title.to_owned(),
+        let label_text = match (reason, item.kind) {
+            (Some(reason), _) => format!("{}, unavailable: {reason}", item.title),
+            (None, Kind::Setting) => format!("{}, setting", item.title),
+            (None, Kind::Command) => item.title.to_owned(),
         };
-        let row = ButtonBox::new(label_text, ButtonColors::quiet(), move || {
-            asks.borrow_mut().push(Ask::PaletteRun(Some(index)));
+        let place = position.clone();
+        let mine = position.clone();
+        let widget = ButtonBox::new(label_text, ButtonColors::quiet(), move || {
+            asks.borrow_mut().push(Ask::PaletteRun(Some(place.get())));
         })
         .height(52.0)
         .padding(8.0, 8.0)
@@ -564,16 +683,33 @@ impl Palette {
         .start()
         .radius(10.0)
         .keep_focus()
-        .selected(move || active.get() == index)
+        .selected(move || active.get() == mine.get())
         .add_to(ui, &children);
-        self.rows.push(Row {
-            item: at,
-            value,
-            on,
-        });
-        self.row_widgets.push(row);
-        row
+        self.rows.insert(
+            at,
+            Row {
+                widget,
+                title,
+                also,
+                position,
+                value,
+                on,
+            },
+        );
+        widget
     }
+}
+
+/// Where the palette goes in a window `width` wide: centered, 96 from the
+/// top.
+fn anchor(width: f64) -> Anchor {
+    let at = Point::new(width / 2.0, 96.0);
+    Anchor::Rect(Rect::from_points(at, at))
+}
+
+/// How tall its list may be in a window `height` tall.
+fn room(height: f64) -> f64 {
+    (height - 96.0 - 56.0 - 40.0 - 48.0).clamp(120.0, 560.0)
 }
 
 /// A key's chip ("Esc", "Ctrl+G").
@@ -643,9 +779,10 @@ fn value_label(settings: &Registry, key: &str) -> String {
         .unwrap_or_else(|| id.clone())
 }
 
-/// The next value of the setting `key` (a boolean flips, an enum steps to
-/// its next variant), or `None` for other kinds.
-pub(crate) fn next_value(settings: &Registry, key: &str) -> Option<Value> {
+/// The next value of the setting `key`, or the previous one (`forward`
+/// false): a boolean flips, an enum steps through its variants. `None`
+/// for other kinds.
+pub(crate) fn step_value(settings: &Registry, key: &str, forward: bool) -> Option<Value> {
     match settings.value(key).ok()? {
         Value::Bool(on) => Some(Value::Bool(!on)),
         Value::Enum(id) => {
@@ -653,12 +790,17 @@ pub(crate) fn next_value(settings: &Registry, key: &str) -> Option<Value> {
                 .declarations()
                 .find(|setting| setting.key() == key)?;
             let variants = setting.variants();
+            let count = variants.len().max(1);
             let at = variants
                 .iter()
                 .position(|variant| variant.id == id)
                 .unwrap_or(0);
-            let next = variants.get((at + 1) % variants.len().max(1))?;
-            Some(Value::Enum(next.id.to_owned()))
+            let next = if forward {
+                (at + 1) % count
+            } else {
+                (at + count - 1) % count
+            };
+            Some(Value::Enum(variants.get(next)?.id.to_owned()))
         }
         _ => None,
     }

@@ -619,21 +619,126 @@ fn a_setting_changes_in_place_and_the_bar_follows() {
 fn arrows_pick_the_row_enter_runs() {
     let mut window = Harness::new();
     window.input(mod_k());
-    type_text(&mut window, "zoom");
-    let texts = window.texts();
-    let first = texts
-        .iter()
-        .position(|text| text.starts_with("Zoom"))
-        .unwrap();
-    let second = texts[first + 1..]
-        .iter()
-        .find(|text| text.starts_with("Zoom"))
-        .unwrap()
-        .clone();
+    type_text(&mut window, "zoom in");
+    // Down and back up: the first row, "Zoom in", runs.
     window.input(key_input(imaginarium_ui::Key::ArrowDown, None));
+    window.input(key_input(imaginarium_ui::Key::ArrowUp, None));
     window.input(key_input(imaginarium_ui::Key::Enter, None));
     assert!(!palette_open(&mut window));
-    // The second zoom command ran: the view changed (or stayed, for
-    // "Zoom to 100 %" on a new board), and nothing else happened.
-    assert!(second.starts_with("Zoom"));
+    assert!(window.board().zoom() > 1.0);
+}
+
+/// The selected row (a screen reader hears it as selected) and the
+/// results' box.
+fn active_row(window: &mut Harness) -> (Rect, Rect) {
+    let (ui, fonts) = window.window.ui();
+    let mut tree = AccessTree::default();
+    ui.access(fonts, &mut tree);
+    let rect = |bounds: accesskit::Rect| Rect::new(bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+    let row = tree
+        .nodes()
+        .iter()
+        .find(|(_, node)| node.is_selected() == Some(true))
+        .and_then(|(_, node)| node.bounds())
+        .map(rect)
+        .unwrap();
+    let results = tree
+        .nodes()
+        .iter()
+        .find(|(_, node)| {
+            node.label() == Some("Results") && node.role() != accesskit::Role::ListBox
+        })
+        .and_then(|(_, node)| node.bounds())
+        .map(rect)
+        .unwrap();
+    (row, results)
+}
+
+#[test]
+fn a_new_query_shows_its_first_row() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "e");
+    for _ in 0..25 {
+        window.input(key_input(imaginarium_ui::Key::ArrowDown, None));
+    }
+    window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    let (row, results) = active_row(&mut window);
+    assert!(results.contains(row.center()), "{row:?} in {results:?}");
+}
+
+#[test]
+fn typing_reuses_rows_and_closing_frees_them() {
+    let mut window = Harness::new();
+    let baseline = imaginarium_reactive::live_nodes_for_tests();
+    window.input(mod_k());
+    type_text(&mut window, "tool");
+    window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    let after_one = imaginarium_reactive::live_nodes_for_tests();
+    for _ in 0..10 {
+        type_text(&mut window, "l");
+        window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    }
+    assert_eq!(imaginarium_reactive::live_nodes_for_tests(), after_one);
+    window.input(key_input(imaginarium_ui::Key::Escape, None));
+    assert_eq!(imaginarium_reactive::live_nodes_for_tests(), baseline);
+}
+
+#[test]
+fn the_palette_follows_the_window_size() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    window.resize(Size::new(800.0, 500.0));
+    let panel = window.named("Command palette");
+    let panel = window.bounds(panel);
+    assert!((panel.center().x - 400.0).abs() < 1.0, "{panel:?}");
+    assert!(panel.y1 <= 500.0, "{panel:?}");
+}
+
+#[test]
+fn a_matched_synonym_keeps_its_place_and_shift_tab_steps_back() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "artboard");
+    assert!(window.texts().iter().any(|text| text == " · also artboard"));
+    // Shift+Tab steps the tool bar's position back: Left → Floating.
+    for _ in 0..8 {
+        window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    }
+    type_text(&mut window, "tool bar position");
+    window.input(Input::Key {
+        key: imaginarium_ui::Key::Tab,
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    });
+    assert!(window.texts().contains(&"Floating".to_owned()));
+}
+
+#[test]
+#[ignore = "a timing: cargo test --release -p imaginarium-shell -- --ignored --nocapture"]
+fn a_keystroke_costs_well_under_a_frame() {
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "e");
+    window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    let mut worst = std::time::Duration::ZERO;
+    let mut total = std::time::Duration::ZERO;
+    let letters = "selectzoomtool";
+    for c in letters.chars() {
+        let started = std::time::Instant::now();
+        type_text(&mut window, &c.to_string());
+        let spent = started.elapsed();
+        worst = worst.max(spent);
+        total += spent;
+        window.input(key_input(imaginarium_ui::Key::Backspace, None));
+    }
+    eprintln!(
+        "keystroke + frame: average {:?}, worst {worst:?}",
+        total / letters.len() as u32
+    );
 }
