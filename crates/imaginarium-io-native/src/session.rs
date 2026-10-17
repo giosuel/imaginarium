@@ -56,9 +56,11 @@ pub enum Opening {
 
 /// What keeps a second writer out of a file.
 enum Lock {
-    /// An advisory lock on the file's own handle (Unix), or nothing to
-    /// lock: storage that isn't a file, or a file system that can't.
+    /// An advisory lock on the file's own handle (Unix).
     Handle,
+    /// Nothing locked: storage that isn't a file, or a file system that
+    /// can't lock (NFS without lockd, some FUSE and SMB mounts).
+    None,
     /// A locked file next to it, removed with the lock (Windows).
     #[cfg_attr(not(windows), allow(dead_code))]
     Beside(File, PathBuf),
@@ -94,12 +96,12 @@ fn lock(file: &File, path: &Path) -> std::result::Result<Lock, &'static str> {
             .open(&beside)
         else {
             // A folder where nothing can be created: no lock to take.
-            return Ok(Lock::Handle);
+            return Ok(Lock::None);
         };
         match holder.try_lock() {
             Ok(()) => Ok(Lock::Beside(holder, beside)),
             Err(std::fs::TryLockError::WouldBlock) => Err(IN_USE),
-            Err(std::fs::TryLockError::Error(_)) => Ok(Lock::Handle),
+            Err(std::fs::TryLockError::Error(_)) => Ok(Lock::None),
         }
     }
     #[cfg(not(windows))]
@@ -111,7 +113,7 @@ fn lock(file: &File, path: &Path) -> std::result::Result<Lock, &'static str> {
             // A file system without locks (NFS without lockd, some FUSE and
             // SMB mounts): it opens, with nothing to keep a second writer
             // out.
-            Err(std::fs::TryLockError::Error(_)) => Ok(Lock::Handle),
+            Err(std::fs::TryLockError::Error(_)) => Ok(Lock::None),
         }
     }
 }
@@ -177,6 +179,65 @@ impl Session<File> {
         session.path = Some(path.to_owned());
         session.lock = held;
         Ok(session)
+    }
+
+    /// Makes a new file at `path` holding `document` (or writes it over
+    /// a broken one this app left, at a retry), locked before anything is
+    /// in it: another app looking for kept boards never takes it half
+    /// made, or between its making and its locking.
+    ///
+    /// # Errors
+    /// If it can't be made or written, or another writer has the file.
+    pub fn create(path: &Path, document: &Document, options: &crate::SaveOptions) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let held = lock(&file, path).map_err(NativeError::CantSave)?;
+        file.set_len(0)?;
+        let file = crate::save_new(file, document, options)?;
+        let (_, session) = Self::from_file(file)?;
+        let mut session = session.ok_or(NativeError::CantSave("the new file can't be written"))?;
+        session.path = Some(path.to_owned());
+        session.lock = held;
+        Ok(session)
+    }
+
+    /// Whether the file is locked against other writers (it can't be on
+    /// some file systems).
+    pub fn is_locked(&self) -> bool {
+        matches!(self.lock, Lock::Handle | Lock::Beside(..))
+    }
+
+    /// Deletes the file, while still holding its lock, so no other app
+    /// takes it in between; a file already gone is fine.
+    ///
+    /// # Errors
+    /// If it can't be deleted.
+    pub fn delete(self) -> std::io::Result<()> {
+        let Self {
+            writer, path, lock, ..
+        } = self;
+        let Some(path) = path else {
+            return Ok(());
+        };
+        // Windows deletes no file that is open, so the handle closes first
+        // (the lock beside it stays until the end).
+        let writer = if cfg!(windows) {
+            drop(writer);
+            None
+        } else {
+            Some(writer)
+        };
+        let removed = match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+        drop(writer);
+        drop(lock);
+        removed
     }
 
     /// Whether the file this session writes into was deleted or replaced:
@@ -305,7 +366,7 @@ impl<F: Read + Write + Seek + Durable> Session<F> {
                 parts,
                 recovered,
                 known_len,
-                lock: Lock::Handle,
+                lock: Lock::None,
             }),
         ))
     }
@@ -341,7 +402,7 @@ impl<F: Read + Write + Seek + Durable> Session<F> {
             parts,
             recovered,
             known_len,
-            lock: Lock::Handle,
+            lock: Lock::None,
         })
     }
 

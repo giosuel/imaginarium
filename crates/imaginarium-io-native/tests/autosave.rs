@@ -622,6 +622,7 @@ fn boards_left_behind_are_found_but_not_those_still_open() {
     // Neither lock files nor temporary files count.
     std::fs::write(dir.join(".~left.imag.lock"), "").unwrap();
     std::fs::write(dir.join(".left.imag.1234.tmp"), "").unwrap();
+    std::fs::copy(dir.join("left.imag"), dir.join(".hidden.imag")).unwrap();
     let kept = imaginarium_io_native::kept_boards(&dir);
     let names: Vec<_> = kept
         .iter()

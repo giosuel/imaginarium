@@ -76,6 +76,19 @@ pub trait Storage: Read + Write + Seek + Durable + Send + 'static {
     fn compaction_unsafe(session: &Session<Self>) -> bool
     where
         Self: Sized;
+
+    /// Deletes the storage (a discarded board's), while its session still
+    /// holds it.
+    ///
+    /// # Errors
+    /// Why it couldn't be deleted.
+    fn delete(session: Session<Self>) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        drop(session);
+        Ok(())
+    }
 }
 
 impl Storage for File {
@@ -85,6 +98,10 @@ impl Storage for File {
 
     fn compaction_unsafe(session: &Session<Self>) -> bool {
         session.compaction_unsafe()
+    }
+
+    fn delete(session: Session<Self>) -> Result<(), String> {
+        session.delete().map_err(|err| err.to_string())
     }
 }
 
@@ -114,6 +131,8 @@ struct Shared {
     /// Updates sent and written: Saved only when they are equal.
     sent: u64,
     written: u64,
+    /// Why a discarded file couldn't be deleted.
+    undeleted: Option<String>,
 }
 
 impl std::fmt::Debug for Autosave {
@@ -161,16 +180,11 @@ impl Autosave {
                 protection: crate::Protection::None,
                 created_with: created_with.clone(),
             };
-            crate::save_new_path(&create_path, document, &options)?;
-            match Session::open(&create_path)? {
-                crate::Opening::Editable(_, session) => {
-                    if let Ok(mut id) = made.lock() {
-                        *id = Some(session.doc_id());
-                    }
-                    Ok(*session)
-                }
-                crate::Opening::ReadOnly(_) => Err(NativeError::CantSave(crate::session::IN_USE)),
+            let session = Session::create(&create_path, document, &options)?;
+            if let Ok(mut id) = made.lock() {
+                *id = Some(session.doc_id());
             }
+            Ok(session)
         });
         let reopen_path = path.clone();
         let reopen = move || {
@@ -242,6 +256,7 @@ impl Autosave {
             state: SaveState::Saved,
             sent: 0,
             written: 0,
+            undeleted: None,
         }));
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
@@ -346,24 +361,36 @@ impl Autosave {
         let _ = self.sender.send(Job::Discard);
         let thread = self.thread.take();
         let path = self.path.take();
+        let shared = self.shared.clone();
         std::thread::Builder::new()
             .name("autosave-discard".into())
             .spawn(move || {
-                // The thread lets go of the file (and its lock) first.
+                // The saving thread deletes the file it holds.
                 let joined = thread.is_none_or(|thread| thread.join().is_ok());
-                let removed = match &path {
-                    Some(path) => match std::fs::remove_file(path) {
-                        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                            Some(format!("{} can't be deleted: {err}", path.display()))
-                        }
-                        _ => None,
-                    },
+                let mut undeleted = shared
+                    .lock()
+                    .ok()
+                    .and_then(|mut shared| shared.undeleted.take());
+                // A file half made by a create that failed has no session
+                // to delete it (the name is this board's alone).
+                if joined
+                    && undeleted.is_none()
+                    && let Some(path) = &path
+                    && let Err(err) = std::fs::remove_file(path)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    undeleted = Some(err.to_string());
+                }
+                let what = path
+                    .as_ref()
+                    .map_or_else(|| "the file".to_owned(), |path| path.display().to_string());
+                match undeleted {
+                    Some(reason) => Some(format!("{what} can't be deleted: {reason}")),
+                    // It never got that far: the file may still be there.
+                    None if !joined => {
+                        Some(format!("{what} may be left: saving stopped after an error"))
+                    }
                     None => None,
-                };
-                if joined {
-                    removed
-                } else {
-                    removed.or_else(|| Some("saving stopped after an error".into()))
                 }
             })
             .unwrap_or_else(|_| std::thread::spawn(|| Some("no thread to discard with".into())))
@@ -469,7 +496,14 @@ impl<F: Storage> Saver<F> {
                 match job {
                     Job::Stop => stopping = true,
                     Job::Discard => {
-                        self.session = None;
+                        // Deleted while still locked: no other app takes
+                        // it in between.
+                        if let Some(session) = self.session.take()
+                            && let Err(reason) = F::delete(session)
+                            && let Ok(mut shared) = self.shared.lock()
+                        {
+                            shared.undeleted = Some(reason);
+                        }
                         return;
                     }
                     Job::Update(update) => {

@@ -38,14 +38,21 @@ pub fn kept_boards(folder: &Path) -> Vec<KeptBoard> {
                 .and_then(|meta| meta.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             match Session::open(&path) {
-                Ok(Opening::Editable(opened, session)) => Some((
-                    modified,
-                    KeptBoard {
-                        path,
-                        opened,
-                        session,
-                    },
-                )),
+                // Only a real lock says nobody has it (some file systems
+                // can't lock), and only if the file is still the one at
+                // `path` (not replaced while it was opened).
+                Ok(Opening::Editable(opened, session))
+                    if session.is_locked() && !session.file_gone() =>
+                {
+                    Some((
+                        modified,
+                        KeptBoard {
+                            path,
+                            opened,
+                            session,
+                        },
+                    ))
+                }
                 _ => None,
             }
         })
