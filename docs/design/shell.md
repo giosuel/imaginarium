@@ -466,8 +466,28 @@ when the last board closes.
   until files come (M3.6). The links to Settings, Shortcuts and What's new
   come with the windows they open; the templates with M4.
 - **Right:** **Recent** with an empty tile saying boards will show there.
-  The filter, the thumbnails and dropping files come with files (M3.6
-  part 5); the recovery notice is built (§3.1, part 2).
+  The recovery notice is built (§3.1, part 2), and Recent with files
+  (below).
+
+**As built (M3.6 part 5, recent boards).** Recent, as the Start mockup
+draws it:
+- **Tiles** in rows of three, at most five boards and then the dashed
+  **Open another board…**: a picture of the board (its shapes, frames
+  and text bars in their colors, fitted in, on the board's color; read
+  on a thread), its name, and its folder from the home folder ·
+  when ("just now", "2 hours ago", "yesterday", "last week", "Sep 12").
+  A click opens it (the start window then closes). With none yet, the
+  tile says the boards you open show there.
+- **The filter** (once there are boards) by name and folder; "No
+  recent board matches …" when none does.
+- **The list:** boards opened or saved go first, a moved board moves, a
+  board whose file is gone leaves it (at startup, or when it is clicked);
+  at most 20, in `recent.txt` in the data folder (`<unix ms>\t<path>`
+  per line), read on a thread at startup and written on one.
+- **Dropping** a board file on the start window or a board opens it
+  (`Input::FileDropped`). The hint shows only where drops arrive:
+  winit 0.30 reports none on Wayland yet (Hyprland, Sway, GNOME on
+  Wayland), so there the hint is left out.
 - **Fixed size** (960 × 600, `WindowOptions::resizable = false`), so
   Hyprland and Sway float it like a dialog. Nothing has the keys at
   first (no focus ring, as in the mockup); `Ctrl+N` works anywhere in it

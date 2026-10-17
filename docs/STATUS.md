@@ -11,10 +11,14 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.6 part 5, recent boards** (below). M3.6 parts 1 to
-  4 are done (2026-10-17): saving every change into a board's file, crash
-  recovery for untitled boards, the open and save dialogs, the close
-  dialog. M3.5 is
+- **Next step:** **M3.7, themes** (below). M3.6 is done (2026-10-17),
+  in five stacked parts, each reviewed by a fresh agent: saving every
+  change into a board's file
+  (https://github.com/giosuel/imaginarium/pull/66), crash recovery for
+  untitled boards (https://github.com/giosuel/imaginarium/pull/67), the
+  open and save dialogs (https://github.com/giosuel/imaginarium/pull/68),
+  the close dialog (https://github.com/giosuel/imaginarium/pull/69) and
+  recent boards. M3.5 is
   done (2026-10-17), in four stacked parts, each reviewed
   by a fresh agent: the settings file
   (https://github.com/giosuel/imaginarium/pull/61), the Settings window
@@ -1128,7 +1132,7 @@ What M3 builds on:
   - search, scopes and every kind of setting;
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
-- [ ] **M3.6 Files**, in parts:
+- [x] **M3.6 Files**, done 2026-10-17, in parts:
   - [x] **part 1, saving** (2026-10-17, `shell.md` §3.1 "As built"):
     every change of a board opened from a file goes into the file on a
     saving thread, with the pill's states; read-only for newer files;
@@ -1142,8 +1146,9 @@ What M3 builds on:
   - [x] **part 4, closing a board with unsaved changes** (2026-10-17,
     `shell.md` §3.9 "As built"): the SaveClose dialog for untitled boards
     with work and boards whose file fails;
-  - part 5, recent boards in the start window, Open another board…,
-    dropping a file;
+  - [x] **part 5, recent boards** (2026-10-17, `shell.md` §4 "As
+    built"): tiles with pictures, the filter, Open another board…,
+    dropping a file (not on Wayland yet: winit);
   The plan, as first written:
   - autosave of every change on a worker, and crash recovery;
   - native open and save dialogs; closing an unsaved board asks Save…,
