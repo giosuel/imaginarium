@@ -2165,6 +2165,35 @@ mod tests {
             crate::look::ThemeSetting::Light
         );
         assert_eq!(imaginarium_ui::theme().kind(), ThemeKind::Light);
+        // Screen readers hear radio buttons, the chosen one checked.
+        settings_frame(&mut window);
+        let toggled = |window: &mut crate::settings::SettingsWindow, label: &str| {
+            let (ui, fonts) = window.ui();
+            let mut tree = imaginarium_ui::AccessTree::default();
+            ui.access(fonts, &mut tree);
+            tree.nodes()
+                .iter()
+                .find(|(_, node)| {
+                    node.label() == Some(label) && node.role() == accesskit::Role::RadioButton
+                })
+                .and_then(|(_, node)| node.toggled())
+        };
+        assert_eq!(
+            toggled(&mut window, "Light"),
+            Some(accesskit::Toggled::True)
+        );
+        assert_eq!(
+            toggled(&mut window, "System"),
+            Some(accesskit::Toggled::False)
+        );
+        assert_eq!(
+            toggled(&mut window, "Indigo"),
+            Some(accesskit::Toggled::True)
+        );
+        assert_eq!(
+            toggled(&mut window, "Teal"),
+            Some(accesskit::Toggled::False)
+        );
         // Changed: its reset puts it back.
         settings_frame(&mut window);
         press(&mut window, "Reset Theme");

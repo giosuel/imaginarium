@@ -986,25 +986,21 @@ impl SettingsWindow {
         use imaginarium_settings::SettingType;
         let key = crate::look::ACCENT.key();
         let current = crate::look::Accent::from_value(value).unwrap_or_default();
-        let dark = theme().kind() == imaginarium_ui::ThemeKind::Dark;
         let swatches: Vec<WidgetId> =
             <crate::look::Accent as imaginarium_settings::SettingEnum>::VARIANTS
                 .iter()
                 .map(|variant| {
                     let accent = variant.value;
-                    let color = if dark {
-                        accent.dark_swatch()
-                    } else {
-                        accent.color()
-                    };
                     let asks = self.asks.clone();
                     let id = variant.id;
                     self.ui.add(
-                        Swatch::new(Some(color), variant.label, move || {
+                        Swatch::new(Some(accent.color()), variant.label, move || {
                             asks.borrow_mut()
                                 .push(Ask::Set(key, Value::Enum(id.to_owned())));
                         })
                         .shape(imaginarium_ui::SwatchShape::Dot)
+                        .dark_color(accent.dark_swatch())
+                        .radio()
                         .size(26.0)
                         .selected(accent == current),
                     )
@@ -1310,6 +1306,7 @@ fn theme_card(
     .padding(0.0, 0.0)
     .radius(10.0)
     .grow(1.0)
+    .role(Role::RadioButton)
     .selected(move || chosen)
     .selected_fill(Token::PanelBg)
     .disabled(!enabled);

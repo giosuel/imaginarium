@@ -48,7 +48,7 @@ use imaginarium_render::{CpuMode, GpuOptions, GpuStart, TileWorkers};
 use imaginarium_settings::{FileWriter, Registry, Scope};
 use imaginarium_shell::App;
 use imaginarium_text::Fonts;
-use imaginarium_ui::{DEFAULT_ACCENT, RunStats, Theme, View, WindowOptions, set_theme};
+use imaginarium_ui::{RunStats, View, WindowOptions};
 
 /// Application version, taken from the workspace `Cargo.toml`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -117,10 +117,18 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // The theme, accent and motion the settings ask for, from now on.
+    // The theme, accent and motion the settings ask for, from now on (and
+    // the system's, asked for at once, so the first frame has it).
+    imaginarium_ui::appearance::listen_to_the_system();
     imaginarium_shell::look::follow(&mut settings);
-    if flag("--light") {
-        set_theme(Theme::light(DEFAULT_ACCENT));
+    // A choice for this run (scripted light runs), as the settings' would be.
+    if flag("--light")
+        && let Some(look) = imaginarium_ui::appearance::appearance()
+    {
+        imaginarium_ui::appearance::set_appearance(imaginarium_ui::appearance::Appearance {
+            theme: imaginarium_ui::appearance::ThemeChoice::Light,
+            ..look
+        });
     }
     let workers = TileWorkers::new(TileWorkers::default_threads(), CpuMode::Fast);
     let app = App::new(
