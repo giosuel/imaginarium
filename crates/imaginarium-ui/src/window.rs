@@ -16,7 +16,7 @@ use imaginarium_render::{
     WindowRenderer,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
@@ -222,6 +222,16 @@ pub enum Input {
     WindowFocus(bool),
     /// A file was dropped on the window (see [`file_drops_supported`]).
     FileDropped(std::path::PathBuf),
+}
+
+/// How much bigger than its size a window opens: by the interface size
+/// for one of a fixed size, else not at all.
+fn fixed_factor(options: &WindowOptions) -> f64 {
+    if options.resizable {
+        1.0
+    } else {
+        interface_scale()
+    }
 }
 
 /// What a window says the system prefers: on Windows and macOS (on Linux
@@ -641,7 +651,8 @@ pub fn interface_scale() -> f64 {
 }
 
 /// Sets the [`interface_scale`] (0.5 to 3): every window lays out again
-/// at it, and windows of a fixed size grow or shrink with it.
+/// at it, and windows of a fixed size grow or shrink with it (others keep
+/// their size on screen: their content is larger in it).
 pub fn set_interface_scale(scale: f64) {
     let scale = if scale.is_finite() {
         scale.clamp(0.5, 3.0)
@@ -867,9 +878,12 @@ impl WindowState<'_> {
             self.window.set_ime_allowed(area.is_some());
         }
         if let Some(area) = area {
+            // In device pixels: winit's logical ones are the system's,
+            // without the interface size.
+            let scale = self.scale;
             self.window.set_ime_cursor_area(
-                LogicalPosition::new(area.x0, area.y0),
-                LogicalSize::new(area.width(), area.height()),
+                PhysicalPosition::new(area.x0 * scale, area.y0 * scale),
+                PhysicalSize::new(area.width() * scale, area.height() * scale),
             );
         }
         self.ime = area;
@@ -942,9 +956,12 @@ impl<'v> Shell<'v> {
         let attributes = Window::default_attributes()
             .with_visible(false)
             .with_title(options.title.clone())
+            // A window of a fixed size grows with the interface size (it
+            // must hold its content); others open at their size, which the
+            // user then changes.
             .with_inner_size(LogicalSize::new(
-                options.size.width * interface_scale(),
-                options.size.height * interface_scale(),
+                options.size.width * fixed_factor(&options),
+                options.size.height * fixed_factor(&options),
             ))
             .with_resizable(options.resizable)
             .with_fullscreen(
@@ -1060,14 +1077,34 @@ impl<'v> Shell<'v> {
         // a fixed size (the start window) grows or shrinks with it.
         let interface = interface_scale();
         if state.interface != interface {
+            let old = state.scale;
             state.interface = interface;
             state.scale = state.os_scale * interface;
             state.ime_resend = true;
+            // The pointer, in the new logical pixels (until it moves).
+            state.pointer = Point::new(
+                state.pointer.x * old / state.scale,
+                state.pointer.y * old / state.scale,
+            );
             if !state.options.resizable {
-                let _ = state.window.request_inner_size(LogicalSize::new(
+                let size = LogicalSize::new(
                     state.options.size.width * interface,
                     state.options.size.height * interface,
-                ));
+                );
+                // A window that can't be resized has its size as both bounds
+                // (Wayland): they move first.
+                state.window.set_min_inner_size(Some(size));
+                state.window.set_max_inner_size(Some(size));
+                // Wayland applies it at once and says so here, with no
+                // `Resized` to follow.
+                if let Some(physical) = state.window.request_inner_size(size)
+                    && physical != state.physical
+                {
+                    state.physical = physical;
+                    if let Some(renderer) = &mut state.renderer {
+                        renderer.resize(physical.width, physical.height);
+                    }
+                }
             }
         }
         let physical = state.physical;
