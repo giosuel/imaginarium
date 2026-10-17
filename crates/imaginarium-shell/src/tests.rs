@@ -1241,3 +1241,142 @@ fn reset_to_style_takes_the_nodes_own_values_away() {
             .is_empty()
     );
 }
+
+#[test]
+fn a_hidden_card_comes_back_from_the_boards_menu() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    let at = window.item_center("Hide", accesskit::Role::Button);
+    window.click(at);
+    assert!(
+        window
+            .board()
+            .document()
+            .view()
+            .node(card)
+            .unwrap()
+            .hidden()
+    );
+    let empty = Point::new(900.0, 750.0);
+    window.input(Input::PointerMoved(empty));
+    window.input(Input::PointerButton {
+        primary: false,
+        pressed: true,
+        position: empty,
+        clicks: 1,
+        modifiers: Modifiers::default(),
+    });
+    window.frame();
+    let at = window.item_center("Show hidden", accesskit::Role::MenuItem);
+    window.click(at);
+    assert!(
+        !window
+            .board()
+            .document()
+            .view()
+            .node(card)
+            .unwrap()
+            .hidden()
+    );
+}
+
+#[test]
+fn a_slider_keeps_the_keys_when_the_panel_catches_up() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    let before = window
+        .board()
+        .document()
+        .view()
+        .node(card)
+        .unwrap()
+        .geometry()
+        .unwrap();
+    let slider = window.named("Opacity");
+    window
+        .window
+        .ui()
+        .0
+        .set_focus(&mut Fonts::bundled_only(), Some(slider));
+    for _ in 0..3 {
+        window.input(key_input(imaginarium_ui::Key::ArrowLeft, None));
+    }
+    let view = window.board().document().view();
+    assert_eq!(
+        view.style_prop(card, "opacity"),
+        Some(&imaginarium_model::Value::Number(0.85))
+    );
+    // The arrows never reached the board.
+    assert_eq!(view.node(card).unwrap().geometry().unwrap(), before);
+}
+
+#[test]
+fn a_field_with_nonsense_shows_the_value_again() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    let steps = window
+        .board()
+        .document()
+        .can_undo(imaginarium_model::UndoScope::User);
+    let _ = steps;
+    enter_in(&mut window, "X", "left");
+    let (ui, fonts) = window.window.ui();
+    let x = ui.find_by_label(fonts, "X").unwrap();
+    let shown = ui.widget::<imaginarium_ui::TextInput>(x).unwrap().text();
+    assert_eq!(shown, "36");
+}
+
+#[test]
+fn a_typed_hex_keeps_the_fills_opacity() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    enter_in(&mut window, "Fill opacity, percent", "50");
+    enter_in(&mut window, "Fill, hex", "16A34A");
+    let view = window.board().document().view();
+    let fill = view
+        .style_prop(card, "fill")
+        .and_then(imaginarium_model::Value::as_str)
+        .map(str::to_ascii_lowercase);
+    assert_eq!(fill.as_deref(), Some("#16a34a80"));
+}
+
+#[test]
+fn the_inspector_leaves_help_and_a_right_bar_free() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    window
+        .window
+        .execute(
+            "view.dock_toolbar",
+            &imaginarium_commands::Args::new().with(
+                "edge",
+                imaginarium_commands::ArgValue::String("right".into()),
+            ),
+        )
+        .unwrap();
+    window.frame();
+    window.frame();
+    let panel = window.named("Inspector");
+    let (panel, bar, help) = (
+        window.bounds(panel),
+        {
+            let bar = window.named("Tools");
+            window.bounds(bar)
+        },
+        {
+            let help = window.named("Help and shortcuts");
+            window.bounds(help)
+        },
+    );
+    let overlap = |a: Rect, b: Rect| a.intersect(b).area() > 0.0;
+    assert!(!overlap(panel, bar), "{panel:?} {bar:?}");
+    assert!(!overlap(panel, help), "{panel:?} {help:?}");
+}

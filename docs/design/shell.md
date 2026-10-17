@@ -228,8 +228,19 @@ bottom, scrolling when the window is short.
   (`style.set_opacity`), Lock or Unlock, Hide (`board.set_hidden`);
   Style: the named style (`style.apply`) and Reset to style
   (`style.reset`).
-- **Updates.** Rebuilt when the selection or its values change, not
-  during a gesture; the field that had the keys keeps them.
+- **Updates.** Its snapshot is taken only when the document, the
+  selection or the theme changed (not during a gesture), and the panel
+  is rebuilt only when what it shows changed: typing in a text box
+  doesn't rebuild it. Any control that had the keys keeps them.
+- **Fields.** Each section reads the first node it applies to, as the
+  board draws it (frames with their frame colors), and locks count
+  when inherited. Enter on an unchanged field does nothing; text that
+  isn't a value, or one a command refuses, shows the real value again;
+  `%`, `pt` and `°` are taken; a typed hex keeps the color's opacity.
+- **Layer.** Opacity for shapes and text; Lock or Unlock; Hide, undone
+  with Show hidden (`board.show_hidden`, in the board's menu and the
+  palette). The panel ends above the bottom row and a right-docked tool
+  bar moves left of it.
 - **Not yet:** per-corner radii and Convert to path (paths come with
   the vector work); a mixed multi-selection shows the first node's
   values.

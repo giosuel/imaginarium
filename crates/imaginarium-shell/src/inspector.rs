@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use accesskit::Role;
 use imaginarium_canvas::BoardCanvas;
 use imaginarium_canvas::commands_style::preset_of;
-use imaginarium_canvas::style::{parse_color, shape_style, text_look};
+use imaginarium_canvas::commands_style::{StyleTarget, first_target};
+use imaginarium_canvas::node_look;
+use imaginarium_canvas::style::{parse_color, text_look};
 use imaginarium_commands::{ArgValue, Args, Availability, Registry};
 use imaginarium_model::{Geometry, NodeId, NodeKind, Value};
 use imaginarium_render::peniko::Color;
@@ -41,6 +43,15 @@ pub(crate) enum Field {
     StrokeWidth,
     TextHex,
     TextSize,
+    /// Controls other than text fields, which keep the keys across a
+    /// rebuild too.
+    RadiusSlider,
+    OpacitySlider,
+    KeepProportions,
+    Lock,
+    Hide,
+    Reset,
+    Popup(Popup),
 }
 
 /// A control that opens a popover next to it.
@@ -58,20 +69,22 @@ pub(crate) enum Popup {
 pub(crate) struct Snapshot {
     pub(crate) selection: Vec<NodeId>,
     title: String,
-    /// What the name field shows without a name: the node's text.
-    label: String,
     badge: &'static str,
     name: Option<String>,
     /// One unlocked node's box (position and size are per node).
     pub(crate) geometry: Option<Geometry>,
     pub(crate) preset: Option<String>,
-    radius: Option<f64>,
+    /// The corner radius and the most it can be.
+    radius: Option<(f64, f64)>,
     /// Stored (`#rrggbb[aa]`) and shown colors.
     pub(crate) fill: Option<(Option<String>, Option<Color>)>,
     pub(crate) stroke: Option<(Option<String>, Option<Color>, f64)>,
     pub(crate) text: Option<(Option<String>, Color, f64)>,
-    opacity: f64,
-    locked: bool,
+    /// The layer's opacity, where it applies.
+    opacity: Option<f64>,
+    /// Lock (false) or Unlock (true), where either applies.
+    lock: Option<bool>,
+    hide: bool,
     /// The named style (id, name) and the board's styles.
     pub(crate) style: Option<(String, String)>,
     pub(crate) styles: Vec<(String, String)>,
@@ -113,30 +126,36 @@ pub(crate) fn snapshot(board: &BoardCanvas, commands: &Registry<BoardCanvas>) ->
     let first = *selection.first()?;
     let view = board.document().view();
     let node = view.node(first)?;
-    let shows = |id: &str| {
+    // Each command's availability, asked once.
+    let availability = |id: &str| {
         commands
             .get(id)
-            .is_some_and(|command| command.availability(board) != Availability::Hidden)
+            .map_or(Availability::Hidden, |command| command.availability(board))
     };
-    let kind = theme().kind();
+    let shows = |id: &str| availability(id) != Availability::Hidden;
+    let theme = theme();
+    let kind = theme.kind();
     let preset = matches!(node.kind(), NodeKind::Shape).then(|| preset_of(node));
-    let (title, badge) = if selection.len() > 1 {
-        ("", "Selection")
-    } else {
-        kind_title(node.kind(), preset.as_deref())
-    };
     let title = if selection.len() > 1 {
         format!("{} selected", selection.len())
     } else {
-        title.to_owned()
+        kind_title(node.kind(), preset.as_deref()).0.to_owned()
     };
-    let stored = |prop: &str| {
-        view.style_prop(first, prop)
+    let badge = if selection.len() > 1 {
+        "Selection"
+    } else {
+        kind_title(node.kind(), preset.as_deref()).1
+    };
+    // Each section shows the first node it applies to, as the board draws
+    // it (a frame with its frame colors).
+    let target = |which| first_target(board, which);
+    let stored = |node: NodeId, prop: &str| {
+        view.style_prop(node, prop)
             .and_then(Value::as_str)
             .map(str::to_ascii_lowercase)
     };
-    let look = shape_style(view, first, kind);
-    let locked = node.locked();
+    let look = |node: NodeId| node_look(view, node, &theme);
+    let locked = board.is_locked(first);
     let single = selection.len() == 1;
     let style_name = |id: &imaginarium_model::StyleId| {
         view.style(id)
@@ -148,37 +167,52 @@ pub(crate) fn snapshot(board: &BoardCanvas, commands: &Registry<BoardCanvas>) ->
         .map(|id| (id.as_str().to_owned(), style_name(id)))
         .collect();
     styles.sort_by(|a, b| a.1.cmp(&b.1));
-    let text = (shows("style.set_text_color") && !shows("style.set_fill")).then(|| {
-        let look = text_look(view, first, kind, theme().color(Token::Text), 16.0, 400.0);
-        (stored("color"), look.color, f64::from(look.size))
-    });
-    let label = node
-        .text()
-        .map(|text| {
-            text.to_plain_string()
-                .trim()
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_owned()
-        })
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "Name".to_owned());
+    let fill_shows = shows("style.set_fill");
+    let fill = fill_shows
+        .then(|| target(StyleTarget::Fill))
+        .flatten()
+        .map(|node| (stored(node, "fill"), look(node).fill));
+    let stroke = shows("style.set_stroke")
+        .then(|| target(StyleTarget::Stroke))
+        .flatten()
+        .map(|node| {
+            let look = look(node);
+            (stored(node, "stroke"), look.stroke, look.stroke_width)
+        });
+    let text = (!fill_shows && shows("style.set_text_color"))
+        .then(|| target(StyleTarget::Text))
+        .flatten()
+        .map(|node| {
+            let look = text_look(view, node, kind, theme.color(Token::Text), 16.0, 400.0);
+            (stored(node, "color"), look.color, f64::from(look.size))
+        });
+    let radius = shows("style.set_radius")
+        .then(|| target(StyleTarget::Radius))
+        .flatten()
+        .and_then(|node| {
+            let size = view.node(node)?.geometry()?;
+            Some((look(node).radius, (size.w.min(size.h) / 2.0).max(1.0)))
+        });
+    // Unlock for a locked node, Lock otherwise, where the command runs.
+    let lock = if locked {
+        availability("board.unlock").is_enabled().then_some(true)
+    } else {
+        availability("board.lock").is_enabled().then_some(false)
+    };
     Some(Snapshot {
         selection: selection.clone(),
         title,
-        label,
         badge,
-        name: single.then(|| node.name().unwrap_or("").to_owned()),
+        name: (single && shows("board.rename")).then(|| node.name().unwrap_or("").to_owned()),
         geometry: (single && !locked).then(|| node.geometry()).flatten(),
         preset: shows("shape.set_preset").then_some(preset).flatten(),
-        radius: shows("style.set_radius").then_some(look.radius),
-        fill: shows("style.set_fill").then(|| (stored("fill"), look.fill)),
-        stroke: shows("style.set_stroke")
-            .then(|| (stored("stroke"), look.stroke, look.stroke_width)),
+        radius,
+        fill,
+        stroke,
         text,
-        opacity: f64::from(look.opacity),
-        locked,
+        opacity: shows("style.set_opacity").then(|| f64::from(look(first).opacity)),
+        lock,
+        hide: shows("board.set_hidden"),
         style: node
             .style()
             .map(|id| (id.as_str().to_owned(), style_name(id))),
@@ -191,6 +225,26 @@ pub(crate) fn snapshot(board: &BoardCanvas, commands: &Registry<BoardCanvas>) ->
     })
 }
 
+/// What the name field shows without a name: the node's first line of
+/// text (built only for a rebuild, not compared each frame).
+pub(crate) fn label_of(board: &BoardCanvas, node: NodeId) -> String {
+    board
+        .document()
+        .view()
+        .node(node)
+        .and_then(|node| node.text())
+        .map(|text| {
+            text.to_plain_string()
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "Name".to_owned())
+}
+
 /// The panel's widgets.
 pub(crate) struct Inspector {
     pub(crate) panel: WidgetId,
@@ -198,6 +252,9 @@ pub(crate) struct Inspector {
     pub(crate) shown: Option<Option<Snapshot>>,
     children: Vec<WidgetId>,
     pub(crate) fields: HashMap<Field, WidgetId>,
+    /// What each text field showed when built: Enter on it unchanged does
+    /// nothing (its value may be rounded).
+    pub(crate) texts: HashMap<Field, String>,
     /// The snapshot shown, for the window to act on fields and popups.
     pub(crate) snapshot: Option<Snapshot>,
     pub(crate) popups: HashMap<Popup, WidgetId>,
@@ -251,7 +308,8 @@ impl Inspector {
                         left: taffy::LengthPercentageAuto::auto(),
                         right: length(16.0),
                         top: length(72.0),
-                        bottom: length(16.0),
+                        // Above the bottom row (help, a bottom tool bar).
+                        bottom: length(16.0 + 44.0 + 8.0),
                     };
                 }),
         );
@@ -261,6 +319,7 @@ impl Inspector {
             shown: None,
             children: Vec::new(),
             fields: HashMap::new(),
+            texts: HashMap::new(),
             snapshot: None,
             popups: HashMap::new(),
             keep_proportions: true,
@@ -281,17 +340,21 @@ impl Inspector {
     }
 
     /// Builds the panel for `snapshot` (none: nothing selected).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn rebuild(
         &mut self,
         ui: &mut Ui,
         fonts: &mut Fonts,
         snapshot: Option<Snapshot>,
+        label: &str,
+        close_keys: Option<String>,
         asks: &Asks,
     ) {
         for child in self.children.drain(..) {
             ui.remove(child);
         }
         self.fields.clear();
+        self.texts.clear();
         self.popups.clear();
         let mut children = Vec::new();
         let close = IconButton::new("x", "Close the inspector", {
@@ -299,7 +362,7 @@ impl Inspector {
             move || asks.borrow_mut().push(Ask::ToggleInspector)
         })
         .size(30.0, 30.0, 8.0, 16.0)
-        .shortcut("Ctrl+I")
+        .shortcut(close_keys.unwrap_or_default())
         .tooltip_placement(Placement::Left)
         .add_to(ui);
         match &snapshot {
@@ -327,7 +390,7 @@ impl Inspector {
                 children.extend([header, hint]);
             }
             Some(snapshot) => {
-                children.push(self.header(ui, fonts, snapshot, close, asks));
+                children.push(self.header(ui, fonts, snapshot, label, close, asks));
                 let mut sections = Vec::new();
                 self.sections(ui, fonts, snapshot, asks, &mut sections);
                 let body = ui.add_with_children(Flex::column(), &sections);
@@ -346,11 +409,13 @@ impl Inspector {
         self.shown = Some(snapshot);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn header(
         &mut self,
         ui: &mut Ui,
         fonts: &mut Fonts,
         snapshot: &Snapshot,
+        label: &str,
         close: WidgetId,
         asks: &Asks,
     ) -> WidgetId {
@@ -381,16 +446,7 @@ impl Inspector {
         let Some(name) = &snapshot.name else {
             return row;
         };
-        let field = self.input(
-            ui,
-            fonts,
-            Field::Name,
-            "Name",
-            &snapshot.label,
-            name,
-            false,
-            asks,
-        );
+        let field = self.input(ui, fonts, Field::Name, "Name", label, name, false, asks);
         let field = ui.add_with_children(
             Flex::row().style(|style| style.padding = padding(16.0, 16.0, 0.0, 14.0)),
             &[field],
@@ -427,6 +483,7 @@ impl Inspector {
             widget.set_text(fonts, value);
         }
         self.fields.insert(field, input);
+        self.texts.insert(field, value.to_owned());
         input
     }
 
@@ -499,6 +556,7 @@ impl Inspector {
             &[swatch],
         );
         self.popups.insert(popup, button);
+        self.fields.insert(Field::Popup(popup), button);
         button
     }
 
@@ -528,6 +586,7 @@ impl Inspector {
             children,
         );
         self.popups.insert(popup, button);
+        self.fields.insert(Field::Popup(popup), button);
         button
     }
 
@@ -560,8 +619,7 @@ impl Inspector {
                     self.popup_button(ui, Popup::Type, "Shape type", &[text, chevron], asks);
                 rows.push(labelled(ui, "Type", &[button]));
             }
-            if let (Some(radius), Some(geometry)) = (snapshot.radius, snapshot.geometry) {
-                let most = (geometry.w.min(geometry.h) / 2.0).max(1.0);
+            if let Some((radius, most)) = snapshot.radius {
                 let asks_radius = asks.clone();
                 let slider = Slider::new(
                     "Corner radius",
@@ -576,6 +634,7 @@ impl Inspector {
                     },
                 )
                 .add_to(ui);
+                self.fields.insert(Field::RadiusSlider, slider);
                 let field = self.boxed(
                     ui,
                     fonts,
@@ -644,9 +703,11 @@ impl Inspector {
                 .padding(8.0, 8.0)
                 .gap(6.0)
                 .grow(1.0)
-                .keep_focus(),
+                .keep_focus()
+                .selected(move || keep),
                 &[icon, text],
             );
+            self.fields.insert(Field::KeepProportions, toggle);
             cells.push(toggle);
             let rows: Vec<WidgetId> = cells
                 .chunks(2)
@@ -742,31 +803,34 @@ impl Inspector {
             let row = ui.add_with_children(Flex::row().gap(8.0), &[pick, hex, size]);
             out.push(section(ui, "Text", &[row]));
         }
-        // The layer: opacity, lock, hide.
+        // The layer: opacity, lock, hide, each where it applies.
         {
-            let opacity = snapshot.opacity;
-            let asks_opacity = asks.clone();
-            let slider = Slider::new(
-                "Opacity",
-                0.0,
-                1.0,
-                move || opacity,
-                move |value| {
-                    let args = Args::new()
-                        .with("opacity", ArgValue::Float((value * 100.0).round() / 100.0));
-                    asks_opacity
-                        .borrow_mut()
-                        .push(Ask::RunWith("style.set_opacity", args));
-                },
-            )
-            .add_to(ui);
-            let value = ui.add(
-                Label::new(format!("{:.0} %", opacity * 100.0), TextStyle::new(13.0))
-                    .color(Token::Text)
-                    .single_line(),
-            );
-            let value = ui.add_with_children(Flex::row().width(44.0), &[value]);
-            let opacity_row = labelled(ui, "Opacity", &[slider, value]);
+            let mut rows = Vec::new();
+            if let Some(opacity) = snapshot.opacity {
+                let asks_opacity = asks.clone();
+                let slider = Slider::new(
+                    "Opacity",
+                    0.0,
+                    1.0,
+                    move || opacity,
+                    move |value| {
+                        let args = Args::new()
+                            .with("opacity", ArgValue::Float((value * 100.0).round() / 100.0));
+                        asks_opacity
+                            .borrow_mut()
+                            .push(Ask::RunWith("style.set_opacity", args));
+                    },
+                )
+                .add_to(ui);
+                self.fields.insert(Field::OpacitySlider, slider);
+                let value = ui.add(
+                    Label::new(format!("{:.0} %", opacity * 100.0), TextStyle::new(13.0))
+                        .color(Token::Text)
+                        .single_line(),
+                );
+                let value = ui.add_with_children(Flex::row().width(44.0), &[value]);
+                rows.push(labelled(ui, "Opacity", &[slider, value]));
+            }
             let toggle = |ui: &mut Ui, icon: &str, name: &str, action: Box<dyn FnMut()>| {
                 let icon = ui.add(Icon::named(icon, 14.0, Token::TextSecondary));
                 let text = ui.add(
@@ -790,27 +854,40 @@ impl Inspector {
                     &[icon, text],
                 )
             };
-            let lock = if snapshot.locked {
-                toggle(
+            let mut buttons = Vec::new();
+            if let Some(locked) = snapshot.lock {
+                let lock = if locked {
+                    toggle(
+                        ui,
+                        "lock",
+                        "Unlock",
+                        Box::new(run("board.unlock", Args::new())),
+                    )
+                } else {
+                    toggle(ui, "lock", "Lock", Box::new(run("board.lock", Args::new())))
+                };
+                self.fields.insert(Field::Lock, lock);
+                buttons.push(lock);
+            }
+            if snapshot.hide {
+                let hide = toggle(
                     ui,
-                    "lock",
-                    "Unlock",
-                    Box::new(run("board.unlock", Args::new())),
-                )
-            } else {
-                toggle(ui, "lock", "Lock", Box::new(run("board.lock", Args::new())))
-            };
-            let hide = toggle(
-                ui,
-                "eye-off",
-                "Hide",
-                Box::new(run(
-                    "board.set_hidden",
-                    Args::new().with("hidden", ArgValue::Bool(true)),
-                )),
-            );
-            let buttons = ui.add_with_children(Flex::row().gap(8.0), &[lock, hide]);
-            out.push(section(ui, "Layer", &[opacity_row, buttons]));
+                    "eye-off",
+                    "Hide",
+                    Box::new(run(
+                        "board.set_hidden",
+                        Args::new().with("hidden", ArgValue::Bool(true)),
+                    )),
+                );
+                self.fields.insert(Field::Hide, hide);
+                buttons.push(hide);
+            }
+            if !buttons.is_empty() {
+                rows.push(ui.add_with_children(Flex::row().gap(8.0), &buttons));
+            }
+            if !rows.is_empty() {
+                out.push(section(ui, "Layer", &rows));
+            }
         }
         // The named style.
         if !snapshot.styles.is_empty() || !snapshot.overrides.is_empty() {
@@ -853,19 +930,19 @@ impl Inspector {
                         .color(Token::AccentInk)
                         .single_line(),
                 );
-                line.push(
-                    ui.add_with_children(
-                        ButtonBox::new(
-                            "Reset to style",
-                            ButtonColors::quiet(),
-                            run("style.reset", Args::new()),
-                        )
-                        .height(24.0)
-                        .padding(4.0, 4.0)
-                        .keep_focus(),
-                        &[text],
-                    ),
+                let reset = ui.add_with_children(
+                    ButtonBox::new(
+                        "Reset to style",
+                        ButtonColors::quiet(),
+                        run("style.reset", Args::new()),
+                    )
+                    .height(24.0)
+                    .padding(4.0, 4.0)
+                    .keep_focus(),
+                    &[text],
                 );
+                self.fields.insert(Field::Reset, reset);
+                line.push(reset);
             }
             rows.push(ui.add_with_children(Flex::row().gap(8.0), &line));
             out.push(section(ui, "Style", &rows));

@@ -34,7 +34,12 @@ pub(crate) const SELECTION: &[&[&str]] = &[
 
 /// The context menu of the empty board.
 pub(crate) const BOARD: &[&[&str]] = &[
-    &["board.paste", "board.select_all", "board.unlock"],
+    &[
+        "board.paste",
+        "board.select_all",
+        "board.unlock",
+        "board.show_hidden",
+    ],
     &["view.zoom_to_fit", "view.zoom_100"],
     &["edit.undo", "edit.redo"],
 ];

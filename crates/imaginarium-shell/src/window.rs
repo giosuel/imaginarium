@@ -153,6 +153,8 @@ pub struct BoardWindow {
     /// What the bar's state was computed for.
     bar_key: Option<BarKey>,
     inspector: Inspector,
+    /// What the inspector's snapshot was taken for.
+    inspector_key: Option<BarKey>,
     /// Holds the tool bar; laid out for where it docks.
     stage: WidgetId,
     placing: Option<Placing>,
@@ -294,6 +296,7 @@ impl BoardWindow {
             bar,
             bar_key: None,
             inspector,
+            inspector_key: None,
             stage,
             placing: None,
             zones,
@@ -613,6 +616,8 @@ impl BoardWindow {
             }
             Ask::BarColor(command, text) => {
                 if let Some(color) = contextbar::typed_color(&text) {
+                    // Six digits typed keep the opacity the color had.
+                    let color = keep_alpha(&color, self.bar.stored_color(command).as_deref());
                     let args =
                         Args::new().with("color", imaginarium_commands::ArgValue::String(color));
                     let _ = self.execute(command, &args);
@@ -621,7 +626,7 @@ impl BoardWindow {
             Ask::BarOpacity(command, text) => {
                 // A percent for a color opacity command (each node keeps
                 // its own color).
-                if let Ok(percent) = text.parse::<f64>() {
+                if let Ok(percent) = text.trim().trim_end_matches('%').trim().parse::<f64>() {
                     let args = Args::new().with(
                         "opacity",
                         imaginarium_commands::ArgValue::Float((percent / 100.0).clamp(0.0, 1.0)),
@@ -659,7 +664,8 @@ impl BoardWindow {
 
     /// Rebuilds the inspector when what it shows changed (not during a
     /// gesture: it would follow every pointer move), keeping the keys in
-    /// the field that had them.
+    /// the control that had them. Its snapshot is taken only when the
+    /// document, the selection or the theme changed.
     fn refresh_inspector(&mut self) {
         if !self.inspector.open {
             return;
@@ -670,10 +676,25 @@ impl BoardWindow {
         if board.is_gesturing() {
             return;
         }
+        let key = BarKey {
+            revision: board.revision(),
+            selection: board.selection().get_untracked(),
+            gesturing: false,
+            theme: std::rc::Rc::as_ptr(&theme()) as usize,
+        };
+        if self.inspector.shown.is_some() && self.inspector_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.inspector_key = Some(key);
         let snapshot = inspector::snapshot(board, &self.board_commands);
         if self.inspector.shown.as_ref() == Some(&snapshot) {
             return;
         }
+        let label = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.selection.first().copied())
+            .map_or_else(String::new, |node| inspector::label_of(board, node));
+        let close_keys = crate::toolbar::shortcut(&self.keymap, "view.inspector");
         let focused = self.ui.focused();
         let field = self
             .inspector
@@ -681,33 +702,51 @@ impl BoardWindow {
             .iter()
             .find(|(_, id)| Some(**id) == focused)
             .map(|(field, _)| *field);
-        self.inspector
-            .rebuild(&mut self.ui, &mut self.fonts, snapshot, &self.asks);
+        self.inspector.rebuild(
+            &mut self.ui,
+            &mut self.fonts,
+            snapshot,
+            &label,
+            close_keys,
+            &self.asks,
+        );
         if let Some(widget) = field.and_then(|field| self.inspector.fields.get(&field).copied()) {
             self.ui.set_focus(&mut self.fonts, Some(widget));
         }
     }
 
-    /// Runs what an inspector field asks for.
+    /// Runs what an inspector field asks for. Text that isn't a value, or
+    /// a value the command refuses, puts the field back as it was.
     fn inspector_field(&mut self, field: Field, text: &str) {
         let Some(snapshot) = self.inspector.snapshot.clone() else {
             return;
         };
-        let float = |name: &str| {
-            text.trim()
-                .trim_end_matches(['%', '°'])
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .map(|value| Args::new().with(name, imaginarium_commands::ArgValue::Float(value)))
-        };
-        let ask = match field {
-            Field::Name => Some(Ask::RunWith(
-                "board.rename",
+        let text = text.trim();
+        // Enter on a field as it was shown changes nothing (its value may
+        // be rounded for showing).
+        if self.inspector.texts.get(&field).map(String::as_str) == Some(text) {
+            return;
+        }
+        let number = text
+            .trim_end_matches(['%', '°'])
+            .trim_end_matches("pt")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite());
+        let float = |name: &str, low: f64, high: f64| {
+            number.map(|value| {
                 Args::new().with(
-                    "name",
-                    imaginarium_commands::ArgValue::String(text.to_owned()),
-                ),
+                    name,
+                    imaginarium_commands::ArgValue::Float(value.clamp(low, high)),
+                )
+            })
+        };
+        use imaginarium_commands::ArgValue;
+        let run: Option<(&'static str, Args)> = match field {
+            Field::Name => Some((
+                "board.rename",
+                Args::new().with("name", ArgValue::String(text.to_owned())),
             )),
             Field::X | Field::Y | Field::W | Field::H | Field::Rotation => {
                 let (Some(current), [node]) = (snapshot.geometry, &snapshot.selection[..]) else {
@@ -715,32 +754,60 @@ impl BoardWindow {
                 };
                 inspector::geometry_for(field, text, current, self.inspector.keep_proportions).map(
                     |geometry| {
-                        use imaginarium_commands::ArgValue::{Float, String};
-                        Ask::RunWith(
+                        // Rotation within one turn, as the box keeps it.
+                        let rotation = (geometry.r + 180.0).rem_euclid(360.0) - 180.0;
+                        (
                             "board.set_box",
                             Args::new()
-                                .with("node", String(node.to_string()))
-                                .with("x", Float(geometry.x))
-                                .with("y", Float(geometry.y))
-                                .with("w", Float(geometry.w))
-                                .with("h", Float(geometry.h))
-                                .with("rotation", Float(geometry.r)),
+                                .with("node", ArgValue::String(node.to_string()))
+                                .with("x", ArgValue::Float(geometry.x))
+                                .with("y", ArgValue::Float(geometry.y))
+                                .with("w", ArgValue::Float(geometry.w.max(0.0)))
+                                .with("h", ArgValue::Float(geometry.h.max(0.0)))
+                                .with("rotation", ArgValue::Float(rotation)),
                         )
                     },
                 )
             }
-            Field::Radius => float("radius").map(|args| Ask::RunWith("style.set_radius", args)),
+            Field::Radius => float("radius", 0.0, 1.0e6).map(|args| ("style.set_radius", args)),
             Field::StrokeWidth => {
-                float("width").map(|args| Ask::RunWith("style.set_stroke_width", args))
+                float("width", 0.0, 64.0).map(|args| ("style.set_stroke_width", args))
             }
-            Field::TextSize => float("size").map(|args| Ask::RunWith("style.set_text_size", args)),
-            Field::FillHex => Some(Ask::BarColor("style.set_fill", text.to_owned())),
-            Field::StrokeHex => Some(Ask::BarColor("style.set_stroke", text.to_owned())),
-            Field::TextHex => Some(Ask::BarColor("style.set_text_color", text.to_owned())),
-            Field::FillOpacity => Some(Ask::BarOpacity("style.set_fill_opacity", text.to_owned())),
+            Field::TextSize => float("size", 4.0, 400.0).map(|args| ("style.set_text_size", args)),
+            Field::FillOpacity => float("opacity", 0.0, 100.0).map(|args| {
+                let percent = args.float("opacity").unwrap_or(100.0);
+                (
+                    "style.set_fill_opacity",
+                    Args::new().with("opacity", ArgValue::Float(percent / 100.0)),
+                )
+            }),
+            Field::FillHex | Field::StrokeHex | Field::TextHex => {
+                let (command, stored) = match field {
+                    Field::FillHex => ("style.set_fill", snapshot.fill.and_then(|fill| fill.0)),
+                    Field::StrokeHex => (
+                        "style.set_stroke",
+                        snapshot.stroke.and_then(|stroke| stroke.0),
+                    ),
+                    _ => (
+                        "style.set_text_color",
+                        snapshot.text.and_then(|text| text.0),
+                    ),
+                };
+                contextbar::typed_color(text).map(|color| {
+                    let color = keep_alpha(&color, stored.as_deref());
+                    (command, Args::new().with("color", ArgValue::String(color)))
+                })
+            }
+            _ => None,
         };
-        if let Some(ask) = ask {
-            self.asks.borrow_mut().push(ask);
+        let applied = run.is_some_and(|(command, args)| {
+            matches!(self.execute(command, &args), Ok(Outcome::Done))
+        });
+        if !applied {
+            // Show the real value again.
+            self.inspector.shown = None;
+            self.inspector_key = None;
+            self.refresh_inspector();
         }
     }
 
@@ -1143,6 +1210,12 @@ impl BoardWindow {
         };
         match self.dock {
             Dock::Left | Dock::Right => {
+                // A bar docked right sits left of an open inspector.
+                let right_edge = if self.dock == Dock::Right && self.inspector.open {
+                    edge + 300.0 + CLEARANCE
+                } else {
+                    edge
+                };
                 let (top, bottom) = if self.dock == Dock::Left {
                     (top_left, bottom_left)
                 } else {
@@ -1151,17 +1224,22 @@ impl BoardWindow {
                 let (start, end) = (top.y1 + CLEARANCE, bottom.y0 - CLEARANCE);
                 match fits(start, end, bar.height, height) {
                     Some(true) => Placing {
-                        padding: [edge; 4],
+                        padding: [edge, right_edge, edge, edge],
                         centered: true,
                     },
                     Some(false) => Placing {
-                        padding: [edge, edge, start, height - end],
+                        padding: [edge, right_edge, start, height - end],
                         centered: true,
                     },
                     // Too tall: from just below the corner, so its grip
                     // stays in reach.
                     None => Placing {
-                        padding: [edge, edge, start.min(height - bar.height).max(0.0), 0.0],
+                        padding: [
+                            edge,
+                            right_edge,
+                            start.min(height - bar.height).max(0.0),
+                            0.0,
+                        ],
                         centered: false,
                     },
                 }
@@ -1335,6 +1413,15 @@ impl Drop for BoardWindow {
         if let Ok(mut settings) = self.settings.try_borrow_mut() {
             settings.unsubscribe(self.subscription);
         }
+    }
+}
+
+/// `typed` (`#rrggbb` or `#rrggbbaa`) with the alpha of `stored` when only
+/// six digits were typed.
+fn keep_alpha(typed: &str, stored: Option<&str>) -> String {
+    match stored.filter(|stored| stored.len() == 9 && typed.len() == 7) {
+        Some(stored) => format!("{typed}{}", &stored[7..]),
+        None => typed.to_owned(),
     }
 }
 
