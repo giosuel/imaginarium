@@ -1866,3 +1866,104 @@ fn a_button_box_takes_clicks_on_its_children_and_shows_its_tooltip() {
     assert_eq!(clicks.get(), 2);
     set_clock_for_tests(None);
 }
+
+#[test]
+fn no_tooltip_shows_during_a_drag() {
+    use crate::animation::set_clock_for_tests;
+    use crate::tree::TOOLTIP_DELAY;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let (zoom, fit) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let (on_zoom, on_fit) = (
+        ui.bounds(zoom).unwrap().center(),
+        ui.bounds(fit).unwrap().center(),
+    );
+    ui.input(&mut fonts, &Input::PointerMoved(on_zoom));
+    ui.input(&mut fonts, &pointer(on_zoom, true, true));
+    // Dragged onto the next button and held there.
+    ui.input(&mut fonts, &Input::PointerMoved(on_fit));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY * 3);
+    assert_eq!(ui.tip_for_tests(), None);
+    ui.input(&mut fonts, &pointer(on_fit, true, false));
+    set_clock_for_tests(None);
+}
+
+#[test]
+fn a_parent_shows_its_tooltip_over_its_children() {
+    use crate::animation::set_clock_for_tests;
+    use crate::tree::TOOLTIP_DELAY;
+    /// A box with a tooltip whose children take the hover.
+    struct Tipped;
+    impl Widget for Tipped {
+        fn tooltip(&self) -> Option<String> {
+            Some("Tipped".into())
+        }
+    }
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let text = ui.add(Label::new("Child", TextStyle::new(13.0)));
+    let tipped = ui.add_with_children(Tipped, &[text]);
+    let root = ui.add_with_children(Flex::column().fill(), &[tipped]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let on_text = ui.bounds(text).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(on_text));
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert_eq!(ui.tip_for_tests(), Some((tipped, "Tipped".to_owned())));
+    // A key press hides it.
+    ui.input(&mut fonts, &key(Key::Character("a".into())));
+    assert_eq!(ui.tip_for_tests(), None);
+    set_clock_for_tests(None);
+}
+
+#[test]
+fn a_tooltip_whose_widget_goes_leaves_later_popovers_open() {
+    use crate::animation::set_clock_for_tests;
+    use crate::layers::{Anchor, LayerOptions};
+    use crate::tree::TOOLTIP_DELAY;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let start = std::time::Instant::now();
+    set_clock_for_tests(Some(start));
+    let (zoom, fit) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    ui.input(
+        &mut fonts,
+        &Input::PointerMoved(ui.bounds(zoom).unwrap().center()),
+    );
+    step_frames(&mut ui, &mut fonts, start + TOOLTIP_DELAY);
+    assert!(ui.tip_for_tests().is_some());
+    let (content, _, _) = menu(&mut ui, &clicks);
+    let popover = ui.open_layer(content, LayerOptions::popover(Anchor::Widget(fit)));
+    frame(&mut ui, &mut fonts);
+    ui.remove(zoom);
+    frame(&mut ui, &mut fonts);
+    assert!(ui.is_layer_open(popover));
+    assert_eq!(ui.tip_for_tests(), None);
+    check_access(&mut ui, &mut fonts);
+    set_clock_for_tests(None);
+}
+
+#[test]
+fn a_press_lost_with_the_focus_does_not_click_on_a_later_release() {
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let (zoom, _) = icon_buttons(&mut ui, &clicks);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(zoom).unwrap().center();
+    ui.input(&mut fonts, &Input::PointerMoved(at));
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &Input::WindowFocus(false));
+    ui.input(&mut fonts, &Input::WindowFocus(true));
+    // A release with no press of its own (the press went to another app).
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(clicks.get(), 0);
+}

@@ -651,7 +651,20 @@ impl Ui {
         let Some(index) = self.layers.iter().position(|layer| layer.id == id) else {
             return false;
         };
-        let mut closed: Vec<Layer> = self.layers.drain(index..).collect();
+        // A tooltip closes alone: what opened after it (a popover from a
+        // shortcut) isn't its submenu.
+        let end = if self.layers[index].options.kind == LayerKind::Tooltip {
+            index + 1
+        } else {
+            self.layers.len()
+        };
+        let mut closed: Vec<Layer> = self.layers.drain(index..end).collect();
+        if self
+            .tip
+            .is_some_and(|(_, tip)| closed.iter().any(|layer| layer.id == tip))
+        {
+            self.tip = None;
+        }
         closed.reverse();
         let mut callbacks = Vec::new();
         for layer in closed {
@@ -1852,6 +1865,11 @@ impl Ui {
                 handled
             }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
+                if let Input::Key { pressed: true, .. } = input {
+                    // Typing hides a tooltip; it comes back on the next rest.
+                    self.close_tip(fonts);
+                    self.tip_wait = None;
+                }
                 if let Input::Key {
                     key,
                     pressed: true,
@@ -1869,6 +1887,23 @@ impl Ui {
                     .focus
                     .filter(|&focus| self.reachable(focus))
                     .unwrap_or(fallback);
+                // Esc closes a popover that opened without taking the focus
+                // (a note next to a button) before the focus sees it: the
+                // board would take it to clear its selection (shell.md §6:
+                // Esc closes the topmost popover).
+                if let Input::Key {
+                    key: Key::Escape,
+                    pressed: true,
+                    ..
+                } = input
+                    && let Some(top) = self.layers.iter().rev().find(|layer| {
+                        layer.options.dismissable && layer.options.kind != LayerKind::Tooltip
+                    })
+                    && !self.ancestors(target).contains(&top.root)
+                {
+                    let id = top.id;
+                    return self.close_layer(fonts, id);
+                }
                 let handled = self.bubble(fonts, target, input);
                 if !handled
                     && let Input::Key {
@@ -1968,35 +2003,33 @@ impl Ui {
     /// The pointer is over `target` now: a tooltip shown for another
     /// widget goes, and one of `target`'s waits.
     fn hover_tip(&mut self, fonts: &mut Fonts, target: Option<WidgetId>) {
-        if self.tip.is_some_and(|(widget, _)| Some(widget) != target) {
-            self.close_tip(fonts);
-        }
-        self.tip_wait = target
-            .filter(|id| self.tip.is_none_or(|(widget, _)| widget != *id))
-            .filter(|id| {
-                self.node(*id)
+        // Not in the middle of a drag (drawing a shape across the tool
+        // bar, dragging the bar itself).
+        let dragging = self.buttons_held > 0 || self.capture.is_some();
+        // The nearest widget with a tooltip: the one under the pointer, or
+        // a parent whose children take the hover.
+        let owner = target.filter(|_| !dragging).and_then(|target| {
+            self.ancestors(target).into_iter().find(|&id| {
+                self.node(id)
                     .is_some_and(|node| node.widget.tooltip().is_some())
             })
-            .map(|id| (id, crate::animation::now()));
+        });
+        if self.tip.is_some_and(|(widget, _)| Some(widget) != owner) {
+            self.close_tip(fonts);
+        }
+        if self.tip.is_some() {
+            return;
+        }
+        if self.tip_wait.map(|(widget, _)| widget) != owner {
+            self.tip_wait = owner.map(|id| (id, crate::animation::now()));
+        }
     }
 
-    /// Hides the tooltip, and only it: `close_layer` would also close
-    /// what opened after it (a popover from a shortcut).
+    /// Hides the tooltip, and only it ([`Ui::close_layer`] closes a
+    /// tooltip alone).
     fn close_tip(&mut self, fonts: &mut Fonts) {
-        let Some((_, layer)) = self.tip.take() else {
-            return;
-        };
-        match self.layers.iter().position(|open| open.id == layer) {
-            Some(index) if index + 1 == self.layers.len() => {
-                self.close_layer(fonts, layer);
-            }
-            Some(index) => {
-                let tip = self.layers.remove(index);
-                self.remove(tip.root);
-                self.layout_dirty = true;
-                request_frame();
-            }
-            None => {}
+        if let Some((_, layer)) = self.tip.take() {
+            self.close_layer(fonts, layer);
         }
     }
 
@@ -2010,7 +2043,10 @@ impl Ui {
             return;
         }
         self.tip_wait = None;
-        if self.hover != Some(widget) {
+        let still_over = self
+            .hover
+            .is_some_and(|hover| self.ancestors(hover).contains(&widget));
+        if !still_over || self.buttons_held > 0 {
             return;
         }
         let Some(text) = self.node(widget).and_then(|node| node.widget.tooltip()) else {

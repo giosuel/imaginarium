@@ -901,6 +901,13 @@ impl Widget for ButtonBox {
         self.focus_on_click
     }
 
+    fn capture_lost(&mut self, cx: &mut Cx<'_>) {
+        // The release went elsewhere (the window lost the focus).
+        self.pressed = false;
+        self.retone(false);
+        cx.request_paint();
+    }
+
     fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
         cx.request_paint();
     }
@@ -1145,7 +1152,9 @@ impl Widget for IconButton {
                 theme.color(Token::ControlActive),
             )
         };
-        let tone = self.tone.value();
+        // A button that just became unusable (undo with nothing left)
+        // shows no hover, whatever its tone was heading for.
+        let tone = if enabled { self.tone.value() } else { 0.0 };
         let background = if tone <= 1.0 {
             mix(rest, hover, tone as f32)
         } else {
@@ -1220,6 +1229,13 @@ impl Widget for IconButton {
 
     fn focus_on_click(&self) -> bool {
         false
+    }
+
+    fn capture_lost(&mut self, cx: &mut Cx<'_>) {
+        // The release went elsewhere (the window lost the focus).
+        self.pressed = false;
+        self.retone(false);
+        cx.request_paint();
     }
 
     fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
