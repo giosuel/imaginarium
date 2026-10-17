@@ -1171,6 +1171,7 @@ fn main() -> anyhow::Result<()> {
         fullscreen: args.fullscreen,
         app_id: None,
         resizable: true,
+        more_windows: false,
     };
     let fonts_started = Instant::now();
     let fonts = Fonts::new();

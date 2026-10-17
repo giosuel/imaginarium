@@ -865,16 +865,7 @@ impl WindowRenderer {
             instance: self.instance.clone(),
             gpu: self.gpu.clone(),
             options: self.options.clone(),
-            spare: Spare::None,
-        }
-    }
-
-    /// Closes the renderer, handing its Vello renderer to `shared` for the
-    /// next window if it has none ready (its pipelines took long to
-    /// build).
-    pub fn recycle(self, shared: &mut SharedGpu) {
-        if self.view_format == LIKELY_FORMAT && matches!(shared.spare, Spare::None) {
-            shared.spare = Spare::Ready(Box::new((self.renderer, self.resources)));
+            spare: None,
         }
     }
 
@@ -1095,33 +1086,32 @@ impl WindowRenderer {
 }
 
 /// A GPU that windows share (from [`WindowRenderer::shared_gpu`]), with
-/// a Vello renderer ready for the next window: building one compiles its
-/// pipelines, which takes a while (130 ms on llvmpipe) and so happens off
-/// the UI thread ([`SharedGpu::prepare`]).
+/// a Vello renderer ready for the next window if asked for: building one
+/// compiles its pipelines, which takes a while (130 ms on llvmpipe) and so
+/// happens off the UI thread ([`SharedGpu::prepare`]).
 pub struct SharedGpu {
     instance: wgpu::Instance,
     gpu: Gpu,
     options: GpuOptions,
-    spare: Spare,
+    /// The next window's Vello renderer, being built.
+    spare: Option<std::thread::JoinHandle<(vello_gpu::Renderer, vello_gpu::Resources)>>,
 }
 
-/// The next window's Vello renderer.
-enum Spare {
-    None,
-    Building(std::thread::JoinHandle<(vello_gpu::Renderer, vello_gpu::Resources)>),
-    Ready(Box<(vello_gpu::Renderer, vello_gpu::Resources)>),
+impl Drop for SharedGpu {
+    fn drop(&mut self) {
+        // A build still in the driver when the program exits could crash
+        // it (lavapipe, LLVM): wait for it.
+        if let Some(thread) = self.spare.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl std::fmt::Debug for SharedGpu {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let spare = match self.spare {
-            Spare::None => "none",
-            Spare::Building(_) => "building",
-            Spare::Ready(_) => "ready",
-        };
         f.debug_struct("SharedGpu")
             .field("adapter", &self.gpu.adapter.get_info().name)
-            .field("spare", &spare)
+            .field("spare", &self.spare.is_some())
             .finish()
     }
 }
@@ -1130,7 +1120,7 @@ impl SharedGpu {
     /// Starts building the next window's Vello renderer on a thread of its
     /// own, unless one is ready or on its way.
     pub fn prepare(&mut self) {
-        if !matches!(self.spare, Spare::None) {
+        if self.spare.is_some() {
             return;
         }
         let device = self.gpu.device.clone();
@@ -1138,7 +1128,7 @@ impl SharedGpu {
             .name("gpu-renderer".into())
             .spawn(move || new_renderer(&device, LIKELY_FORMAT, 1, 1))
         {
-            self.spare = Spare::Building(thread);
+            self.spare = Some(thread);
         }
     }
 
@@ -1176,11 +1166,7 @@ impl SharedGpu {
         }
         let surface_time = creating.elapsed();
         let waiting = Instant::now();
-        let built = match std::mem::replace(&mut self.spare, Spare::None) {
-            Spare::None => None,
-            Spare::Building(thread) => thread.join().ok(),
-            Spare::Ready(built) => Some(*built),
-        };
+        let built = self.spare.take().and_then(|thread| thread.join().ok());
         let startup = GpuStartup {
             surface: surface_time,
             waited: waiting.elapsed(),

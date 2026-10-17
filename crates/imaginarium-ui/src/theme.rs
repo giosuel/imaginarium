@@ -11,8 +11,6 @@ use std::rc::Rc;
 use imaginarium_reactive::Signal;
 use imaginarium_render::peniko::Color;
 
-use crate::window::request_frame;
-
 /// A named color of the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Token {
@@ -352,7 +350,8 @@ pub fn set_theme(new: Theme) {
     if let Some(signal) = CHANGED.with(|changed| *changed.borrow()) {
         signal.set(generation);
     }
-    request_frame();
+    // Every window shows it, whichever window's setting switched it.
+    crate::window::request_frame_everywhere();
 }
 
 /// How many times the theme changed on this thread.

@@ -76,7 +76,7 @@ pub fn reduce_motion() -> bool {
 /// Turns reduced motion on or off.
 pub fn set_reduce_motion(reduce: bool) {
     REDUCE_MOTION.with(|cell| cell.set(reduce));
-    crate::window::request_frame();
+    crate::window::request_frame_everywhere();
 }
 
 /// The time animations use: the real clock, or the test's.

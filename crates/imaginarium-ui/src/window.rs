@@ -56,6 +56,11 @@ pub struct WindowOptions {
     /// Whether the user can resize it. A window of fixed size (the start
     /// window) floats on tiling compositors (Hyprland, Sway), as dialogs do.
     pub resizable: bool,
+    /// The program opens more windows from this one (New board): once it
+    /// has drawn, a renderer for the next window is built on a thread, so
+    /// that one opens without compiling pipelines first. Off for programs
+    /// of one window, which would only pay for it.
+    pub more_windows: bool,
 }
 
 impl Default for WindowOptions {
@@ -68,6 +73,7 @@ impl Default for WindowOptions {
             fullscreen: false,
             app_id: None,
             resizable: true,
+            more_windows: false,
         }
     }
 }
@@ -537,18 +543,20 @@ pub(crate) fn reset_ime() {
 /// dropped.
 struct Entered {
     previous: Option<WindowId>,
+    scale: f64,
 }
 
 fn enter(id: WindowId, scale: f64) -> Entered {
-    SCALE_FACTOR.with(|factor| factor.set(scale));
     Entered {
         previous: CURRENT.with(|current| current.replace(Some(id))),
+        scale: SCALE_FACTOR.with(|factor| factor.replace(scale)),
     }
 }
 
 impl Drop for Entered {
     fn drop(&mut self) {
         CURRENT.with(|current| current.set(self.previous));
+        SCALE_FACTOR.with(|factor| factor.set(self.scale));
     }
 }
 
@@ -603,6 +611,13 @@ pub(crate) fn unbind_tree(tree: u64) {
             trees.remove(&tree);
         }
     });
+}
+
+/// Asks every window for a frame, wherever it is called from: for changes
+/// every window shows (the theme, a setting changed in one window that
+/// another follows).
+pub fn request_frame_everywhere() {
+    FRAME_REQUESTED.with(|requested| requested.set(true));
 }
 
 /// A frame for tree `tree`'s window (a signal changed by another window's
@@ -797,8 +812,10 @@ impl<'v> Shell<'v> {
     /// Closes window `id` because it failed. The others stay open; the
     /// run fails if it was the last.
     fn fail_window(&mut self, id: WindowId, err: UiError) {
-        self.stats.window_errors.push(err.to_string());
-        if let Some(state) = self.windows.get_mut(&id) {
+        if let Some(state) = self.windows.get_mut(&id)
+            && state.failed.is_none()
+        {
+            self.stats.window_errors.push(err.to_string());
             state.closing = true;
             state.failed = Some(err);
         }
@@ -926,16 +943,13 @@ impl<'v> Shell<'v> {
                 renderer
             }
         };
-        // The next window's Vello renderer builds off the UI thread.
-        if let Some(shared) = &mut self.shared {
-            shared.prepare();
-        }
         Ok(renderer)
     }
 
     fn redraw(&mut self, id: WindowId) {
         let start = Instant::now();
-        let Some(state) = self.windows.get_mut(&id) else {
+        // A window closing (it failed, or asked to) draws no more.
+        let Some(state) = self.windows.get_mut(&id).filter(|state| !state.closing) else {
             return;
         };
         let physical = state.physical;
@@ -1003,6 +1017,14 @@ impl<'v> Shell<'v> {
         };
         state.occluded = false;
         state.frames += 1;
+        // Drawn and about to idle: the next window's renderer builds now,
+        // not while this one starts up.
+        if state.frames == 2
+            && state.options.more_windows
+            && let Some(shared) = &mut self.shared
+        {
+            shared.prepare();
+        }
         let mut causes = std::mem::take(&mut state.causes);
         if causes == FrameCauses::default() {
             causes.system = true;
@@ -1044,12 +1066,15 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
                 // Pasted text goes to the window that asked, else where
                 // the keys are.
                 for (asked, text) in crate::clipboard::take_pasted() {
-                    let target = self
-                        .windows
-                        .keys()
-                        .copied()
-                        .find(|id| Some(u64::from(*id)) == asked)
-                        .or(self.focused);
+                    // Not to another window if the one that asked closed.
+                    let target = match asked {
+                        Some(asked) => self
+                            .windows
+                            .keys()
+                            .copied()
+                            .find(|id| u64::from(*id) == asked),
+                        None => self.focused,
+                    };
                     if let Some(id) = target
                         && let Some(state) = self.windows.get_mut(&id)
                     {
@@ -1238,14 +1263,8 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
             .collect();
         let mut failed = None;
         for id in closing {
-            let Some(mut state) = self.windows.remove(&id) else {
-                continue;
-            };
-            failed = state.failed.take().or(failed);
-            // Its Vello renderer serves the next window (the start window's
-            // goes to the board it opens).
-            if let (Some(renderer), Some(shared)) = (state.renderer.take(), &mut self.shared) {
-                renderer.recycle(shared);
+            if let Some(mut state) = self.windows.remove(&id) {
+                failed = state.failed.take().or(failed);
             }
         }
         // The keys go somewhere else only when the window system says so.
@@ -1455,6 +1474,31 @@ mod tests {
         // Outside any view (a theme switch): every window.
         request_frame();
         assert_eq!(take_frames(), (true, vec![]));
+    }
+
+    #[test]
+    fn a_theme_switch_in_one_window_draws_them_all() {
+        take_frames();
+        {
+            let _entered = enter(window(5), 1.0);
+            crate::theme::set_theme(crate::theme::Theme::light(crate::theme::DEFAULT_ACCENT));
+        }
+        let (everyone, _) = take_frames();
+        assert!(everyone);
+        crate::theme::set_theme(crate::theme::Theme::dark(crate::theme::DEFAULT_ACCENT));
+        take_frames();
+    }
+
+    #[test]
+    fn leaving_a_window_restores_the_scale_and_window() {
+        let _outer = enter(window(1), 1.0);
+        {
+            let _inner = enter(window(2), 2.0);
+            assert_eq!(scale_factor(), 2.0);
+            assert_eq!(current_window(), Some(2));
+        }
+        assert_eq!(scale_factor(), 1.0);
+        assert_eq!(current_window(), Some(1));
     }
 
     #[test]
