@@ -1535,6 +1535,212 @@ impl Widget for Switch {
     }
 }
 
+/// How a [`Swatch`] shows its color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwatchShape {
+    /// A rounded square (a color grid).
+    Square,
+    /// A filled dot (the toolbar's fill button).
+    Dot,
+    /// A ring (the toolbar's outline button).
+    Ring,
+}
+
+/// A color to pick or a color shown: a rounded square in a color grid, or
+/// the dot and ring on the contextual toolbar. `None` is "no color", drawn
+/// as a red slash. Click, Enter or Space runs its action when it has one.
+pub struct Swatch {
+    color: Option<Color>,
+    label: String,
+    shape: SwatchShape,
+    size: f64,
+    selected: bool,
+    action: Option<Box<dyn FnMut()>>,
+    pressed: bool,
+}
+
+impl Swatch {
+    /// A 28 px square of `color` named `label` ("Indigo") that runs
+    /// `action`.
+    pub fn new(
+        color: Option<Color>,
+        label: impl Into<String>,
+        action: impl FnMut() + 'static,
+    ) -> Self {
+        Self {
+            color,
+            label: label.into(),
+            shape: SwatchShape::Square,
+            size: 28.0,
+            selected: false,
+            action: Some(Box::new(action)),
+            pressed: false,
+        }
+    }
+
+    /// A swatch that only shows a color (inside a button that acts).
+    pub fn shown(color: Option<Color>, shape: SwatchShape, size: f64) -> Self {
+        Self {
+            color,
+            label: String::new(),
+            shape,
+            size,
+            selected: false,
+            action: None,
+            pressed: false,
+        }
+    }
+
+    /// Ringed in the accent: the color the selection has now.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn run(&mut self) -> bool {
+        match &mut self.action {
+            Some(action) => {
+                action();
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Widget for Swatch {
+    fn style(&self) -> Style {
+        Style {
+            size: taffy::Size {
+                width: length(self.size as f32),
+                height: length(self.size as f32),
+            },
+            flex_shrink: 0.0,
+            ..Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        use crate::theme::Token;
+        let bounds = cx.bounds();
+        let theme = theme();
+        let edge = match theme.kind() {
+            crate::theme::ThemeKind::Dark => Color::WHITE.with_alpha(0.28),
+            crate::theme::ThemeKind::Light => Color::BLACK.with_alpha(0.14),
+        };
+        let center = bounds.center();
+        match self.shape {
+            SwatchShape::Square => {
+                let shape = RoundedRect::from_rect(bounds, 8.0);
+                scene.fill(&shape, self.color.unwrap_or(theme.color(Token::PanelBg)));
+                scene.stroke(&RoundedRect::from_rect(bounds.inset(-0.5), 7.5), 1.0, edge);
+                if self.selected {
+                    scene.stroke(
+                        &RoundedRect::from_rect(bounds.inflate(3.0, 3.0), 11.0),
+                        2.0,
+                        theme.color(Token::AccentInk),
+                    );
+                }
+            }
+            SwatchShape::Dot => {
+                let dot = imaginarium_render::kurbo::Circle::new(center, self.size / 2.0);
+                scene.fill(&dot, self.color.unwrap_or(theme.color(Token::PanelBg)));
+                scene.stroke(
+                    &imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 - 0.5),
+                    1.0,
+                    edge,
+                );
+            }
+            SwatchShape::Ring => {
+                let ring = imaginarium_render::kurbo::Circle::new(center, self.size / 2.0 - 1.5);
+                scene.stroke(&ring, 3.0, self.color.unwrap_or(edge));
+            }
+        }
+        if self.color.is_none() {
+            // No color: a red slash across.
+            let inset = bounds.inset(-self.size * 0.2);
+            let mut slash = imaginarium_render::kurbo::BezPath::new();
+            slash.move_to((inset.x0, inset.y1));
+            slash.line_to((inset.x1, inset.y0));
+            scene.stroke_with(
+                &slash,
+                &Stroke::new(2.0).with_caps(Cap::Round),
+                theme.color(Token::Danger),
+            );
+        }
+        if cx.is_focus_visible() {
+            scene.stroke(
+                &RoundedRect::from_rect(bounds.inflate(2.0, 2.0), 10.0),
+                2.0,
+                theme.color(Token::AccentInk),
+            );
+        }
+    }
+
+    fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        if self.action.is_none() {
+            return false;
+        }
+        match input {
+            Input::PointerButton {
+                primary: true,
+                pressed,
+                position,
+                ..
+            } => {
+                if *pressed {
+                    self.pressed = true;
+                } else if std::mem::take(&mut self.pressed) && cx.bounds().contains(*position) {
+                    self.run();
+                }
+                true
+            }
+            Input::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                ..
+            } if *key == Key::Enter || *key == Key::Character(" ".into()) => self.run(),
+            _ => false,
+        }
+    }
+
+    fn capture_lost(&mut self, _cx: &mut Cx<'_>) {
+        self.pressed = false;
+    }
+
+    fn focusable(&self) -> bool {
+        self.action.is_some()
+    }
+
+    fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {
+        cx.request_paint();
+    }
+
+    fn tooltip(&self) -> Option<String> {
+        (self.action.is_some() && !self.label.is_empty()).then(|| self.label.clone())
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        // A shown color says nothing of its own: its button names it.
+        self.action.as_ref()?;
+        let mut node = Node::new(Role::Button);
+        let label = if self.selected {
+            format!("{} (selected)", self.label)
+        } else {
+            self.label.clone()
+        };
+        node.set_label(label);
+        node.set_bounds(access_rect(cx.bounds()));
+        node.add_action(Action::Click);
+        Some(node)
+    }
+
+    fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
+        request.action == Action::Click && self.run()
+    }
+}
+
 /// Callbacks of a [`TextInput`].
 type TextCallback = Box<dyn FnMut(&str)>;
 

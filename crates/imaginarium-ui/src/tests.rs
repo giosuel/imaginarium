@@ -2025,3 +2025,40 @@ fn highlighted_letters_are_drawn_bolder() {
     );
     assert!(marked > plain, "{marked} > {plain}");
 }
+
+#[test]
+fn a_swatch_picks_its_color_and_says_when_it_is_the_current_one() {
+    use crate::widgets::{Swatch, SwatchShape};
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let counter = clicks.clone();
+    let indigo = ui.add(
+        Swatch::new(
+            Some(Color::from_rgb8(0xe0, 0xe7, 0xff)),
+            "Indigo",
+            move || counter.set(counter.get() + 1),
+        )
+        .selected(true),
+    );
+    let shown = ui.add(Swatch::shown(None, SwatchShape::Dot, 18.0));
+    let root = ui.add_with_children(
+        Flex::row().fill().gap(8.0).padding(10.0, 10.0),
+        &[indigo, shown],
+    );
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(indigo).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(clicks.get(), 1);
+    assert_eq!(
+        ui.find_by_label(&mut fonts, "Indigo (selected)"),
+        Some(indigo)
+    );
+    // The one that only shows a color is no control.
+    let at = ui.bounds(shown).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(clicks.get(), 1);
+}
