@@ -126,3 +126,7 @@ grid-3x3
 
 # Settings
 code
+
+# Files
+save
+folder-input

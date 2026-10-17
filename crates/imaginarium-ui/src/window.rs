@@ -443,6 +443,8 @@ pub enum WindowRequest {
     Open(WindowOptions, Box<dyn View>),
     /// Close this view's window. The run ends when the last one closes.
     Close,
+    /// Change this view's window title (a board renamed or saved).
+    SetTitle(String),
 }
 
 impl std::fmt::Debug for WindowRequest {
@@ -450,6 +452,7 @@ impl std::fmt::Debug for WindowRequest {
         match self {
             Self::Open(options, _) => f.debug_tuple("Open").field(&options.title).finish(),
             Self::Close => f.write_str("Close"),
+            Self::SetTitle(title) => f.debug_tuple("SetTitle").field(title).finish(),
         }
     }
 }
@@ -951,6 +954,7 @@ impl<'v> Shell<'v> {
                 match request {
                     WindowRequest::Open(options, view) => self.pending.push((options, view)),
                     WindowRequest::Close => state.closing = true,
+                    WindowRequest::SetTitle(title) => state.window.set_title(&title),
                 }
             }
             if state.view.should_close() {
