@@ -17,7 +17,8 @@ use crate::board::BoardCanvas;
 pub static BOARD_SETTINGS: &[&dyn AnySetting] = &[&BACKGROUND];
 
 /// A setting's value as a document stores it: plain values, an enum's id,
-/// a color's hex. `None` for kinds a document never stores (secrets).
+/// a color's hex. `None` for kinds a document never stores (lists,
+/// secrets: the registry refuses them for `.per_document()`).
 pub fn to_document(value: &Value) -> Option<DocValue> {
     Some(match value {
         Value::Bool(on) => DocValue::Bool(*on),
@@ -26,14 +27,7 @@ pub fn to_document(value: &Value) -> Option<DocValue> {
         Value::String(text) | Value::Enum(text) => DocValue::String(text.as_str().into()),
         Value::Color(color) => DocValue::String(color.to_string().into()),
         Value::Path(path) => DocValue::String(path.display().to_string().into()),
-        Value::SecretRef(_) => return None,
-        Value::List(items) => DocValue::List(
-            items
-                .iter()
-                .map(to_document)
-                .collect::<Option<Vec<_>>>()?
-                .into(),
-        ),
+        Value::SecretRef(_) | Value::List(_) => return None,
     })
 }
 
@@ -44,7 +38,9 @@ pub fn from_document(setting: &dyn AnySetting, value: &DocValue) -> Option<Value
         Some(match (kind, value) {
             (ValueKind::Bool, DocValue::Bool(on)) => Value::Bool(*on),
             (ValueKind::Int, DocValue::Int(n)) => Value::Int(*n),
-            (ValueKind::Float, DocValue::Number(x)) => Value::Float(*x),
+            // Not NaN: it never equals itself, so it would look changed on
+            // every frame.
+            (ValueKind::Float, DocValue::Number(x)) if x.is_finite() => Value::Float(*x),
             (ValueKind::Float, DocValue::Int(n)) => Value::Float(*n as f64),
             (ValueKind::String, DocValue::String(text)) => Value::String(text.to_string()),
             (ValueKind::Enum, DocValue::String(text)) => Value::Enum(text.to_string()),
@@ -69,11 +65,24 @@ impl BoardCanvas {
         from_document(*setting, view.meta().settings().get(key)?)
     }
 
-    /// The background drawn now: the board's own, else the user's.
+    /// The background drawn now: the board's own, else the user's. The
+    /// board's is worked out again only when the document's settings
+    /// change (comparing a map of a few entries), not every frame.
     pub(crate) fn effective_background(&self) -> Background {
-        self.own_setting(BACKGROUND.key())
-            .and_then(|value| Background::from_value(&value))
-            .unwrap_or(self.background())
+        let settings = self.document().view().meta().settings().clone();
+        let cached = self
+            .own_background
+            .borrow()
+            .as_ref()
+            .and_then(|(seen, own)| (*seen == settings).then_some(*own));
+        let own = cached.unwrap_or_else(|| {
+            let own = self
+                .own_setting(BACKGROUND.key())
+                .and_then(|value| Background::from_value(&value));
+            *self.own_background.borrow_mut() = Some((settings, own));
+            own
+        });
+        own.unwrap_or(self.background())
     }
 }
 
@@ -93,7 +102,13 @@ pub static SET_SETTING: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
         let Some(setting) = BOARD_SETTINGS.iter().find(|setting| setting.key() == key) else {
             return Err(invalid(format!("`{key}` isn't a setting a board has")));
         };
-        let value = match args.str("value").map(str::trim).filter(|text| !text.is_empty()) {
+        // Text is kept as typed; other kinds may have spaces around them.
+        // An empty value lets the board follow your setting again.
+        let text = args.str("value").map(|text| match setting.kind() {
+            ValueKind::String | ValueKind::Path => text,
+            _ => text.trim(),
+        });
+        let value = match text.filter(|text| !text.is_empty()) {
             None => DocValue::Null,
             Some(text) => {
                 let value = typed(*setting, text).ok_or_else(|| {
@@ -169,7 +184,12 @@ mod tests {
 
     #[test]
     fn a_board_has_its_own_background_or_follows_the_users() {
-        let mut board = BoardCanvas::new(Document::new(DocumentKind::Board).unwrap());
+        // Each change its own undo step (not merged by time).
+        let undo = imaginarium_model::UndoConfig {
+            merge_interval_ms: 0,
+            max_steps: 100,
+        };
+        let mut board = BoardCanvas::new(Document::new_with(DocumentKind::Board, undo).unwrap());
         board.set_background(Background::Plain);
         assert_eq!(board.effective_background(), Background::Plain);
         assert_eq!(set(&mut board, Some("grid")).unwrap(), Outcome::Done);
@@ -179,7 +199,10 @@ mod tests {
             Some(Value::Enum("grid".into()))
         );
         assert_eq!(set(&mut board, Some("grid")).unwrap(), Outcome::Unchanged);
-        // One undo step.
+        // One undo step takes it back.
+        set(&mut board, Some("plain")).unwrap();
+        board.execute("edit.undo", &Args::new()).unwrap();
+        assert_eq!(board.effective_background(), Background::Grid);
         assert!(board.document().can_undo(UndoScope::User));
         // Without a value: the user's again.
         set(&mut board, None).unwrap();
@@ -213,13 +236,44 @@ mod tests {
 
     #[test]
     fn values_go_to_the_document_and_back() {
+        use imaginarium_settings::{Rgba, Scope, Setting};
+        static SNAP: Setting<bool> =
+            Setting::new("board.snap", || true, Scope::App, "Snap", "Snap.");
+        static GAP: Setting<i64> = Setting::new("board.gap", || 4, Scope::App, "Gap", "Gap.");
+        static ZOOM: Setting<f64> = Setting::new("board.zoom", || 1.0, Scope::App, "Zoom", "Zoom.");
+        static INK: Setting<Rgba> = Setting::new(
+            "board.ink",
+            || Rgba::rgb(0, 0, 0),
+            Scope::App,
+            "Ink",
+            "Ink.",
+        );
+        let round_trip = |setting: &dyn AnySetting, value: Value| {
+            from_document(setting, &to_document(&value).unwrap())
+        };
         assert_eq!(
-            from_document(
-                &BACKGROUND,
-                &to_document(&Value::Enum("plain".into())).unwrap()
-            ),
+            round_trip(&BACKGROUND, Value::Enum("plain".into())),
             Some(Value::Enum("plain".into()))
         );
+        assert_eq!(
+            round_trip(&SNAP, Value::Bool(false)),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(round_trip(&GAP, Value::Int(-3)), Some(Value::Int(-3)));
+        assert_eq!(
+            round_trip(&ZOOM, Value::Float(0.1 + 0.2)),
+            Some(Value::Float(0.1 + 0.2))
+        );
+        let ink = Value::Color(Rgba {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 4,
+        });
+        assert_eq!(round_trip(&INK, ink.clone()), Some(ink));
+        // Not a number is never a value; lists and secrets aren't stored.
+        assert_eq!(from_document(&ZOOM, &DocValue::Number(f64::NAN)), None);
+        assert_eq!(to_document(&Value::List(vec![Value::Bool(true)])), None);
         assert_eq!(
             to_document(&Value::SecretRef(imaginarium_settings::SecretRef {
                 id: "x".into()

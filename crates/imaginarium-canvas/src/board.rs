@@ -212,6 +212,10 @@ pub struct BoardCanvas {
     dots: Option<(BackgroundKey, imaginarium_render::kurbo::BezPath)>,
     /// The pattern behind the shapes.
     background: Background,
+    /// The board's own background (`board.set_setting`), and the
+    /// document settings it was worked out from.
+    pub(crate) own_background:
+        std::cell::RefCell<Option<(imaginarium_model::Props, Option<Background>)>>,
 }
 
 impl BoardCanvas {
@@ -250,6 +254,7 @@ impl BoardCanvas {
             bounds: Rect::ZERO,
             dots: None,
             background: Background::Dots,
+            own_background: std::cell::RefCell::new(None),
         }
     }
 
