@@ -183,6 +183,9 @@ pub struct BoardCanvas {
     tool: Signal<Tool>,
     /// What the window's controls show (zoom, undo and redo).
     status: Signal<BoardStatus>,
+    /// Counts the document's changes, for panels that read it to know
+    /// when to look again.
+    revision: u64,
     /// What the clipboard should do at the next hand-over.
     clipboard_work: clip::ClipboardWork,
     /// The last copy pasted (or copied) here, and how often it was pasted.
@@ -223,6 +226,7 @@ impl BoardCanvas {
             keymap: crate::keys::default_keymap(imaginarium_commands::Platform::current()),
             tool: signal(Tool::Select),
             status: signal(BoardStatus::default()),
+            revision: 0,
             clipboard_work: clip::ClipboardWork::default(),
             pastes: None,
             name_rects: Vec::new(),
@@ -803,7 +807,15 @@ impl BoardCanvas {
     pub fn apply(&mut self, changes: ChangeSet) {
         if !changes.is_empty() {
             self.pending.push(changes);
+            self.revision += 1;
         }
+    }
+
+    /// A number that changes whenever the document does (local edits,
+    /// undo, remote changes): panels compare it to skip work when nothing
+    /// changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     #[cfg(test)]

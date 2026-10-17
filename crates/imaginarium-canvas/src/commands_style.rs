@@ -18,17 +18,15 @@ use crate::BoardCanvas;
 /// What kind of node a style property applies to.
 type Takes = fn(&NodeView) -> bool;
 
-fn preset(node: &NodeView) -> Option<String> {
-    node.prop("shape")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+fn preset(node: &NodeView) -> Option<&str> {
+    node.prop("shape").and_then(Value::as_str)
 }
 
 /// Shapes other than lines, and frames: they have an inside to fill.
 fn takes_fill(node: &NodeView) -> bool {
     match node.kind() {
         NodeKind::Frame => true,
-        NodeKind::Shape => preset(node).as_deref() != Some("line"),
+        NodeKind::Shape => preset(node) != Some("line"),
         _ => false,
     }
 }
@@ -63,12 +61,51 @@ fn targets(board: &BoardCanvas, takes: Takes) -> Vec<NodeId> {
     })
 }
 
+/// The first selected, unlocked node that takes a property (stops
+/// there: availability runs every frame for the contextual toolbar).
+fn first(board: &BoardCanvas, takes: Takes) -> Option<NodeId> {
+    let view = board.document().view();
+    board.selection().with_untracked(|selection| {
+        selection
+            .iter()
+            .copied()
+            .find(|node| view.node(*node).is_some_and(takes) && !crate::hit::locked(view, *node))
+    })
+}
+
 fn available(board: &BoardCanvas, takes: Takes) -> Availability {
-    if targets(board, takes).is_empty() {
-        Availability::Hidden
-    } else {
+    if first(board, takes).is_some() {
         Availability::Enabled
+    } else {
+        Availability::Hidden
     }
+}
+
+/// What a panel shows a style control for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleTarget {
+    /// Fill (shapes but lines, frames).
+    Fill,
+    /// Outline (shapes, frames).
+    Stroke,
+    /// Corner radius (rectangles).
+    Radius,
+    /// Text color and size (text boxes, shapes' labels).
+    Text,
+}
+
+/// The first selected node a style control applies to, whose look the
+/// control shows.
+pub fn first_target(board: &BoardCanvas, target: StyleTarget) -> Option<NodeId> {
+    first(
+        board,
+        match target {
+            StyleTarget::Fill => takes_fill,
+            StyleTarget::Stroke => takes_stroke,
+            StyleTarget::Radius => takes_radius,
+            StyleTarget::Text => takes_text,
+        },
+    )
 }
 
 /// Sets `prop` to what `value` gives for each target, in one step.
@@ -87,7 +124,7 @@ fn set(
             .filter_map(|node| {
                 let node_view = view.node(*node)?;
                 let value = value(node_view);
-                (view.style_prop(*node, prop) != Some(&value)).then_some((*node, value))
+                (!same(view.style_prop(*node, prop), &value)).then_some((*node, value))
             })
             .collect()
     };
@@ -106,6 +143,15 @@ fn set(
             message: err.to_string(),
         })?;
     Ok(Outcome::Done)
+}
+
+/// Whether a stored value is `value` already (colors in any case: older
+/// files store `#E0E7FF`).
+fn same(stored: Option<&Value>, value: &Value) -> bool {
+    match (stored, value) {
+        (Some(Value::String(stored)), Value::String(value)) => stored.eq_ignore_ascii_case(value),
+        (stored, value) => stored == Some(value),
+    }
 }
 
 /// A `#rrggbb` or `#rrggbbaa` argument, lowercased as stored.
@@ -255,6 +301,115 @@ pub static SET_TEXT_COLOR: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::ne
 )
 .availability(|board| available(board, takes_text))
 .args(ArgsSchema { args: &[COLOR] });
+
+/// The color `prop` of `node` with its alpha at `opacity` (0 to 1), or
+/// `None` when it has no color there (no fill).
+fn with_alpha(board: &BoardCanvas, node: &NodeView, prop: &str, opacity: f64) -> Option<Value> {
+    let view = board.document().view();
+    let stored = view.style_prop(node.id(), prop).and_then(Value::as_str);
+    // An outline without a color of its own is the palette's ink.
+    let stored = stored.or((prop == "stroke").then_some("#1e293b"))?;
+    let color = crate::style::parse_color(stored)?;
+    let rgba = color.to_rgba8();
+    if prop == "fill" && rgba.a == 0 && stored.len() == 9 {
+        // "No fill" stays none: there is nothing to make see-through.
+        return None;
+    }
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some(Value::String(
+        format!("#{:02x}{:02x}{:02x}{alpha:02x}", rgba.r, rgba.g, rgba.b).into(),
+    ))
+}
+
+/// Sets the alpha of each target's own color `prop`, in one step.
+fn set_alpha(
+    board: &mut BoardCanvas,
+    id: &'static str,
+    takes: Takes,
+    prop: &str,
+    opacity: f64,
+) -> Result<Outcome, CommandError> {
+    let nodes = targets(board, takes);
+    let changes: Vec<(NodeId, Value)> = {
+        let view = board.document().view();
+        nodes
+            .iter()
+            .filter_map(|node| {
+                let value = with_alpha(board, view.node(*node)?, prop, opacity)?;
+                (!same(view.style_prop(*node, prop), &value)).then_some((*node, value))
+            })
+            .collect()
+    };
+    if changes.is_empty() {
+        return Ok(Outcome::Unchanged);
+    }
+    board
+        .transact(&Actor::User, |txn| {
+            for (node, value) in &changes {
+                txn.set_style_override(*node, prop, value.clone())?;
+            }
+            Ok(())
+        })
+        .map_err(failed(id))?;
+    Ok(Outcome::Done)
+}
+
+const COLOR_OPACITY: ArgSpec = ArgSpec {
+    name: "opacity",
+    description: "From 0 (see-through) to 1 (solid).",
+    kind: ArgKind::Float {
+        min: Some(0.0),
+        max: Some(1.0),
+    },
+    required: true,
+};
+
+/// `style.set_fill_opacity`.
+pub static SET_FILL_OPACITY: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.set_fill_opacity",
+    CommandMeta::new(
+        "Fill opacity",
+        "Make the fill of each selected shape and frame see-through (0) to solid (1), keeping each one's own color.",
+    )
+    .category("Style")
+    .synonyms(&["fill transparency", "fill alpha"])
+    .icon("paint-bucket"),
+    |board, args| {
+        let opacity = args.float("opacity").unwrap_or(1.0);
+        set_alpha(board, "style.set_fill_opacity", takes_fill, "fill", opacity)
+    },
+)
+.availability(|board| available(board, takes_fill))
+.args(ArgsSchema { args: &[COLOR_OPACITY] });
+
+/// `style.set_stroke_opacity`.
+pub static SET_STROKE_OPACITY: FnCommand<BoardCanvas> = FnCommand::<BoardCanvas>::new(
+    "style.set_stroke_opacity",
+    CommandMeta::new(
+        "Outline opacity",
+        "Make the outline of each selected shape and frame see-through (0) to solid (1), keeping each one's own color.",
+    )
+    .category("Style")
+    .synonyms(&["stroke transparency", "outline alpha"])
+    .icon("paintbrush"),
+    |board, args| {
+        let opacity = args.float("opacity").unwrap_or(1.0);
+        set_alpha(board, "style.set_stroke_opacity", takes_stroke, "stroke", opacity)
+    },
+)
+.availability(|board| available(board, takes_stroke))
+.args(ArgsSchema { args: &[COLOR_OPACITY] });
+
+/// The color opacity commands.
+pub(crate) const OPACITY_COMMANDS: [&FnCommand<BoardCanvas>; 2] =
+    [&SET_FILL_OPACITY, &SET_STROKE_OPACITY];
+
+fn failed(id: &'static str) -> impl Fn(imaginarium_model::ModelError) -> CommandError {
+    move |err| CommandError::Failed {
+        id,
+        message: err.to_string(),
+    }
+}
 
 /// The style commands, for [`board_commands`](crate::commands::board_commands).
 pub(crate) const STYLE_COMMANDS: [&FnCommand<BoardCanvas>; 5] = [

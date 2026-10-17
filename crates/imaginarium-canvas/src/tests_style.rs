@@ -47,10 +47,9 @@ fn a_fill_colors_every_selected_shape_in_one_step() {
         Args::new().with("color", ArgValue::String("#FEF3C7".into())),
     );
     for node in [interview, competitor] {
-        assert_eq!(
-            prop(&board, node, "fill"),
-            Some(Value::String("#fef3c7".into()))
-        );
+        let fill =
+            prop(&board, node, "fill").and_then(|fill| fill.as_str().map(str::to_ascii_lowercase));
+        assert_eq!(fill.as_deref(), Some("#fef3c7"));
     }
     // One undo takes both back.
     board
@@ -152,4 +151,50 @@ fn the_selection_box_on_screen_follows_the_view() {
     board.frame();
     let at_200 = board.board().selection_on_screen().unwrap();
     assert!((at_200.width() - 2.0 * at_100.width()).abs() < 1e-6);
+}
+
+#[test]
+fn opacity_keeps_each_nodes_own_color_and_old_uppercase_colors_count() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    let competitor = board.node("Competitor scan");
+    let widget = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(widget)
+        .unwrap()
+        .select(&[interview, competitor]);
+    let fills = |board: &Harness| {
+        [interview, competitor].map(|node| match prop(board, node, "fill") {
+            Some(Value::String(fill)) => fill.to_ascii_lowercase(),
+            other => panic!("{other:?}"),
+        })
+    };
+    let before = fills(&board);
+    run(
+        &mut board,
+        "style.set_fill_opacity",
+        Args::new().with("opacity", ArgValue::Float(0.5)),
+    );
+    let after = fills(&board);
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(&after[..7], &before[..7], "its own color");
+        assert_eq!(&after[7..], "80");
+    }
+    // The demo stores "#E0E7FF": picking "#e0e7ff" again changes nothing.
+    let revision = board.board().revision();
+    let canvas = board.ui.widget_mut::<BoardCanvas>(widget).unwrap();
+    canvas.select(&[interview]);
+    let stored = after[0].clone();
+    canvas
+        .execute(
+            "style.set_fill",
+            &Args::new().with("color", ArgValue::String(stored.to_ascii_uppercase())),
+        )
+        .unwrap();
+    assert_eq!(
+        board.board().revision(),
+        revision,
+        "no step for the same color"
+    );
 }
