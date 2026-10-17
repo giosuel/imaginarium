@@ -1,6 +1,7 @@
 # Shell: the window around the board
 
-Status: **Draft** (M3.0). Crates: `imaginarium-shell` (new in M3.4) and
+Status: **Being built** (M3.4: the board window, §3.1 to §3.4, is
+built; the rest follows). Crates: `imaginarium-shell` (new in M3.4) and
 `imaginarium-app`, on the toolkit (`imaginarium-ui`, `ui-toolkit.md`).
 The board itself, its items and its editing, is in `canvas.md`.
 
@@ -118,6 +119,49 @@ undo and redo on the left; Help and shortcuts (`?`) on the right. If the
 tool bar is docked at the bottom, they keep their corners and the bar sits
 between them.
 
+**As built (M3.4, the board window).** `imaginarium-shell`'s
+`BoardWindow` is the window's view; `imaginarium-app` opens one on a new
+board (`--demo` shows the mockups' board).
+- **Layout.** The board fills the window. The panels sit in an overlay
+  that fills it too, made of boxes that let the pointer through
+  (`Flex::pass_through`), so the board gets every click between the
+  panels. The tool bar has a stage of its own laid out for its dock.
+- **Commands.** Every button runs a board command by id (`tool.*`,
+  `view.zoom_*`, `edit.undo`, `edit.redo`) through a queue the window
+  drains after each input, so the palette and the AI can do the same.
+  Tooltips take their keys from the board's keymap (Ctrl or ⌘), so they
+  always show the real shortcut. The selected tool, the zoom percentage
+  and undo and redo follow the board's signals (`tool()`, `status()`).
+- **Focus.** Tool bar and panel buttons take a click without taking the
+  keyboard (`Widget::focus_on_click`): after a click on a tool, the
+  board's keys still work. Tab reaches them; keys a focused button
+  doesn't use go to the board (its shortcuts work), and Esc gives the
+  keys back to it. A click on a panel's background does too. Esc closes
+  a note even while the board has a selection.
+- **Placeholders.** The app button, the name, Save…, Search, AI, Share
+  and help open a note saying which milestone brings them (M3.6, the
+  palette next, M6, M8, M3.9).
+- **The tool bar.** Docked left by default (`ui.toolbar.position`). The
+  grip drags it: the edges show their drop zones, the nearest stronger,
+  with a hint ("Release to dock it on the left · Shift keeps it
+  floating"). Released with the pointer in the outer quarter of the
+  window toward an edge, it docks there; elsewhere, or with Shift, it
+  floats, kept inside the window (also when the window shrinks). A
+  press drags only after 4 px, so a click leaves the bar alone; a
+  double-click on the grip puts it back on the left; a drag cut short
+  (the window loses the focus) puts it back where it was. Commands do
+  the same (`view.dock_toolbar` with an `edge`, `view.reset_toolbar`),
+  and the window follows the setting when it changes elsewhere. Docked,
+  the bar is centered on its edge when that keeps it clear of the
+  corner panels, else centered between them, else placed past them (a
+  narrow or short window), its grip in reach. The setting isn't saved
+  to disk yet: settings files come with M3.5.
+- **Zoom.** The percentage opens a menu: fit, 100 % and the selection,
+  with their keys.
+- **Not yet:** the arrow keys between tools and `F6` (the focus between
+  the board and the panels), double-clicking a tool to keep it, and the
+  title following a rename (M3.6).
+
 ### 3.5 The contextual toolbar
 
 Floats above the selection (below it when there's no room), and moves
@@ -153,6 +197,30 @@ command with arguments takes them inline (`Set corner radius` › `12 px`,
 `Tab` to the next argument); a boolean setting is a toggle right in the
 list. The footer lists the keys (↑↓ choose, ↵ run, Tab argument, Esc
 close).
+
+**As built (M3.4, the palette).** `Ctrl+K` (a shell keymap with the
+command `palette.open`, so it works wherever the keys are) or the
+Search button opens it as a lightly dimmed dialog.
+- **What it finds.** The board's and the shell's commands that run
+  without arguments, and the boolean and enum settings, in one index
+  (`SearchIndex`); `SearchIndex::explain` gives the matched letters,
+  or the synonym, for the rows shown ("G**rou**p", "· also **rou**nd
+  corners"). Results sit under their categories; without a query, the
+  recent commands come first, then everything.
+- **Availability** is a snapshot taken when it opens. Hidden commands
+  aren't listed; a disabled one is greyed and says why ("Nothing to
+  redo"), and Enter does nothing.
+- **Keys.** ↑↓ move (the row scrolls into view), Enter runs a command
+  and closes the palette, or changes a setting in place; Tab changes a
+  setting's value (an enum steps to its next value); Esc or a click
+  beside it closes it, and the keys go back to the board.
+- **Cost.** Rows are built once per open and reused: a keystroke
+  reorders them and updates the changed highlights (2.2 ms with its
+  frame in release, 44 entries). Their signals live in a scope disposed
+  when the palette closes. It follows the window's size.
+- **Not yet:** arguments typed inline (`Set corner radius` › `12 px`):
+  commands with required arguments aren't listed. Templates, help and
+  AI actions come with their milestones.
 
 ### 3.8 The context menu
 
@@ -250,13 +318,18 @@ a test checks the token pairs.
 
 ## 8. Icons
 
-**Lucide** (owner, 2026-10-16; ISC license, allowed in `deny.toml`). We
-vendor the icons we use, not the whole set:
+**Lucide** (owner, 2026-10-16; ISC license, and MIT for the icons that
+come from Feather, both allowed in `deny.toml`). We vendor the icons we
+use, not the whole set:
 
-- `cargo xtask icons` reads a pinned Lucide release (two-week rule) and
-  writes the chosen icons as SVG path data into
-  `crates/imaginarium-ui/src/icons/` (circles and rectangles converted to
-  paths), with Lucide's license next to them.
+- `cargo xtask icons` reads a pinned Lucide release (`lucide-static` from
+  npm, 1.50.0; it refuses one younger than 14 days and a tarball that
+  doesn't match npm's sha512) and writes the icons
+  listed in `crates/imaginarium-ui/src/icons/icons.txt` as SVG path data
+  into `lucide.rs` there (circles, rectangles, lines and polygons
+  converted to paths), with Lucide's license next to them
+  (`LICENSE-lucide`, both notices). The generated file's SPDX line is
+  `ISC AND MIT`. 98 icons as of M3.1.
 - At startup the path data is parsed once (`kurbo::BezPath::from_svg`) and
   stroked at 1.75 px in the token's color, so icons follow the theme and
   stay sharp at every scale. No new dependency.

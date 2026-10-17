@@ -117,7 +117,7 @@ Each node of the `nodes` tree has a meta map with these keys:
 | `frame` | A board frame or artboard. It clips its children. | any |
 | `page` | A page of a document or layout, in reading order | any |
 | `slide` | A slide of a deck, in slide order | any |
-| `shape` | A vector shape. `shape` (string) names the preset: `rect`, `ellipse`, `line`, `triangle`, `diamond`, `path` (§5.6), … Unknown presets render as `rect`. | none |
+| `shape` | A vector shape. `shape` (string) names the preset: `rect`, `ellipse`, `line`, `triangle`, `diamond`, `path` (§5.6), … Unknown presets render as `rect`. `t`, if present, is the shape's label, drawn centered in it. | none |
 | `text` | A text box. `t` holds the text. | none |
 | `image` | An image. `a.src` is the blob. | none |
 | `connector` | A connector. `from` and `to` are `NodeId` strings, both optional. The geometry holds the fallback endpoints. | none |

@@ -111,6 +111,17 @@ fn family() -> FontFamily<'static> {
 
 const STACK: &[FontFamilyName<'static>] = &[FontFamilyName::named(UI_FAMILY)];
 
+/// A stretch of a [`TextBlock`]'s text in another weight or color.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    /// Byte range in the text.
+    pub range: std::ops::Range<usize>,
+    /// Its weight, if not the block's.
+    pub weight: Option<f32>,
+    /// Its color, if not the block's.
+    pub color: Option<Color>,
+}
+
 /// Text laid out once: shaped, broken into lines and aligned. Build a new
 /// one when the text or its style changes; [`TextBlock::set_width`] only
 /// re-breaks the lines.
@@ -123,11 +134,52 @@ impl TextBlock {
     /// Lays out `text` in `style`, wrapping at `max_width` logical pixels
     /// (`None`: only at line breaks in the text).
     pub fn new(fonts: &mut Fonts, text: &str, style: &TextStyle, max_width: Option<f32>) -> Self {
+        Self::with_spans(fonts, text, style, &[], max_width)
+    }
+
+    /// Lays out `text` in `style`, with `spans` of it in another weight or
+    /// color (a search's matches). Spans outside the text, or not on
+    /// character boundaries, are left out.
+    ///
+    /// ```
+    /// use imaginarium_text::{Fonts, Span, TextBlock, TextStyle};
+    ///
+    /// let mut fonts = Fonts::bundled_only();
+    /// let bold = Span { range: 1..4, weight: Some(600.0), color: None };
+    /// let block = TextBlock::with_spans(&mut fonts, "Group", &TextStyle::new(14.0), &[bold], None);
+    /// assert!(block.size().width > 0.0);
+    /// ```
+    pub fn with_spans(
+        fonts: &mut Fonts,
+        text: &str,
+        style: &TextStyle,
+        spans: &[Span],
+        max_width: Option<f32>,
+    ) -> Self {
         let mut builder = fonts
             .layout_cx
             .ranged_builder(&mut fonts.font_cx, text, 1.0, true);
         for property in style.properties() {
             builder.push_default(property);
+        }
+        for span in spans {
+            let range = span.range.clone();
+            if range.start >= range.end
+                || range.end > text.len()
+                || !text.is_char_boundary(range.start)
+                || !text.is_char_boundary(range.end)
+            {
+                continue;
+            }
+            if let Some(weight) = span.weight {
+                builder.push(
+                    StyleProperty::FontWeight(FontWeight::new(weight)),
+                    range.clone(),
+                );
+            }
+            if let Some(color) = span.color {
+                builder.push(StyleProperty::Brush(Brush(color)), range);
+            }
         }
         let layout = builder.build(text);
         let mut block = Self {
