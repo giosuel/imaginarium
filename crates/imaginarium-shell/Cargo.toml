@@ -1,0 +1,27 @@
+[package]
+name = "imaginarium-shell"
+description = "The windows around the documents: the board window's panels, tool bar and controls, wired to the board's commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+accesskit.workspace = true
+imaginarium-canvas.workspace = true
+imaginarium-commands.workspace = true
+imaginarium-io-native.workspace = true
+imaginarium-model.workspace = true
+imaginarium-reactive.workspace = true
+imaginarium-render.workspace = true
+imaginarium-settings.workspace = true
+imaginarium-text.workspace = true
+imaginarium-ui.workspace = true
+rfd.workspace = true
+taffy.workspace = true
+
+[lints]
+workspace = true

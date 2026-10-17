@@ -99,6 +99,8 @@ pub struct Document {
     /// [`undo_manager`]).
     undo_message: Arc<Mutex<String>>,
     mode: Mode,
+    /// The version the opened data had, before migrations changed it.
+    opened: Option<Version>,
     /// The features this reader understands (from [`OpenOptions`]), to
     /// check `meta.required_features` again after remote changes.
     known_features: Vec<String>,
@@ -197,6 +199,7 @@ impl Document {
             .iter()
             .map(|f| (*f).to_owned())
             .collect();
+        document.opened = Some(document.version());
         document.check_schema(options)?;
         Ok(document)
     }
@@ -223,6 +226,7 @@ impl Document {
                 .map(|f| (*f).to_owned())
                 .collect(),
             open_groups: [false; 2],
+            opened: None,
         }
     }
 
@@ -530,6 +534,21 @@ impl Document {
     /// The current version.
     pub fn version(&self) -> Version {
         Version(self.doc.oplog_vv())
+    }
+
+    /// The version the opened data had, before migrations: changes since
+    /// it are what a file the document came from doesn't hold yet. `None`
+    /// for a new document.
+    pub fn version_at_open(&self) -> Option<Version> {
+        self.opened.clone()
+    }
+
+    /// Makes the document read-only for a reason outside it (its file
+    /// can't be written). Only ever from editable to read-only.
+    pub fn set_read_only(&mut self, reason: ReadOnlyReason) {
+        if self.mode == Mode::Editable {
+            self.mode = Mode::ReadOnly(reason);
+        }
     }
 
     /// A full snapshot (state and history), the payload of a `SNAP` record.

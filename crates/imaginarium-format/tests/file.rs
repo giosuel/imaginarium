@@ -102,7 +102,21 @@ fn incremental_saves_append_and_chain_indexes() {
         "append-only: the old bytes are untouched"
     );
     let reader = open(second);
-    assert_eq!(reader.index().entries().len(), 7);
+    // The new snapshot supersedes the main stream's old head (snapshot 2,
+    // updates 3 and 4): they leave the index, which lists live records
+    // (spec §9.1); their bytes stay, for compaction. The discussion stream
+    // keeps its update.
+    let ids: Vec<Vec<u8>> = reader
+        .index()
+        .entries()
+        .iter()
+        .map(|entry| entry.object_id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [1u8, 5, 6, 7].map(|n| id(n).0.to_vec()).to_vec(),
+        "META, the discussion update, the new head"
+    );
     let head = reader.index().head(&StreamKey::main()).unwrap();
     assert_eq!(
         head.snapshot_id,
@@ -386,7 +400,9 @@ fn compaction_keeps_live_records_byte_for_byte() {
     )
     .unwrap();
     assert_eq!(report.kept, 4, "{report:?}"); // META 4, SNAP 5, UPDT 6, safe extension
-    assert_eq!(report.dropped, 4);
+    // META 1 and the unknown record. The old head (SNAP 2, UPDT 3) left the
+    // index when SNAP 5 came, so compaction never copies its bytes.
+    assert_eq!(report.dropped, 2);
     assert_eq!(report.dropped_unknown, vec![0x4002]);
 
     let mut reader = open(compacted.into_inner().into_inner());

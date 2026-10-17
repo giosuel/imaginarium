@@ -57,9 +57,34 @@ impl IndexState {
             .find(|h| h.stream == key.stream && h.extension_id == key.extension_id)
     }
 
-    /// Records a record appended at `offset` with encoded `length`.
+    /// Records a record appended at `offset` with encoded `length`. A
+    /// snapshot supersedes its stream's head: the old head's records leave
+    /// the index (it lists live records, spec §9.1), so an often-saved file's
+    /// index stays as small as its head.
     pub(crate) fn add(&mut self, record: &Record, offset: u64, length: u64) {
         let header = record.header();
+        if record.rtype() == RecordType::SNAP {
+            let key = StreamKey::of(header);
+            if let Some(head) = self
+                .heads
+                .iter()
+                .find(|h| h.stream == key.stream && h.extension_id == key.extension_id)
+            {
+                // A set: a long head would make this quadratic.
+                let superseded: std::collections::HashSet<Vec<u8>> =
+                    std::iter::once(head.snapshot_id.clone())
+                        .chain(head.update_ids.iter().cloned())
+                        .filter(|id| !id.is_empty())
+                        .collect();
+                self.entries.retain(|entry| {
+                    let in_stream = (entry.rtype == RecordType::SNAP.0
+                        || entry.rtype == RecordType::UPDT.0)
+                        && entry.stream == key.stream
+                        && entry.extension_id == key.extension_id;
+                    !(in_stream && superseded.contains(&entry.object_id))
+                });
+            }
+        }
         self.entries.push(pb::IndexEntry {
             rtype: record.rtype().0,
             object_id: header.object_id.clone(),
