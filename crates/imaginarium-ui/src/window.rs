@@ -226,12 +226,16 @@ pub enum Input {
 
 /// Whether dropped files reach the windows ([`Input::FileDropped`]): on
 /// Windows, macOS and X11, but not on Wayland, where winit 0.30 doesn't
-/// report drops yet (it is used when `WAYLAND_DISPLAY` is set).
+/// report drops yet (it is used when `WAYLAND_DISPLAY` or `WAYLAND_SOCKET`
+/// is set).
 pub fn file_drops_supported() -> bool {
     if cfg!(any(target_os = "windows", target_os = "macos")) {
         return true;
     }
-    std::env::var_os("WAYLAND_DISPLAY").is_none_or(|display| display.is_empty())
+    // As winit picks Wayland: either variable, set and not empty.
+    ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
 }
 
 /// One presented frame, for statistics.
