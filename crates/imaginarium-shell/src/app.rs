@@ -166,14 +166,17 @@ mod tests {
             .collect()
     }
 
+    /// Mod+`key`: Ctrl, or ⌘ on macOS.
     fn ctrl(key: &str) -> Input {
+        let mac = cfg!(target_os = "macos");
         Input::Key {
             key: Key::Character(key.into()),
             text: None,
             pressed: true,
             repeat: false,
             modifiers: Modifiers {
-                ctrl: true,
+                ctrl: !mac,
+                meta: mac,
                 ..Modifiers::default()
             },
         }
