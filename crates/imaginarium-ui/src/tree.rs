@@ -643,6 +643,18 @@ impl Ui {
         id
     }
 
+    /// Puts the open layer `id` at another anchor (a dialog placed for
+    /// the window's size, after a resize). `false` if it isn't open.
+    pub fn move_layer(&mut self, id: LayerId, anchor: crate::layers::Anchor) -> bool {
+        let Some(layer) = self.layers.iter_mut().find(|layer| layer.id == id) else {
+            return false;
+        };
+        layer.options.anchor = anchor;
+        self.layout_dirty = true;
+        request_frame();
+        true
+    }
+
     /// Closes layer `id` and the layers opened after it (submenus), from
     /// the top: their widgets are removed, the focus goes back to where it
     /// was when they opened, and their `on_close` callbacks run. `false`

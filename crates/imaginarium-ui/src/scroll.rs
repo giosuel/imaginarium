@@ -98,6 +98,12 @@ impl Scroll {
         self
     }
 
+    /// Its layout, to change after it was added (a dialog's list that
+    /// follows the window's height).
+    pub fn style_mut(&mut self) -> &mut Style {
+        &mut self.style
+    }
+
     /// Names it for screen readers.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());

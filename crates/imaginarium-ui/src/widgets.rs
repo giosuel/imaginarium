@@ -276,6 +276,15 @@ impl Label {
         }
     }
 
+    /// Changes the highlighted byte ranges after it was added (the
+    /// palette's rows, reused for each query).
+    pub fn set_highlights(&mut self, ranges: Vec<std::ops::Range<usize>>) {
+        if self.highlights != ranges {
+            self.highlights = ranges;
+            self.block = None;
+        }
+    }
+
     /// Draws the byte `ranges` of its text in `weight` and `paint` (the
     /// letters a search matched).
     pub fn highlight(
@@ -1003,6 +1012,9 @@ impl Widget for ButtonBox {
 
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         let mut node = Node::new(Role::Button);
+        if self.selected.as_ref().is_some_and(|selected| selected()) {
+            node.set_selected(true);
+        }
         node.set_label(self.label.clone());
         node.set_bounds(access_rect(cx.bounds()));
         node.add_action(Action::Click);
