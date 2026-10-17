@@ -473,17 +473,24 @@ when the last board closes.
 draws it:
 - **Tiles** in rows of three, at most five boards and then the dashed
   **Open another board…**: a picture of the board (its shapes, frames
-  and text bars in their colors, fitted in, on the board's color; read
-  on a thread), its name, and its folder from the home folder ·
-  when ("just now", "2 hours ago", "yesterday", "last week", "Sep 12").
+  and text bars as the board draws them: turned, clipped by their
+  frames, hidden ones left out, in both themes' colors), its name, and
+  its folder from the home folder · when ("just now", "2 hours ago",
+  "yesterday", "last week", "Sep 12": dates in UTC for now). Pictures
+  are read by one worker only for the tiles shown, and a closing board
+  leaves its own, fresh; when one arrives it goes into its tile in place
+  (the keys and the pointer stay).
   A click opens it (the start window then closes). With none yet, the
   tile says the boards you open show there.
 - **The filter** (once there are boards) by name and folder; "No
   recent board matches …" when none does.
 - **The list:** boards opened or saved go first, a moved board moves, a
-  board whose file is gone leaves it (at startup, or when it is clicked);
-  at most 20, in `recent.txt` in the data folder (`<unix ms>\t<path>`
-  per line), read on a thread at startup and written on one.
+  board whose file is gone leaves it when it is clicked (a drive may only
+  be away at startup); at most 20, by their normalized paths, in
+  `recent.txt` in the data folder (`<unix ms>\t<path>` per line), read on
+  a thread at startup and written on one, never before it was read (a
+  file that can't be read is never overwritten). Two apps running at
+  once: the last to write wins (known issue).
 - **Dropping** a board file on the start window or a board opens it
   (`Input::FileDropped`). The hint shows only where drops arrive:
   winit 0.30 reports none on Wayland yet (Hyprland, Sway, GNOME on
