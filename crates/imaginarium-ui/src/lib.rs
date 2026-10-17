@@ -58,6 +58,7 @@
 mod access;
 pub mod animation;
 mod clipboard;
+mod controls;
 pub mod icons;
 mod layers;
 mod logo;
@@ -80,6 +81,7 @@ pub use widgets::{
 };
 
 pub use access::{AccessTree, ROOT, rect as access_rect};
+pub use controls::{Segmented, badge, dropdown};
 pub use logo::Logo;
 pub use text_field::{FieldResponse, TextField};
 pub use theme::{DEFAULT_ACCENT, Paint, Theme, ThemeKind, Token, contrast, mix, set_theme, theme};

@@ -747,6 +747,8 @@ pub struct ButtonBox {
     tooltip: Option<(String, crate::layers::Placement)>,
     focus_on_click: bool,
     selected: Option<Flag>,
+    /// The fill while selected, instead of `ControlActive`.
+    selected_fill: Option<Paint>,
     role: Role,
     /// Can't be used now: no action, not focusable, greyed by its owner.
     disabled: bool,
@@ -783,6 +785,7 @@ impl ButtonBox {
             tooltip: None,
             focus_on_click: true,
             selected: None,
+            selected_fill: None,
             role: Role::Button,
             disabled: false,
             action: Box::new(action),
@@ -883,6 +886,13 @@ impl ButtonBox {
         self
     }
 
+    /// Filled with `paint` while selected (a segmented control's chosen
+    /// option), instead of `ControlActive`.
+    pub fn selected_fill(mut self, paint: impl Into<Paint>) -> Self {
+        self.selected_fill = Some(paint.into());
+        self
+    }
+
     /// Adds the button with `children` to `ui`, repainting it when the
     /// signals its selected state reads change.
     pub fn add_to(self, ui: &mut Ui, children: &[WidgetId]) -> WidgetId {
@@ -928,7 +938,10 @@ impl Widget for ButtonBox {
         let tone = self.tone.value();
         let selected = self.selected.as_ref().is_some_and(|selected| selected());
         let (rest, hover, pressed) = if selected {
-            let active = theme.color(crate::theme::Token::ControlActive);
+            let active = self.selected_fill.map_or_else(
+                || theme.color(crate::theme::Token::ControlActive),
+                |fill| fill.resolve(&theme),
+            );
             (active, active, active)
         } else {
             (
@@ -1040,7 +1053,15 @@ impl Widget for ButtonBox {
 
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
         let mut node = Node::new(self.role);
-        if self.selected.as_ref().is_some_and(|selected| selected()) {
+        let selected = self.selected.as_ref().is_some_and(|selected| selected());
+        if self.role == Role::RadioButton {
+            // A radio button says whether it is the one chosen.
+            node.set_toggled(if selected {
+                accesskit::Toggled::True
+            } else {
+                accesskit::Toggled::False
+            });
+        } else if selected {
             node.set_selected(true);
         }
         node.set_label(self.label.clone());

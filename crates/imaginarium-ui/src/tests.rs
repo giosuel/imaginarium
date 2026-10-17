@@ -2179,3 +2179,38 @@ fn a_signal_marks_its_widget_in_its_own_tree() {
     frame(&mut a, &mut fonts);
     assert_eq!(painted.get(), before + 1, "a repaints its widget");
 }
+
+#[test]
+fn a_segmented_control_picks_and_says_which_is_chosen() {
+    use crate::controls::Segmented;
+    use imaginarium_reactive::signal;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let chosen = signal(0usize);
+    let control = Segmented::new(
+        "Board background",
+        &["Dots", "Grid", "Plain"],
+        move || chosen.get(),
+        move |at| chosen.set(at),
+    )
+    .add_to(&mut ui);
+    let root = ui.add_with_children(Flex::column().fill(), &[control]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let grid = ui.find_by_label(&mut fonts, "Grid").unwrap();
+    let at = ui.bounds(grid).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    frame(&mut ui, &mut fonts);
+    assert_eq!(chosen.get(), 1);
+    let mut tree = AccessTree::default();
+    ui.access(&mut fonts, &mut tree);
+    let toggled = |label: &str| {
+        tree.nodes()
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .and_then(|(_, node)| node.toggled())
+    };
+    assert_eq!(toggled("Grid"), Some(accesskit::Toggled::True));
+    assert_eq!(toggled("Dots"), Some(accesskit::Toggled::False));
+}

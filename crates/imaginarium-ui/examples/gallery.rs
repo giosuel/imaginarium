@@ -21,9 +21,9 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
-    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Logo, Scroll, Slider, Swatch,
-    SwatchShape, Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, VirtualList,
-    WidgetId, WindowOptions, animation, set_theme, theme,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Logo, Scroll, Segmented, Slider,
+    Swatch, SwatchShape, Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View,
+    VirtualList, WidgetId, WindowOptions, animation, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -540,6 +540,33 @@ fn main() -> Result<(), UiError> {
     let logos = ui.add_with_children(Flex::row().gap(16.0), &logos);
     let logo = section(&mut ui, "Logo · 44, 28 and 16 px", &[logos]);
 
+    // Choices: a segmented control, a dropdown's button (here a click
+    // steps through its values; Settings opens the list), a badge.
+    let background = imaginarium_reactive::signal(0usize);
+    let segmented = Segmented::new(
+        "Board background",
+        &["Dots", "Grid", "Plain"],
+        move || background.get(),
+        move |at| background.set(at),
+    )
+    .add_to(&mut ui);
+    let sizes = ["100 %", "110 %", "125 %", "150 %"];
+    let size = imaginarium_reactive::signal(1usize);
+    let dropdown = imaginarium_ui::dropdown(
+        &mut ui,
+        "Interface size",
+        200.0,
+        move || sizes[size.get()].to_owned(),
+        move || size.update(|at| *at = (*at + 1) % sizes.len()),
+    );
+    let changed = imaginarium_ui::badge(&mut ui, "Changed");
+    let choices = ui.add_with_children(Flex::row().gap(16.0), &[segmented, dropdown, changed]);
+    let choices = section(
+        &mut ui,
+        "Choices · segmented control, dropdown, badge",
+        &[choices],
+    );
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -696,6 +723,7 @@ fn main() -> Result<(), UiError> {
             swatches,
             sliders,
             logo,
+            choices,
             inputs,
             text,
             layers,
