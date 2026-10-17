@@ -363,8 +363,8 @@ when the last board closes.
   stops counting as open as soon as it starts closing, so boards closed
   together still bring the start window back once. Closing the start
   window ends the app. Unsaved changes can't be asked about until M3.6.
-- **Settings aren't saved to a file yet** (that comes with Settings,
-  M3.5): Show at startup lasts for the session.
+- **Settings are saved** (M3.5): Show at startup, like every app
+  setting, is kept in the settings file (§5 "As built").
 - **Timings** (release, llvmpipe on the 8-vCPU VM, 2026-10-17): the first
   frame of the start window 240–255 ms after `main` starts (about 55 ms
   of setup, mostly the font scan, while the GPU opens on its thread; then
@@ -391,6 +391,17 @@ changed value shows "Changed" and a reset button. M3's new settings:
 | `ui.toolbar.position` | §3.3 | user |
 | `board.background` | `dots`, `grid`, `plain` | user and board |
 | `startup.show_start_window` | bool | user |
+
+**As built (M3.5, the settings file).** The app reads `settings.toml`
+from the platform's configuration folder at startup
+(`$XDG_CONFIG_HOME/imaginarium/` or `~/.config/imaginarium/` on Linux,
+`~/Library/Application Support/Imaginarium/` on macOS,
+`%APPDATA%\Imaginarium\` on Windows; `--settings PATH` for another file).
+After every change of an app setting the registry hands its TOML to a
+writer thread (`Registry::persist_to`, `FileWriter`), which writes the
+newest text atomically and finishes before the app exits; the UI never
+waits for the disk. A file that can't be read leaves the defaults, and
+entries this version can't read are kept (`persist.rs`).
 
 ## 6. Layers, popovers and focus
 

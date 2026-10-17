@@ -26,6 +26,11 @@ Imaginarium opens with its **start window**: **New board** (`Ctrl+N` /
 `⌘N`) opens an empty board, and later your recent boards are listed here
 too. Turn off **Show at startup** to go straight to a new board.
 
+Your settings are saved as you change them, in `settings.toml` in your
+configuration folder (`~/.config/imaginarium/` on Linux,
+`~/Library/Application Support/Imaginarium/` on macOS,
+`%APPDATA%\Imaginarium\` on Windows). You never need to edit it.
+
 Every board has a **window of its own**. `Ctrl+N` in a board opens
 another one, and `Ctrl+W` / `⌘W` closes it; when the last board closes,
 the start window comes back.
