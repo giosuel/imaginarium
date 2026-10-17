@@ -833,6 +833,7 @@ board_command!(
         if !board.copy_to_clipboard() {
             return Ok(Outcome::Unchanged);
         }
+        board.forget_pastes();
         Ok(done(board.delete_selection().map_err(failed("board.cut"))?))
     }
 );

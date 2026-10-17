@@ -182,3 +182,115 @@ fn a_drawn_shape_pastes_unturned() {
         (16.0, 16.0, a.w, a.h, 0.0)
     );
 }
+
+#[test]
+fn copy_and_paste_from_the_palette_reach_the_clipboard() {
+    let mut board = sample();
+    board.click((300.0, 300.0));
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .execute("board.copy", &imaginarium_commands::Args::new())
+        .unwrap();
+    // The next frame hands the work over, without a key.
+    board.frame();
+    assert!(board.board().clipboard_work_for_tests().copy.is_none());
+}
+
+#[test]
+fn a_wrapped_copy_still_pastes_down_and_right_and_a_cut_pastes_in_place() {
+    let mut board = sample();
+    let interview = board.node("Interview 5 users");
+    board.click((300.0, 300.0));
+    let html = copy(&mut board);
+    let original = board_box(&board, interview);
+    // macOS hands the HTML back wrapped in a document.
+    paste(&mut board, &format!("<html><body>{html}</body></html>"));
+    let [first] = board.selection()[..] else {
+        panic!()
+    };
+    assert_eq!(
+        board_box(&board, first),
+        original + imaginarium_render::kurbo::Vec2::new(16.0, 16.0)
+    );
+    // A cut, then a paste: back where it was.
+    let id = board.board;
+    board
+        .ui
+        .widget_mut::<BoardCanvas>(id)
+        .unwrap()
+        .select(&[first]);
+    let cut_html = {
+        let canvas = board.ui.widget_mut::<BoardCanvas>(id).unwrap();
+        canvas
+            .execute("board.cut", &imaginarium_commands::Args::new())
+            .unwrap();
+        canvas.clipboard_work_for_tests().copy.clone().unwrap().0
+    };
+    board.frame();
+    paste(&mut board, &cut_html);
+    let [back] = board.selection()[..] else {
+        panic!()
+    };
+    assert_eq!(
+        board_box(&board, back),
+        original + imaginarium_render::kurbo::Vec2::new(16.0, 16.0)
+    );
+}
+
+#[test]
+fn damaged_copies_and_refused_keys_dont_paste_garbage() {
+    let mut board = sample();
+    let before = board.board().document().view().node_count();
+    board.click((20.0, 800.0));
+    paste(&mut board, &format!("<p>hi</p>{MARKER}%%%-->"));
+    assert_eq!(
+        board.board().document().view().node_count(),
+        before,
+        "nothing, not the raw HTML"
+    );
+    // A shape with keys the model refuses: the shape comes, the keys don't.
+    let copied = clipboard::Copied {
+        nodes: vec![crate::copy::NodeCopy {
+            kind: "shape".into(),
+            geometry: Some(Geometry::new(10.0, 10.0, 50.0, 50.0)),
+            style: None,
+            overrides: Vec::new(),
+            text: Vec::new(),
+            props: vec![
+                ("id".into(), Value::Int(5)),
+                ("name".into(), Value::String("ok".into())),
+            ],
+            assets: Vec::new(),
+            ext: vec![("not an add-on id".into(), Value::Bool(true))],
+            generation: Vec::new(),
+            children: Vec::new(),
+        }],
+        styles: Vec::new(),
+    };
+    paste(&mut board, &clipboard::to_html(&copied));
+    let [node] = board.selection()[..] else {
+        panic!("pasted")
+    };
+    assert_eq!(
+        board.board().document().view().node(node).unwrap().name(),
+        Some("ok")
+    );
+    // Windows line breaks in text.
+    paste(&mut board, "a\r\nb\r\n");
+    let [text] = board.selection()[..] else {
+        panic!()
+    };
+    let content = board
+        .board()
+        .document()
+        .view()
+        .node(text)
+        .unwrap()
+        .text()
+        .unwrap()
+        .to_plain_string();
+    assert_eq!(content, "a\nb\n");
+}

@@ -146,19 +146,22 @@ impl NodeCopy {
         {
             txn.set_style(id, Some(&style))?;
         }
+        // A key the model refuses (`id`, a container's name, an add-on id
+        // that isn't one; a copy can come from anywhere) is left out, not
+        // the whole node.
         for (key, value) in &self.overrides {
-            txn.set_style_override(id, key, value.clone())?;
+            let _ = txn.set_style_override(id, key, value.clone());
         }
         for (key, value) in &self.props {
-            txn.set_prop(id, key, value.clone())?;
+            let _ = txn.set_prop(id, key, value.clone());
         }
         for (role, blob) in &self.assets {
             if let Some(blob) = imaginarium_model::BlobId::parse(blob) {
-                txn.set_asset(id, role, Some(blob))?;
+                let _ = txn.set_asset(id, role, Some(blob));
             }
         }
         for (addon, value) in &self.ext {
-            txn.set_node_ext(id, addon, value.clone())?;
+            let _ = txn.set_node_ext(id, addon, value.clone());
         }
         if !self.generation.is_empty() {
             let generation: Vec<(&str, Value)> = self

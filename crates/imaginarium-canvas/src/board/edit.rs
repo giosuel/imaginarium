@@ -314,6 +314,17 @@ impl BoardCanvas {
                 let editing = self.editing.as_mut()?;
                 editing.field.input(cx.fonts(), &local(input), bounds)
             }
+            // The board's copy arriving while text is edited: its text.
+            Input::Paste(pasted) if pasted.contains(crate::clipboard::MARKER) => {
+                let text = crate::clipboard::from_html(pasted)
+                    .map(|copied| crate::clipboard::plain_text(&copied))
+                    .unwrap_or_default();
+                let editing = self.editing.as_mut()?;
+                let (fonts, clipboard) = cx.fonts_and_clipboard();
+                editing
+                    .field
+                    .input_with_clipboard(fonts, &Input::Paste(text), bounds, clipboard)
+            }
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) => {
                 let editing = self.editing.as_mut()?;
                 let (fonts, clipboard) = cx.fonts_and_clipboard();

@@ -105,9 +105,14 @@ impl BoardCanvas {
         let html = clipboard::to_html(&copied);
         let text = clipboard::plain_text(&copied);
         // A paste of this copy here goes a little down and right.
-        self.pastes = Some((html.clone(), 0));
+        self.pastes = clipboard::payload(&html).map(|payload| (payload.to_owned(), 0));
         self.clipboard_work.copy = Some((html, text));
         true
+    }
+
+    /// After a cut, the first paste lands where the nodes were.
+    pub(crate) fn forget_pastes(&mut self) {
+        self.pastes = None;
     }
 
     /// `board.paste`: asks the clipboard for what to paste.
@@ -130,8 +135,14 @@ impl BoardCanvas {
     /// text box in the middle of the view. One transaction; the pasted
     /// nodes are selected.
     pub(crate) fn paste(&mut self, pasted: &str) -> Result<Vec<NodeId>> {
+        // The board's copy that doesn't read (damaged, or nested too deep
+        // for the parser) pastes nothing rather than its raw HTML.
+        if pasted.contains(clipboard::MARKER) && clipboard::from_html(pasted).is_none() {
+            return Ok(Vec::new());
+        }
         let Some(copied) = clipboard::from_html(pasted) else {
-            let text = pasted.trim_end_matches(['\n', '\r']);
+            let text = pasted.replace("\r\n", "\n").replace('\r', "\n");
+            let text = text.trim_end_matches('\n');
             if text.trim().is_empty() {
                 return Ok(Vec::new());
             }
@@ -141,13 +152,15 @@ impl BoardCanvas {
             return Ok(vec![id]);
         };
         // The same copy pasted again here lands further down and right.
+        // By the payload, not the HTML: a clipboard may wrap it (macOS).
+        let payload = clipboard::payload(pasted).unwrap_or_default().to_owned();
         let count = match &mut self.pastes {
-            Some((html, count)) if html == pasted => {
+            Some((known, count)) if *known == payload => {
                 *count += 1;
                 *count
             }
             _ => {
-                self.pastes = Some((pasted.to_owned(), 0));
+                self.pastes = Some((payload, 0));
                 0
             }
         };

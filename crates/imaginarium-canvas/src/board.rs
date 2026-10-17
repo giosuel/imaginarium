@@ -1606,6 +1606,9 @@ impl Widget for BoardCanvas {
     }
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        // A command run from elsewhere (the palette, the AI) may have left
+        // clipboard work.
+        self.hand_over(cx.clipboard());
         let bounds = cx.bounds();
         self.paint_into(cx.fonts(), scene, bounds, Instant::now());
     }
@@ -1618,6 +1621,7 @@ impl Widget for BoardCanvas {
         // Input reads the items (hit testing): bring them up to date.
         self.sync(cx.fonts());
         self.bounds = cx.bounds();
+        self.hand_over(cx.clipboard());
         if let Some(handled) = self.edit_input(cx, input) {
             return handled;
         }

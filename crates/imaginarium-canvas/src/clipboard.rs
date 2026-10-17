@@ -244,11 +244,23 @@ pub fn to_html(copied: &Copied) -> String {
     html
 }
 
-/// The nodes in clipboard HTML, if it holds the board's comment.
-pub fn from_html(html: &str) -> Option<Copied> {
+/// The biggest copy a paste reads, in bytes of its payload.
+pub const MAX_PAYLOAD: usize = 64 << 20;
+
+/// The base64 payload of the board's comment in `html`.
+pub fn payload(html: &str) -> Option<&str> {
     let start = html.find(MARKER)? + MARKER.len();
     let end = html[start..].find("-->")? + start;
-    let bytes = unbase64(html[start..end].trim())?;
+    Some(html[start..end].trim())
+}
+
+/// The nodes in clipboard HTML, if it holds the board's comment.
+pub fn from_html(html: &str) -> Option<Copied> {
+    let payload = payload(html)?;
+    if payload.len() > MAX_PAYLOAD {
+        return None;
+    }
+    let bytes = unbase64(payload)?;
     let payload: Json = serde_json::from_slice(&bytes).ok()?;
     let nodes = payload
         .get("nodes")?
@@ -315,11 +327,19 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let mut buffer = 0u32;
     let mut bits = 0;
+    let mut digits = [u8::MAX; 256];
+    for (value, letter) in ALPHABET.iter().enumerate() {
+        digits[usize::from(*letter)] = value as u8;
+    }
     for byte in text.bytes() {
         if byte == b'=' {
             break;
         }
-        let digit = ALPHABET.iter().position(|letter| *letter == byte)? as u32;
+        let digit = digits[usize::from(byte)];
+        if digit == u8::MAX {
+            return None;
+        }
+        let digit = u32::from(digit);
         buffer = buffer << 6 | digit;
         bits += 6;
         if bits >= 8 {

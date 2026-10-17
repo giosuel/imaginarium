@@ -1134,6 +1134,12 @@ What M3 builds on:
   and lay out off-screen labels lazily or on a worker.
 - **A gesture right after another edit undoes together with it**: the
   model merges undo steps within 500 ms (`UndoConfig`), groups included.
+- **Pasting big copies parses on the UI thread** (M3.3): a payload is
+  capped at 64 MB; moving the parsing to a worker is left for when
+  pastes get that big. Also not yet: a paste doesn't remap references
+  inside the copy (connectors' ends, `gen.inputs`; connectors come in
+  M4), carries asset ids to boards without those blobs (images come in
+  M4), and leaves a paragraph style (`ps`) dangling on another board.
 - **Text editing**: a collaborator typing before the caret moves it by
   their text's length; with tile workers the edited text shows twice for
   a frame when editing starts.
