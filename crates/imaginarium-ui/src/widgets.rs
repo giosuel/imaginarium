@@ -813,6 +813,12 @@ impl ButtonBox {
         self
     }
 
+    /// Takes a share of the free space along its parent's direction.
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.style.flex_grow = grow;
+        self
+    }
+
     /// Children start at the left (the search field's text) instead of
     /// being centered.
     pub fn start(mut self) -> Self {
