@@ -121,6 +121,10 @@ struct Entry {
 #[derive(Clone, Debug)]
 struct Field {
     chars: Vec<char>,
+    /// For each lowercased character, the index of the character of the
+    /// original text it comes from (lowercasing can change the count: "İ"
+    /// becomes two).
+    origin: Vec<usize>,
     word_start: Vec<bool>,
     /// Which characters occur (see [`char_mask`]), so a search can skip the
     /// field when it lacks a query character.
@@ -129,7 +133,14 @@ struct Field {
 
 impl Field {
     fn new(text: &str) -> Self {
-        let chars: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+        let mut chars = Vec::with_capacity(text.len());
+        let mut origin = Vec::with_capacity(text.len());
+        for (index, c) in text.chars().enumerate() {
+            for lower in c.to_lowercase() {
+                chars.push(lower);
+                origin.push(index);
+            }
+        }
         let word_start = (0..chars.len())
             .map(|i| {
                 i == 0
@@ -140,6 +151,7 @@ impl Field {
         let mask = char_mask(&chars);
         Self {
             chars,
+            origin,
             word_start,
             mask,
         }
@@ -277,9 +289,8 @@ impl SearchIndex {
 /// ([`SearchIndex::explain`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Explanation {
-    /// The matched characters of the title, as character indices, in
-    /// order. (Indices into the lowercased title, which are the title's own
-    /// for all but a few scripts.)
+    /// The matched characters of the title, as character indices of the
+    /// title as given, in order.
     pub title: Vec<usize>,
     /// The synonym that matched words the title didn't, if any: its index
     /// among the command's synonyms, and its matched characters.
@@ -312,9 +323,17 @@ impl SearchIndex {
                 (None, _) => false,
             };
             match (title, other) {
-                (Some((_, at)), _) if title_wins => explanation.title.extend(at),
+                (Some((_, at)), _) if title_wins => {
+                    explanation
+                        .title
+                        .extend(at.into_iter().map(|at| entry.title.origin[at]));
+                }
                 (_, Some((_, index, at))) => {
                     if index < entry.synonyms && explanation.synonym.is_none() {
+                        let field = &entry.fields[index].0;
+                        let mut at: Vec<usize> =
+                            at.into_iter().map(|at| field.origin[at]).collect();
+                        at.dedup();
                         explanation.synonym = Some((index, at));
                     }
                 }
@@ -707,5 +726,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn explained_letters_are_the_titles_own_when_lowercasing_grows_it() {
+        let mut index = SearchIndex::new();
+        // "İ" lowercases to two characters.
+        index.insert(CommandId::new("x.group"), "İx Group", &[], "X");
+        let explained = index.explain(CommandId::new("x.group"), "group").unwrap();
+        assert_eq!(explained.title, vec![3, 4, 5, 6, 7]);
     }
 }
