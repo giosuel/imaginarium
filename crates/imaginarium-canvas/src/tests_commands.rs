@@ -361,3 +361,16 @@ fn the_status_follows_undo_redo_and_zoom() {
     ctrl(&mut board, "=");
     assert!(status.get_untracked().zoom > start.zoom);
 }
+
+#[test]
+fn every_board_command_icon_is_vendored() {
+    let missing: Vec<&str> = crate::commands::board_commands()
+        .iter()
+        .filter_map(|command| {
+            use imaginarium_commands::Command;
+            command.meta().icon
+        })
+        .filter(|icon| imaginarium_ui::icons::icon_paths(icon).is_none())
+        .collect();
+    assert!(missing.is_empty(), "add to icons.txt: {missing:?}");
+}
