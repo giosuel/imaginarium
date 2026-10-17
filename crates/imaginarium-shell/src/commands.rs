@@ -88,6 +88,22 @@ pub(crate) static OPEN_PALETTE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
     },
 );
 
+/// `view.inspector`.
+pub(crate) static TOGGLE_INSPECTOR: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "view.inspector",
+    CommandMeta::new(
+        "Show or hide the inspector",
+        "Open the inspector, the panel on the right with everything about the selection (name, position and size, colors, layer, style), or close it.",
+    )
+    .category("View")
+    .synonyms(&["properties", "inspector", "details", "eigenschaften"])
+    .icon("sliders-horizontal"),
+    |cx, _args| {
+        cx.asks.push(Ask::ToggleInspector);
+        Ok(Outcome::Done)
+    },
+);
+
 /// `view.context_menu`.
 pub(crate) static CONTEXT_MENU: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
     "view.context_menu",
@@ -150,6 +166,10 @@ pub(crate) fn shell_keymap(
         "Shift+F10",
         imaginarium_commands::CommandId::new("view.context_menu"),
     );
+    let _ = keymap.bind(
+        "Mod+I",
+        imaginarium_commands::CommandId::new("view.inspector"),
+    );
     let _ = keymap.bind("F6", imaginarium_commands::CommandId::new("view.next_area"));
     let _ = keymap.bind(
         "Shift+F6",
@@ -163,7 +183,8 @@ pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 6] = [
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 7] = [
+    &TOGGLE_INSPECTOR,
     &CONTEXT_MENU,
     &NEXT_AREA,
     &PREVIOUS_AREA,

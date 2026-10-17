@@ -24,6 +24,7 @@ use taffy::prelude::length;
 use crate::chrome::{self, Chrome, Placeholder};
 use crate::commands::{ShellCx, shell_commands, shell_keymap};
 use crate::contextbar::{self, ContextBar, Control};
+use crate::inspector::{self, Field, Inspector, Popup};
 use crate::palette::{self, Catalog, Kind, Palette, Sources};
 use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
 
@@ -78,6 +79,14 @@ pub(crate) enum Ask {
     /// Move the keys to the next area (F6) or the previous one (Shift+F6):
     /// the board, the contextual toolbar, the tool bar, the panels.
     NextArea(bool),
+    /// Open or close the inspector.
+    ToggleInspector,
+    /// An inspector field was entered.
+    InspectorField(crate::inspector::Field, String),
+    /// Open an inspector control's popover.
+    InspectorOpen(crate::inspector::Popup),
+    /// Width and height change together, or not.
+    KeepProportions,
 }
 
 /// What the contextual toolbar's state depends on.
@@ -143,6 +152,7 @@ pub struct BoardWindow {
     bar: ContextBar,
     /// What the bar's state was computed for.
     bar_key: Option<BarKey>,
+    inspector: Inspector,
     /// Holds the tool bar; laid out for where it docks.
     stage: WidgetId,
     placing: Option<Placing>,
@@ -212,9 +222,18 @@ impl BoardWindow {
             &[tools.bar],
         );
         let bar = ContextBar::new(&mut ui);
+        let inspector = Inspector::new(&mut ui);
         let root = ui.add_with_children(
             Flex::column().fill(),
-            &[board, chrome.overlay, zones, stage, bar.panel, hint],
+            &[
+                board,
+                chrome.overlay,
+                zones,
+                stage,
+                inspector.panel,
+                bar.panel,
+                hint,
+            ],
         );
         ui.set_root(root);
         let mut commands = Commands::new();
@@ -274,6 +293,7 @@ impl BoardWindow {
             palette: None,
             bar,
             bar_key: None,
+            inspector,
             stage,
             placing: None,
             zones,
@@ -421,6 +441,7 @@ impl BoardWindow {
                     .rebuild(&mut self.ui, bar_state, &keymap, &self.asks);
             }
         }
+        self.refresh_inspector();
         let area = Rect::from_origin_size((0.0, 0.0), size);
         self.ui.layout(&mut self.fonts, area);
         // A docked bar keeps clear of the corner panels, which the first
@@ -620,8 +641,185 @@ impl BoardWindow {
                 self.context_menu(at);
             }
             Ask::NextArea(forward) => self.next_area(forward),
+            Ask::ToggleInspector => {
+                let open = !self.inspector.open;
+                self.inspector.set_open(&mut self.ui, open);
+                self.refresh_inspector();
+            }
+            Ask::InspectorField(field, text) => self.inspector_field(field, &text),
+            Ask::InspectorOpen(popup) => self.open_inspector_popup(popup),
+            Ask::KeepProportions => {
+                self.inspector.keep_proportions = !self.inspector.keep_proportions;
+                self.inspector.shown = None;
+                self.refresh_inspector();
+            }
             Ask::FocusStep(forward) => self.ui.focus_next(&mut self.fonts, forward),
         }
+    }
+
+    /// Rebuilds the inspector when what it shows changed (not during a
+    /// gesture: it would follow every pointer move), keeping the keys in
+    /// the field that had them.
+    fn refresh_inspector(&mut self) {
+        if !self.inspector.open {
+            return;
+        }
+        let Some(board) = self.ui.widget::<BoardCanvas>(self.board) else {
+            return;
+        };
+        if board.is_gesturing() {
+            return;
+        }
+        let snapshot = inspector::snapshot(board, &self.board_commands);
+        if self.inspector.shown.as_ref() == Some(&snapshot) {
+            return;
+        }
+        let focused = self.ui.focused();
+        let field = self
+            .inspector
+            .fields
+            .iter()
+            .find(|(_, id)| Some(**id) == focused)
+            .map(|(field, _)| *field);
+        self.inspector
+            .rebuild(&mut self.ui, &mut self.fonts, snapshot, &self.asks);
+        if let Some(widget) = field.and_then(|field| self.inspector.fields.get(&field).copied()) {
+            self.ui.set_focus(&mut self.fonts, Some(widget));
+        }
+    }
+
+    /// Runs what an inspector field asks for.
+    fn inspector_field(&mut self, field: Field, text: &str) {
+        let Some(snapshot) = self.inspector.snapshot.clone() else {
+            return;
+        };
+        let float = |name: &str| {
+            text.trim()
+                .trim_end_matches(['%', '°'])
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|value| Args::new().with(name, imaginarium_commands::ArgValue::Float(value)))
+        };
+        let ask = match field {
+            Field::Name => Some(Ask::RunWith(
+                "board.rename",
+                Args::new().with(
+                    "name",
+                    imaginarium_commands::ArgValue::String(text.to_owned()),
+                ),
+            )),
+            Field::X | Field::Y | Field::W | Field::H | Field::Rotation => {
+                let (Some(current), [node]) = (snapshot.geometry, &snapshot.selection[..]) else {
+                    return;
+                };
+                inspector::geometry_for(field, text, current, self.inspector.keep_proportions).map(
+                    |geometry| {
+                        use imaginarium_commands::ArgValue::{Float, String};
+                        Ask::RunWith(
+                            "board.set_box",
+                            Args::new()
+                                .with("node", String(node.to_string()))
+                                .with("x", Float(geometry.x))
+                                .with("y", Float(geometry.y))
+                                .with("w", Float(geometry.w))
+                                .with("h", Float(geometry.h))
+                                .with("rotation", Float(geometry.r)),
+                        )
+                    },
+                )
+            }
+            Field::Radius => float("radius").map(|args| Ask::RunWith("style.set_radius", args)),
+            Field::StrokeWidth => {
+                float("width").map(|args| Ask::RunWith("style.set_stroke_width", args))
+            }
+            Field::TextSize => float("size").map(|args| Ask::RunWith("style.set_text_size", args)),
+            Field::FillHex => Some(Ask::BarColor("style.set_fill", text.to_owned())),
+            Field::StrokeHex => Some(Ask::BarColor("style.set_stroke", text.to_owned())),
+            Field::TextHex => Some(Ask::BarColor("style.set_text_color", text.to_owned())),
+            Field::FillOpacity => Some(Ask::BarOpacity("style.set_fill_opacity", text.to_owned())),
+        };
+        if let Some(ask) = ask {
+            self.asks.borrow_mut().push(ask);
+        }
+    }
+
+    /// Opens an inspector control's popover.
+    fn open_inspector_popup(&mut self, popup: Popup) {
+        let Some(anchor) = self.inspector.popups.get(&popup).copied() else {
+            return;
+        };
+        let Some(snapshot) = self.inspector.snapshot.clone() else {
+            return;
+        };
+        let content = match popup {
+            Popup::Type => {
+                let choices: Vec<(String, String)> = [
+                    ("rect", "Rectangle"),
+                    ("ellipse", "Ellipse"),
+                    ("diamond", "Diamond"),
+                    ("triangle", "Triangle"),
+                    ("line", "Line"),
+                ]
+                .iter()
+                .map(|(value, name)| ((*value).to_owned(), (*name).to_owned()))
+                .collect();
+                let current = snapshot.preset.clone().unwrap_or_default();
+                contextbar::choice_popover(
+                    &mut self.ui,
+                    "Shape type",
+                    "shape.set_preset",
+                    "preset",
+                    &choices,
+                    &current,
+                    &self.asks,
+                )
+            }
+            Popup::Style => {
+                let mut choices = vec![(String::new(), "No style".to_owned())];
+                choices.extend(snapshot.styles.iter().cloned());
+                let current = snapshot
+                    .style
+                    .as_ref()
+                    .map_or(String::new(), |(id, _)| id.clone());
+                contextbar::choice_popover(
+                    &mut self.ui,
+                    "Named style",
+                    "style.apply",
+                    "style",
+                    &choices,
+                    &current,
+                    &self.asks,
+                )
+            }
+            Popup::Fill | Popup::Stroke | Popup::TextColor => {
+                let (title, command, stored) = match popup {
+                    Popup::Fill => (
+                        "Fill",
+                        "style.set_fill",
+                        snapshot.fill.and_then(|fill| fill.0),
+                    ),
+                    Popup::Stroke => (
+                        "Outline",
+                        "style.set_stroke",
+                        snapshot.stroke.and_then(|stroke| stroke.0),
+                    ),
+                    _ => (
+                        "Text color",
+                        "style.set_text_color",
+                        snapshot.text.and_then(|text| text.0),
+                    ),
+                };
+                contextbar::color_popover(
+                    &mut self.ui,
+                    title,
+                    command,
+                    stored.as_deref(),
+                    &self.asks,
+                )
+            }
+        };
+        self.open_popup(content, anchor, Placement::Left);
     }
 
     /// Moves the keys to the next area, or the previous one: the board,

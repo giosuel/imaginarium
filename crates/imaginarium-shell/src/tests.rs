@@ -1103,3 +1103,141 @@ fn a_frame_with_ten_thousand_selected_stays_cheap() {
         started.elapsed() / 20
     );
 }
+
+/// Ctrl+I (⌘I on macOS).
+fn mod_i() -> Input {
+    let mac = cfg!(target_os = "macos");
+    Input::Key {
+        key: imaginarium_ui::Key::Character("i".into()),
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            ctrl: !mac,
+            meta: mac,
+            ..Modifiers::default()
+        },
+    }
+}
+
+/// Types `text` into the field a screen reader calls `label`, then Enter.
+fn enter_in(window: &mut Harness, label: &str, text: &str) {
+    let at = window.item_center(label, accesskit::Role::TextInput);
+    window.click(at);
+    // Select what is there and type over it.
+    let mac = cfg!(target_os = "macos");
+    window.input(Input::Key {
+        key: imaginarium_ui::Key::Character("a".into()),
+        text: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            ctrl: !mac,
+            meta: mac,
+            ..Modifiers::default()
+        },
+    });
+    type_text(window, text);
+    window.input(key_input(imaginarium_ui::Key::Enter, None));
+}
+
+#[test]
+fn ctrl_i_shows_the_selection_and_its_fields_change_it() {
+    let mut window = demo();
+    window.input(mod_i());
+    assert!(
+        window
+            .texts()
+            .iter()
+            .any(|text| text.starts_with("Select something"))
+    );
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    assert!(window.texts().contains(&"Rectangle".to_owned()));
+    let before = window
+        .board()
+        .document()
+        .view()
+        .node(card)
+        .unwrap()
+        .geometry()
+        .unwrap();
+    // Width, with Keep proportions on: the height follows.
+    enter_in(&mut window, "Width", "440");
+    let after = window
+        .board()
+        .document()
+        .view()
+        .node(card)
+        .unwrap()
+        .geometry()
+        .unwrap();
+    assert_eq!(after.w, 440.0);
+    assert!((after.h - before.h * 2.0).abs() < 1e-6);
+    // The keys stay in the field after the panel caught up.
+    let (ui, fonts) = window.window.ui();
+    let width = ui.find_by_label(fonts, "Width");
+    assert_eq!(ui.focused(), width);
+    // A name.
+    enter_in(&mut window, "Name", "First step");
+    assert_eq!(
+        window.board().document().view().node(card).unwrap().name(),
+        Some("First step")
+    );
+    // Another type, from its menu.
+    let at = window.item_center("Shape type", accesskit::Role::Button);
+    window.click(at);
+    let at = window.item_center("Ellipse", accesskit::Role::MenuItem);
+    window.click(at);
+    let view = window.board().document().view();
+    assert_eq!(
+        imaginarium_canvas::commands_style::preset_of(view.node(card).unwrap()),
+        "ellipse"
+    );
+    // Lock: the panel then offers Unlock.
+    let at = window.item_center("Lock", accesskit::Role::Button);
+    window.click(at);
+    assert!(
+        window
+            .board()
+            .document()
+            .view()
+            .node(card)
+            .unwrap()
+            .locked()
+    );
+    assert!(shows(&mut window, "Unlock"));
+    // Ctrl+I closes it.
+    window.input(mod_i());
+    assert!(!shows(&mut window, "Inspector"));
+}
+
+#[test]
+fn reset_to_style_takes_the_nodes_own_values_away() {
+    let mut window = demo();
+    window.input(mod_i());
+    window.click(CARD);
+    let card = window.board().selection().get_untracked()[0];
+    enter_in(&mut window, "Stroke width", "4");
+    let view = window.board().document().view();
+    assert!(!view.node(card).unwrap().style_overrides().is_empty());
+    // The panel scrolls at this height: bring the button into view.
+    {
+        let (ui, fonts) = window.window.ui();
+        let reset = ui.find_by_label(fonts, "Reset to style").unwrap();
+        ui.reveal(fonts, reset);
+    }
+    window.frame();
+    let at = window.item_center("Reset to style", accesskit::Role::Button);
+    window.click(at);
+    assert!(
+        window
+            .board()
+            .document()
+            .view()
+            .node(card)
+            .unwrap()
+            .style_overrides()
+            .is_empty()
+    );
+}

@@ -648,6 +648,71 @@ pub(crate) fn value_popover(
     crate::menu::with_keys(ui, panel, asks)
 }
 
+/// A popover choosing one of `choices` (value, name) for `command`'s
+/// string `arg` (a shape's type, a named style), the current one checked.
+pub(crate) fn choice_popover(
+    ui: &mut Ui,
+    title: &str,
+    command: &'static str,
+    arg: &'static str,
+    choices: &[(String, String)],
+    current: &str,
+    asks: &Asks,
+) -> WidgetId {
+    let rows: Vec<WidgetId> = choices
+        .iter()
+        .map(|(value, name)| {
+            let checked = value == current;
+            let check = ui.add(Icon::named(
+                "check",
+                16.0,
+                if checked {
+                    Token::AccentInk
+                } else {
+                    Token::PanelBg
+                },
+            ));
+            let text = ui.add(
+                Label::new(name.clone(), TextStyle::new(13.0))
+                    .color(Token::Text)
+                    .single_line()
+                    .grow(1.0),
+            );
+            let asks = asks.clone();
+            let value = value.clone();
+            ui.add_with_children(
+                ButtonBox::new(name.clone(), ButtonColors::quiet(), move || {
+                    let args = Args::new().with(arg, ArgValue::String(value.clone()));
+                    let mut asks = asks.borrow_mut();
+                    asks.push(Ask::CloseMenu);
+                    asks.push(Ask::RunWith(command, args));
+                })
+                .size(200.0, 32.0)
+                .padding(10.0, 10.0)
+                .gap(10.0)
+                .start()
+                .radius(7.0)
+                .keep_focus()
+                .role(Role::MenuItem)
+                .selected(move || checked),
+                &[check, text],
+            )
+        })
+        .collect();
+    let panel = ui.add_with_children(
+        Flex::column()
+            .padding(6.0, 6.0)
+            .gap(1.0)
+            .background(Token::PanelBg)
+            .border(1.0, Token::PanelBorder)
+            .radius(12.0)
+            .shadow()
+            .role(Role::Menu, title),
+        &rows,
+    );
+    crate::menu::with_keys(ui, panel, asks)
+}
+
 /// Outline widths, in points.
 pub(crate) const WIDTHS: [(f64, &str); 6] = [
     (0.0, "None"),
