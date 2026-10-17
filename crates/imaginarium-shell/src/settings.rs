@@ -663,13 +663,20 @@ impl SettingsWindow {
             children.extend(self.shortcut_rows(None));
             return children;
         }
-        let all: Vec<&'static dyn AnySetting> = self
+        let mut all: Vec<&'static dyn AnySetting> = self
             .app
             .settings()
             .borrow()
             .declarations()
             .filter(|declaration| Section::of(&declaration.meta()) == section)
             .collect();
+        // The Settings mockup's order; others after, as registered.
+        all.sort_by_key(|declaration| {
+            ORDER
+                .iter()
+                .position(|key| *key == declaration.key())
+                .unwrap_or(ORDER.len())
+        });
         // For me and This board, where a setting can have a board's value
         // and a board window was used.
         let board = self.app.active_board();
@@ -820,6 +827,9 @@ impl SettingsWindow {
     /// reset and the editor on the right; a divider above.
     fn row(&mut self, declaration: &'static dyn AnySetting) -> WidgetId {
         let key = declaration.key();
+        if key == crate::look::THEME.key() {
+            return self.theme_row(declaration);
+        }
         let meta = declaration.meta();
         let (value, modified) = self.current(declaration);
         let title = self.ui.add(
@@ -887,11 +897,140 @@ impl SettingsWindow {
         self.ui.add_with_children(Flex::column(), &[line, row])
     }
 
+    /// The theme's row, as the Settings mockup draws it: its text, then
+    /// the four cards (System, Light, Dark; High contrast comes with its
+    /// own design).
+    fn theme_row(&mut self, declaration: &'static dyn AnySetting) -> WidgetId {
+        let key = declaration.key();
+        let meta = declaration.meta();
+        let (value, modified) = self.current(declaration);
+        let title = self.ui.add(
+            Label::new(meta.title, TextStyle::new(14.0).weight(600.0))
+                .color(Token::Text)
+                .single_line(),
+        );
+        let mut title_row = vec![title];
+        if modified {
+            title_row.push(badge(&mut self.ui, "Changed"));
+        }
+        let title_row = self.ui.add_with_children(Flex::row().gap(8.0), &title_row);
+        let description = self
+            .ui
+            .add(Label::new(meta.description, TextStyle::new(13.0)).color(Token::TextMuted));
+        let text = self
+            .ui
+            .add_with_children(Flex::column().gap(3.0).grow(1.0), &[title_row, description]);
+        let mut top = vec![text];
+        if modified {
+            let asks = self.asks.clone();
+            top.push(
+                IconButton::new("rotate-ccw", format!("Reset {}", meta.title), move || {
+                    asks.borrow_mut().push(Ask::Reset(key));
+                })
+                .size(28.0, 28.0, 7.0, 16.0)
+                .add_to(&mut self.ui),
+            );
+        }
+        let text = self.ui.add_with_children(Flex::row().gap(10.0), &top);
+        let current = match &value {
+            Value::Enum(id) => id.clone(),
+            _ => String::new(),
+        };
+        let mut cards = Vec::new();
+        for (id, label, look) in [
+            ("system", "System", CardLook::System),
+            ("light", "Light", CardLook::Light),
+            ("dark", "Dark", CardLook::Dark),
+        ] {
+            let chosen = current == id;
+            let asks = self.asks.clone();
+            cards.push(theme_card(
+                &mut self.ui,
+                label,
+                look,
+                chosen,
+                Some(Box::new(move || {
+                    asks.borrow_mut()
+                        .push(Ask::Set(key, Value::Enum(id.to_owned())));
+                })),
+            ));
+        }
+        cards.push(theme_card(
+            &mut self.ui,
+            "High contrast",
+            CardLook::HighContrast,
+            false,
+            None,
+        ));
+        let grid = self.ui.add_with_children(
+            Flex::row()
+                .gap(12.0)
+                .role(Role::RadioGroup, meta.title)
+                .style(|style| style.max_size.width = length(640.0)),
+            &cards,
+        );
+        let column = self.ui.add_with_children(
+            Flex::column().gap(12.0).style(|style| {
+                style.padding = padding(0.0, 0.0, 16.0, 16.0);
+            }),
+            &[text, grid],
+        );
+        let line = self
+            .ui
+            .add(Flex::row().height(1.0).background(Token::Divider));
+        self.ui.add_with_children(Flex::column(), &[line, column])
+    }
+
+    /// The accent's swatches (the Settings mockup's seven).
+    fn accent_swatches(&mut self, value: &Value) -> WidgetId {
+        use imaginarium_settings::SettingType;
+        let key = crate::look::ACCENT.key();
+        let current = crate::look::Accent::from_value(value).unwrap_or_default();
+        let dark = theme().kind() == imaginarium_ui::ThemeKind::Dark;
+        let swatches: Vec<WidgetId> =
+            <crate::look::Accent as imaginarium_settings::SettingEnum>::VARIANTS
+                .iter()
+                .map(|variant| {
+                    let accent = variant.value;
+                    let color = if dark {
+                        accent.dark_swatch()
+                    } else {
+                        accent.color()
+                    };
+                    let asks = self.asks.clone();
+                    let id = variant.id;
+                    self.ui.add(
+                        Swatch::new(Some(color), variant.label, move || {
+                            asks.borrow_mut()
+                                .push(Ask::Set(key, Value::Enum(id.to_owned())));
+                        })
+                        .shape(imaginarium_ui::SwatchShape::Dot)
+                        .size(26.0)
+                        .selected(accent == current),
+                    )
+                })
+                .collect();
+        self.ui.add_with_children(
+            Flex::row()
+                .gap(10.0)
+                .align_center()
+                .role(Role::RadioGroup, crate::look::ACCENT.meta().title),
+            &swatches,
+        )
+    }
+
     /// The control that edits `declaration`, chosen by its kind.
     fn editor(&mut self, declaration: &'static dyn AnySetting, value: Value) -> WidgetId {
         let key = declaration.key();
         let meta = declaration.meta();
         let asks = self.asks.clone();
+        if key == crate::look::ACCENT.key() {
+            return self.accent_swatches(&value);
+        }
+        // The mockup's dropdown, though it has only three choices.
+        if key == crate::look::REDUCE_MOTION.key() {
+            return self.dropdown_for(declaration, &value);
+        }
         match (declaration.kind(), &value) {
             (ValueKind::Bool, Value::Bool(on)) => {
                 let on = *on;
@@ -1105,6 +1244,205 @@ fn padding(left: f32, right: f32, top: f32, bottom: f32) -> taffy::Rect<taffy::L
         right: length(right),
         top: length(top),
         bottom: length(bottom),
+    }
+}
+
+/// The order of the Appearance section, as the Settings mockup has it.
+const ORDER: &[&str] = &[
+    "ui.theme",
+    "ui.accent",
+    "board.background",
+    "ui.reduce_motion",
+    "ui.scale",
+    "ui.toolbar.position",
+];
+
+/// What a theme card's picture shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardLook {
+    System,
+    Light,
+    Dark,
+    HighContrast,
+}
+
+/// A theme card: its picture (the Settings mockup's), ringed in the accent
+/// when chosen, then its name. Without an action it is disabled, saying
+/// what's coming (High contrast).
+fn theme_card(
+    ui: &mut Ui,
+    label: &str,
+    look: CardLook,
+    chosen: bool,
+    action: Option<Box<dyn FnMut()>>,
+) -> WidgetId {
+    let picture = ui.add(ThemePicture { look, chosen });
+    let weight = if chosen { 600.0 } else { 500.0 };
+    let name = ui.add(
+        Label::new(label, TextStyle::new(13.0).weight(weight))
+            .color(if chosen {
+                Token::Text
+            } else {
+                Token::TextSecondary
+            })
+            .single_line(),
+    );
+    let content = ui.add_with_children(
+        Flex::column().gap(8.0).grow(1.0).style(|style| {
+            style.min_size.width = length(0.0);
+        }),
+        &[picture, name],
+    );
+    let enabled = action.is_some();
+    let mut action = action;
+    let mut card = imaginarium_ui::ButtonBox::new(
+        label,
+        imaginarium_ui::ButtonColors {
+            background: Token::PanelBg.into(),
+            ..imaginarium_ui::ButtonColors::quiet()
+        },
+        move || {
+            if let Some(action) = &mut action {
+                action();
+            }
+        },
+    )
+    .padding(0.0, 0.0)
+    .radius(10.0)
+    .grow(1.0)
+    .selected(move || chosen)
+    .selected_fill(Token::PanelBg)
+    .disabled(!enabled);
+    if !enabled {
+        card = card.tooltip(
+            "High contrast comes with its own design, in a later preview",
+            Placement::Below,
+        );
+    }
+    let card = card.add_to(ui, &[content]);
+    ui.add_with_children(
+        Flex::column().grow(1.0).style(|style| {
+            style.flex_basis = length(0.0);
+            style.min_size.width = length(0.0);
+        }),
+        &[card],
+    )
+}
+
+/// A theme card's picture: the Settings mockup's sketch of each theme
+/// (fixed colors: it shows the theme, not the current one).
+struct ThemePicture {
+    look: CardLook,
+    chosen: bool,
+}
+
+impl imaginarium_ui::Widget for ThemePicture {
+    fn style(&self) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::percent(1.0),
+                height: length(76.0),
+            },
+            ..taffy::Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut imaginarium_ui::Cx<'_>, scene: &mut imaginarium_render::Scene) {
+        use imaginarium_render::kurbo::{Ellipse, Rect as KRect, RoundedRect, Shape, Stroke};
+        let hex = |hex: u32| {
+            let [_, r, g, b] = hex.to_be_bytes();
+            imaginarium_render::peniko::Color::from_rgb8(r, g, b)
+        };
+        let bounds = cx.bounds();
+        let card = RoundedRect::from_rect(bounds, 10.0);
+        let at = |x: f64, y: f64, w: f64, h: f64| {
+            KRect::new(
+                bounds.x0 + x,
+                bounds.y0 + y,
+                bounds.x0 + x + w,
+                bounds.y0 + y + h,
+            )
+        };
+        scene.push_clip(&card);
+        let (light, dark) = (hex(0xfcfcfd), hex(0x141416));
+        match self.look {
+            CardLook::System => {
+                scene.fill(
+                    &KRect::new(bounds.x0, bounds.y0, bounds.center().x, bounds.y1),
+                    light,
+                );
+                scene.fill(
+                    &KRect::new(bounds.center().x, bounds.y0, bounds.x1, bounds.y1),
+                    dark,
+                );
+            }
+            CardLook::Light => scene.fill(&card, light),
+            CardLook::Dark => scene.fill(&card, dark),
+            CardLook::HighContrast => scene.fill(&card, hex(0x000000)),
+        }
+        let block = |scene: &mut imaginarium_render::Scene,
+                     shape: &dyn Fn() -> imaginarium_render::kurbo::BezPath,
+                     fill: u32,
+                     line: u32,
+                     width: f64| {
+            let path = shape();
+            scene.fill(&path, hex(fill));
+            scene.stroke_with(&path, &Stroke::new(width), hex(line));
+        };
+        // The pill at the top left.
+        let pill = || RoundedRect::from_rect(at(12.0, 12.0, 44.0, 10.0), 4.0).to_path(0.1);
+        let card_shape = || RoundedRect::from_rect(at(24.0, 34.0, 40.0, 22.0), 5.0).to_path(0.1);
+        let dot = || Ellipse::from_rect(at(76.0, 38.0, 26.0, 18.0)).to_path(0.1);
+        match self.look {
+            CardLook::System => {
+                block(scene, &pill, 0xffffff, 0xe4e4e7, 1.0);
+                block(scene, &card_shape, 0xe0e7ff, 0x1e293b, 1.0);
+                let right = || {
+                    RoundedRect::from_rect(
+                        KRect::new(
+                            bounds.x1 - 48.0,
+                            bounds.y0 + 34.0,
+                            bounds.x1 - 18.0,
+                            bounds.y0 + 56.0,
+                        ),
+                        5.0,
+                    )
+                    .to_path(0.1)
+                };
+                block(scene, &right, 0x2b3163, 0xc4c4cc, 1.0);
+            }
+            CardLook::Light => {
+                block(scene, &pill, 0xffffff, 0xe4e4e7, 1.0);
+                block(scene, &card_shape, 0xe0e7ff, 0x1e293b, 1.0);
+                block(scene, &dot, 0xdcfce7, 0x1e293b, 1.0);
+            }
+            CardLook::Dark => {
+                block(scene, &pill, 0x1e1e22, 0x2e2e35, 1.0);
+                block(scene, &card_shape, 0x2b3163, 0xc4c4cc, 1.0);
+                block(scene, &dot, 0x163a26, 0xc4c4cc, 1.0);
+            }
+            CardLook::HighContrast => {
+                block(scene, &pill, 0x000000, 0xffffff, 1.5);
+                block(scene, &card_shape, 0x000000, 0xffd60a, 2.0);
+                block(scene, &dot, 0x000000, 0xffffff, 2.0);
+            }
+        }
+        scene.pop();
+        // Chosen: ringed in the accent; else a hairline.
+        let theme = theme();
+        if self.chosen {
+            scene.stroke_with(
+                &RoundedRect::from_rect(bounds.inflate(1.0, 1.0), 11.0).to_path(0.1),
+                &Stroke::new(2.0),
+                theme.color(Token::AccentInk),
+            );
+        } else {
+            scene.stroke_with(
+                &RoundedRect::from_rect(bounds.inset(-0.5), 9.5).to_path(0.1),
+                &Stroke::new(1.0),
+                hex(0xe4e4e7),
+            );
+        }
     }
 }
 

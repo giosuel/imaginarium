@@ -2137,6 +2137,72 @@ mod tests {
     }
 
     #[test]
+    fn appearance_has_the_theme_cards_and_accents_in_the_mockups_order() {
+        use imaginarium_ui::ThemeKind;
+        let app = app();
+        crate::look::follow(&mut app.settings().borrow_mut());
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        // Theme, then Accent color, then the board's background.
+        let rows: Vec<String> = {
+            let (ui, fonts) = window.ui();
+            let mut tree = imaginarium_ui::AccessTree::default();
+            ui.access(fonts, &mut tree);
+            tree.nodes()
+                .iter()
+                .filter_map(|(_, node)| node.label().map(str::to_owned))
+                .filter(|label| {
+                    ["Theme", "Accent color", "Board background"].contains(&label.as_str())
+                })
+                .collect()
+        };
+        assert_eq!(rows, ["Theme", "Accent color", "Board background"]);
+        // A card picks the theme, which switches at once.
+        press(&mut window, "Light");
+        assert_eq!(
+            app.settings().borrow().get(&crate::look::THEME).unwrap(),
+            crate::look::ThemeSetting::Light
+        );
+        assert_eq!(imaginarium_ui::theme().kind(), ThemeKind::Light);
+        // Changed: its reset puts it back.
+        settings_frame(&mut window);
+        press(&mut window, "Reset Theme");
+        assert_eq!(
+            app.settings().borrow().get(&crate::look::THEME).unwrap(),
+            crate::look::ThemeSetting::System
+        );
+        // High contrast is coming: its card doesn't pick anything.
+        settings_frame(&mut window);
+        press(&mut window, "High contrast");
+        assert_eq!(
+            app.settings().borrow().get(&crate::look::THEME).unwrap(),
+            crate::look::ThemeSetting::System
+        );
+        // A swatch picks the accent; the theme takes it.
+        press(&mut window, "Teal");
+        assert_eq!(
+            app.settings().borrow().get(&crate::look::ACCENT).unwrap(),
+            crate::look::Accent::Teal
+        );
+        assert_eq!(
+            imaginarium_ui::theme().color(imaginarium_ui::Token::Accent),
+            crate::look::Accent::Teal.color()
+        );
+        // Reduce motion is a dropdown, as in the mockup.
+        assert!(has(&mut window, "Reduce motion"));
+        press(&mut window, "Reduce motion");
+        settings_frame(&mut window);
+        press(&mut window, "On");
+        assert!(imaginarium_ui::animation::reduce_motion());
+        imaginarium_ui::appearance::set_appearance(imaginarium_ui::appearance::Appearance {
+            theme: imaginarium_ui::appearance::ThemeChoice::Dark,
+            accent: imaginarium_ui::DEFAULT_ACCENT,
+            motion: imaginarium_ui::appearance::MotionChoice::Full,
+        });
+    }
+
+    #[test]
     fn the_board_background_is_a_segmented_control_in_appearance() {
         let app = app();
         let mut window = app.settings_window().unwrap();
