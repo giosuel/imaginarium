@@ -11,10 +11,10 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.6 part 4, closing a board with unsaved changes**
-  (below). M3.6 parts 1 to 3 are done (2026-10-17): saving every change
-  into a board's file, crash recovery for untitled boards, the open and
-  save dialogs. M3.5 is
+- **Next step:** **M3.6 part 5, recent boards** (below). M3.6 parts 1 to
+  4 are done (2026-10-17): saving every change into a board's file, crash
+  recovery for untitled boards, the open and save dialogs, the close
+  dialog. M3.5 is
   done (2026-10-17), in four stacked parts, each reviewed
   by a fresh agent: the settings file
   (https://github.com/giosuel/imaginarium/pull/61), the Settings window
@@ -1139,7 +1139,9 @@ What M3 builds on:
   - [x] **part 3, the open and save dialogs** (2026-10-17, `shell.md`
     §3.1 "As built"): Open…, Save…, Rename or move… (moving the file),
     Save a copy…, the main menu; `rfd` on threads of their own;
-  - part 4, closing a board with unsaved changes (the SaveClose mockup);
+  - [x] **part 4, closing a board with unsaved changes** (2026-10-17,
+    `shell.md` §3.9 "As built"): the SaveClose dialog for untitled boards
+    with work and boards whose file fails;
   - part 5, recent boards in the start window, Open another board…,
     dropping a file;
   The plan, as first written:

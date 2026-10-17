@@ -428,6 +428,18 @@ with unsaved changes** works as in any other program (owner, 2026-10-16):
 Since every change to a saved board is in its file, only untitled boards
 (and boards whose save failed) ask.
 
+**As built (M3.6 part 4).** The close button and `Ctrl+W` ask (the
+gallery's dialog, as the SaveClose mockup draws it, over a 22 % dim)
+when closing would lose work: an untitled board with something in it
+(or a change undone, as other apps ask), or a board whose file fails
+(then the text says why). An empty untitled board and a saved board
+close at once. The keys start on **Save…**, so Enter keeps the work;
+Esc and **Cancel** keep the window. **Don't save** closes it and its
+recovery file goes. **Save…** is Save… (part 3); the window closes once
+the board is in its place, and stays if the save dialog is cancelled or
+the save fails. A board whose file fails is written fresh in the new
+place (its old file lacks the last changes).
+
 ## 4. The start window
 
 960 × 600, opened at startup (setting `startup.show_start_window`) and
