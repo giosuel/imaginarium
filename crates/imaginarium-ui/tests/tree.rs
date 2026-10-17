@@ -28,6 +28,7 @@ fn colors() -> ButtonColors {
         pressed: Color::WHITE.into(),
         text: Color::BLACK.into(),
         focus: Color::BLACK.into(),
+        border: None,
     }
 }
 

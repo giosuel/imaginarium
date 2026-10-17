@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use accesskit::{Action, ActionRequest, Node, NodeId, Role};
 use imaginarium_render::Scene;
-use imaginarium_render::kurbo::{Point, Rect, RoundedRect, Size, Vec2};
+use imaginarium_render::kurbo::{
+    Affine, BezPath, Cap, Join, Point, Rect, RoundedRect, Size, Stroke, Vec2,
+};
 use imaginarium_render::peniko::Color;
 use imaginarium_text::{Fonts, TextBlock, TextStyle};
 use taffy::prelude::{FlexDirection, length, percent};
@@ -225,6 +227,9 @@ pub struct Label {
     /// The text, the width and the color it was laid out for.
     block: Option<(String, Option<f32>, Color, TextBlock)>,
     layout: Style,
+    /// Never wraps (a status line); otherwise it wraps down to its
+    /// longest word when its box gets narrow, as text in CSS does.
+    single_line: bool,
 }
 
 impl Label {
@@ -236,7 +241,22 @@ impl Label {
             color: Paint::Token(crate::theme::Token::Text),
             block: None,
             layout: Style::default(),
+            single_line: false,
         }
+    }
+
+    /// Keeps the text on one line, however narrow the box (its parent
+    /// clips what doesn't fit).
+    pub fn single_line(mut self) -> Self {
+        self.single_line = true;
+        self
+    }
+
+    /// See [`Label::single_line`], for labels made by [`label`]. Change it
+    /// through [`Ui::widget_mut`], which lays the label out again.
+    pub fn set_single_line(&mut self, single_line: bool) {
+        self.single_line = single_line;
+        self.block = None;
     }
 
     /// Draws the text in `paint` (a token follows the theme).
@@ -323,6 +343,7 @@ pub fn label(
         color: color.into(),
         block: None,
         layout: Style::default(),
+        single_line: false,
     });
     ui.watch(id, true, move || {
         text();
@@ -341,17 +362,26 @@ impl Widget for Label {
         known: taffy::Size<Option<f32>>,
         available: taffy::Size<AvailableSpace>,
     ) -> Size {
-        let width = known.width.or(match available.width {
-            AvailableSpace::Definite(width) => Some(width),
-            _ => None,
-        });
+        // Asked for its smallest width, text breaks at every chance, so
+        // its longest word decides (as in CSS); otherwise it fills the
+        // width offered, or stays on one line.
+        let width = if self.single_line {
+            None
+        } else {
+            known.width.or(match available.width {
+                AvailableSpace::Definite(width) => Some(width),
+                AvailableSpace::MinContent => Some(0.0),
+                AvailableSpace::MaxContent => None,
+            })
+        };
         let size = self.block(cx, width).size();
         Size::new(size.width.ceil(), size.height.ceil())
     }
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
-        let block = self.block(cx, Some(bounds.width() as f32 + 0.5));
+        let width = (!self.single_line).then_some(bounds.width() as f32 + 0.5);
+        let block = self.block(cx, width);
         block.paint(scene, bounds.origin(), true);
     }
 
@@ -376,6 +406,8 @@ pub struct ButtonColors {
     pub text: Paint,
     /// The focus ring.
     pub focus: Paint,
+    /// A 1 px outline, if any (secondary buttons).
+    pub border: Option<Paint>,
 }
 
 impl ButtonColors {
@@ -388,6 +420,23 @@ impl ButtonColors {
             pressed: Token::AccentPressed.into(),
             text: Token::OnAccent.into(),
             focus: Token::AccentInk.into(),
+            border: None,
+        }
+    }
+
+    /// A secondary button: outlined on the panel (a dialog's Cancel).
+    pub fn secondary() -> Self {
+        Self {
+            border: Some(crate::theme::Token::ControlBorder.into()),
+            ..Self::quiet()
+        }
+    }
+
+    /// A destructive action without a fill: red text (Don't save, Delete).
+    pub fn danger() -> Self {
+        Self {
+            text: crate::theme::Token::Danger.into(),
+            ..Self::quiet()
         }
     }
 
@@ -401,6 +450,7 @@ impl ButtonColors {
             pressed: Token::ControlActive.into(),
             text: Token::Text.into(),
             focus: Token::AccentInk.into(),
+            border: None,
         }
     }
 }
@@ -411,7 +461,10 @@ pub struct Button {
     action: Box<dyn FnMut()>,
     colors: ButtonColors,
     pressed: bool,
+    /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
+    tone: crate::animation::Transition,
     padding: (f64, f64),
+    min_height: f64,
 }
 
 impl Button {
@@ -427,8 +480,23 @@ impl Button {
             action: Box::new(action),
             colors,
             pressed: false,
+            tone: crate::animation::Transition::new(0.0),
             padding: (12.0, 6.0),
+            min_height: 0.0,
         }
+    }
+
+    /// Space around the text: horizontal and vertical.
+    pub fn padding(mut self, horizontal: f64, vertical: f64) -> Self {
+        self.padding = (horizontal, vertical);
+        self
+    }
+
+    /// At least this tall (the text stays centered), e.g. 36 for dialog
+    /// buttons.
+    pub fn min_height(mut self, height: f64) -> Self {
+        self.min_height = height;
+        self
     }
 }
 
@@ -437,6 +505,21 @@ impl Button {
     /// The color the label was last shaped in.
     pub(crate) fn label_color(&self) -> Option<Color> {
         self.label.shaped_color()
+    }
+}
+
+impl Button {
+    /// Heads the background for its state.
+    fn retone(&mut self, hovered: bool) {
+        use crate::animation::{Easing, durations};
+        let target = if self.pressed {
+            2.0
+        } else if hovered {
+            1.0
+        } else {
+            0.0
+        };
+        self.tone.to(target, durations::HOVER, Easing::EaseOut);
     }
 }
 
@@ -450,32 +533,45 @@ impl Widget for Button {
         let text = self.label.block(cx, None).size();
         Size::new(
             (text.width + 2.0 * self.padding.0).ceil(),
-            (text.height + 2.0 * self.padding.1).ceil(),
+            (text.height + 2.0 * self.padding.1)
+                .ceil()
+                .max(self.min_height),
         )
     }
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
         let bounds = cx.bounds();
         let theme = theme();
-        let background = if self.pressed {
-            self.colors.pressed
-        } else if cx.is_hovered() {
-            self.colors.hover
+        // The background fades between rest, hover and press.
+        let tone = self.tone.value();
+        let (rest, hover, pressed) = (
+            self.colors.background.resolve(&theme),
+            self.colors.hover.resolve(&theme),
+            self.colors.pressed.resolve(&theme),
+        );
+        let background = if tone <= 1.0 {
+            crate::theme::mix(rest, hover, tone as f32)
         } else {
-            self.colors.background
+            crate::theme::mix(hover, pressed, (tone - 1.0) as f32)
         };
         let radius = theme.control_radius;
         let shape = RoundedRect::from_rect(bounds, radius);
-        scene.fill(&shape, background.resolve(&theme));
-        if cx.is_focused() {
+        scene.fill(&shape, background);
+        if let Some(border) = self.colors.border {
+            let inset = RoundedRect::from_rect(bounds.inset(-0.5), radius - 0.5);
+            scene.stroke(&inset, 1.0, border.resolve(&theme));
+        }
+        // The ring shows where the keyboard is, not where a click landed.
+        if cx.is_focus_visible() {
             scene.stroke(
                 &RoundedRect::from_rect(bounds.inflate(1.5, 1.5), radius + 1.5),
                 2.0,
                 self.colors.focus.resolve(&theme),
             );
         }
-        let (px, py) = self.padding;
-        let origin = Point::new(bounds.x0 + px, bounds.y0 + py);
+        let (px, _) = self.padding;
+        let text = self.label.block(cx, None).size();
+        let origin = Point::new(bounds.x0 + px, bounds.center().y - text.height / 2.0);
         self.label.block(cx, None).paint(scene, origin, true);
     }
 
@@ -496,6 +592,7 @@ impl Widget for Button {
                     }
                     self.pressed = false;
                 }
+                self.retone(cx.is_hovered() && inside);
                 cx.request_paint();
                 true
             }
@@ -523,7 +620,17 @@ impl Widget for Button {
         cx.request_paint();
     }
 
-    fn hover_changed(&mut self, cx: &mut Cx<'_>, _hovered: bool) {
+    fn hover_changed(&mut self, cx: &mut Cx<'_>, hovered: bool) {
+        self.retone(hovered);
+        cx.request_paint();
+    }
+
+    fn wake_at(&self) -> Option<Instant> {
+        self.tone.wake_at()
+    }
+
+    fn wake(&mut self, cx: &mut Cx<'_>, _now: Instant) {
+        self.tone.advance();
         cx.request_paint();
     }
 
@@ -761,5 +868,89 @@ impl Widget for TextInput {
             cx.request_paint();
         }
         response.handled
+    }
+}
+
+/// A line icon: SVG path data on Lucide's 24-unit grid, stroked with
+/// round ends at the theme's icon weight and scaled to `size`.
+pub struct Icon {
+    paths: Vec<BezPath>,
+    size: f64,
+    paint: Paint,
+    label: Option<String>,
+}
+
+impl Icon {
+    /// An icon from its paths' `d` strings (circles and rectangles as paths,
+    /// as `cargo xtask icons` writes them). A path that doesn't parse is
+    /// left out.
+    pub fn new(paths: &[&str], size: f64, paint: impl Into<Paint>) -> Self {
+        Self {
+            paths: paths
+                .iter()
+                .filter_map(|data| BezPath::from_svg(data).ok())
+                .collect(),
+            size,
+            paint: paint.into(),
+            label: None,
+        }
+    }
+
+    /// A vendored Lucide icon by name (`"hand"`, `"trash"`; the list is
+    /// `src/icons/icons.txt`), for names written in the code. An unknown
+    /// name panics in debug builds and tests, so a typo shows at once, and
+    /// draws nothing in a release build. For names that arrive at run time
+    /// (add-ons, settings), use [`Icon::try_named`].
+    pub fn named(name: &str, size: f64, paint: impl Into<Paint>) -> Self {
+        let paths = crate::icons::icon_paths(name);
+        debug_assert!(paths.is_some(), "the icon `{name}` isn't vendored");
+        Self::new(paths.unwrap_or(&[]), size, paint)
+    }
+
+    /// The vendored icon `name`, or `None` when there is none.
+    pub fn try_named(name: &str, size: f64, paint: impl Into<Paint>) -> Option<Self> {
+        let paths = crate::icons::icon_paths(name)?;
+        Some(Self::new(paths, size, paint))
+    }
+
+    /// Names it for screen readers (otherwise it is decoration).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+impl Widget for Icon {
+    fn style(&self) -> Style {
+        Style {
+            size: taffy::Size {
+                width: length(self.size as f32),
+                height: length(self.size as f32),
+            },
+            flex_shrink: 0.0,
+            ..Style::default()
+        }
+    }
+
+    fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
+        let bounds = cx.bounds();
+        let scale = self.size / 24.0;
+        let transform = Affine::translate(bounds.origin().to_vec2()) * Affine::scale(scale);
+        // 1.75 units of 24, as the mockups draw them, at any size.
+        let stroke = Stroke::new(1.75 * scale)
+            .with_caps(Cap::Round)
+            .with_join(Join::Round);
+        let color = self.paint.resolve(&theme());
+        for path in &self.paths {
+            scene.stroke_with(&(transform * path.clone()), &stroke, color);
+        }
+    }
+
+    fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
+        let label = self.label.clone()?;
+        let mut node = Node::new(Role::Image);
+        node.set_label(label);
+        node.set_bounds(access_rect(cx.bounds()));
+        Some(node)
     }
 }

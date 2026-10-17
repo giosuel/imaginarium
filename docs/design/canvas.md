@@ -1,6 +1,6 @@
 # Canvas: the document on the board
 
-Status: **Draft** (M3.0). Crate: `imaginarium-canvas` (new in M3.2), between
+Status: **Implemented** (M3.2; designed in M3.0). Crate: `imaginarium-canvas` (new in M3.2), between
 the model (`imaginarium-model`) and the tile canvas (`imaginarium-render`,
 `rendering.md`). The window around it is `shell.md`.
 
@@ -33,6 +33,9 @@ transaction.
 - **Display lists** (`rendering.md` §3), per kind:
   - `shape`: the outline from `shape_path(node)` (ADR-0021) in box space,
     filled and stroked with the effective style, under the world transform;
+    its text (`t`), if any, is its label: wrapped in the box less 8 pt on
+    each side, centered (a triangle's at its centroid), 15 pt medium, as
+    in the mockups;
   - `text`: the text laid out in its box (`TextBlock`, plain in M3, rich in
     M5), cached per node and laid out again only when the text, the box
     width or the style changes;
@@ -69,6 +72,25 @@ updates only what it names:
 `Canvas::upsert` and `remove` invalidate the old and new bounds, so a
 remote change or an undo repaints only its tiles.
 
+**As built (M3.2).** `BoardCanvas::transact`, `undo`, `redo` and
+`apply_remote` queue the `ChangeSet`; the next paint or input applies it
+(laying out text needs the fonts, which they bring); several waiting
+together are merged into one and applied once, since each is applied
+against the latest view. Every visible node keeps its place (its
+world transform and the clips of its children), groups included, so a
+subtree is built again on its own under its parent. Created and moved
+subtrees get keys between their neighbours, found in the tree (the last
+item of an earlier sibling's subtree, the parent, going up) rather than
+in a walk of the board; keys start at 2^60 with gaps of 2^32, and when a
+gap still runs out every item is re-keyed, which redraws nothing
+(`Canvas::rekey`). A props change rebuilds the subtree only when it
+shows or hides it (a rename rebuilds the frame alone). Text layouts are cached by text,
+look and width, so moving a shape doesn't lay its label out again.
+Nodes using a changed style come from an index of items by style,
+inheriting styles included. A property test checks
+that any sequence of edits, undos and redos leaves the items a fresh
+build makes.
+
 **Opening** reads the nodes in bulk and builds every item before the first
 frame. The M1 note (339 ms for 10,000 nodes, mostly Loro import and
 reading key by key) is addressed in M3.2: read with
@@ -94,6 +116,15 @@ gets a ready view.
 `hit_rect(rect)` (the marquee) returns the nodes whose bounds lie fully
 inside, at the same level as the first hit.
 
+**As built (M3.2).** Candidates are the items whose bounds overlap a
+square of the tolerance around the pointer (`Canvas::items_overlapping`;
+a horizontal line's bounds are thinner than the tolerance), front to
+back. Points a frame clips away don't hit its children. Labels and text
+boxes are hit on their text too. The marquee takes each item's
+selectable unit (the outermost group not entered), and the outermost
+frame wholly inside it instead of the frame's children; a unit counts
+when its turned box lies wholly inside.
+
 ## 5. Selection and handles
 
 - **Selection** is a signal in the window's state: an ordered set of node
@@ -108,6 +139,15 @@ inside, at the same level as the first hit.
   resize and rotate as one box.
 - **Keyboard:** arrows nudge by 1 pt (Shift: 10), Esc clears, Tab moves to
   the next node in z order, Enter edits text or enters a group.
+- **As built (M3.2, selection):** `BoardCanvas::selection()` is the
+  signal; a click selects, Shift+click adds or removes, a press on empty
+  board starts a marquee (Shift keeps the selection), a double-click
+  enters a group and Esc leaves it with the group selected, then clears.
+  The hover outline and the selection's outlines (the accent, 35 %
+  toward white in the dark theme) and the marquee are drawn on top of
+  the tiles. Screen readers get the visible items (2,000 at most) below
+  the board's `Canvas` node, the last selected one focused; focusing one
+  selects it.
 
 ## 6. The editing path
 
@@ -119,7 +159,7 @@ commands as the palette, the menus and the AI, with arguments:
 | drag the selection | `board.move` (`dx`, `dy`) per pointer move | one step for the drag |
 | resize, rotate | `board.transform` (box per node) per pointer move | one step |
 | draw a shape with a tool | `board.insert_shape` (`preset`, box), then the size per move | one step |
-| type in a text box | `text.insert`, `text.delete` | merged per burst (500 ms, `UndoConfig`) |
+| type in a text box | `text.replace` (`at`, `delete`, `insert`: the changed run) | merged per burst (500 ms, `UndoConfig`) |
 | corner-radius handle | `shape.set_radius` | one step |
 
 - A **gesture** opens an undo group at the press (`begin_undo_group`) and
@@ -134,6 +174,44 @@ commands as the palette, the menus and the AI, with arguments:
 - **The command context** (`BoardCx`): the document, the selection, the
   viewport and the actor. Availability checks read the view, so the
   contextual toolbar and the palette can ask every frame cheaply.
+- **As built (M3.2, gestures):** the commands' context is the board
+  itself (`FnCommand<BoardCanvas>`); `commands::board_commands()` lists
+  `board.move` (dx, dy for the selection), `board.set_box` (one node's
+  x, y, w, h and rotation in its parent's space) and `shape.set_radius`,
+  and gestures and keys run them through a `Registry`. A press on a
+  selected node drags it once the pointer travels 3 px; the 8 handles
+  resize (Shift keeps the shape at the corners), the handle 20 px above
+  rotates around the box's center (Shift snaps to 15°), the one inside a
+  rectangle's top left corner sets its radius, and a badge shows the
+  size while resizing. Several nodes share one straight box: they move,
+  scale and turn with it. Arrows nudge by 1 pt, Shift by 10. A gesture
+  is one undo group from press to release, and its pointer moves are
+  applied once a frame, before painting, from the latest position (move
+  by the delta since the last frame; resize and rotate from where the
+  gesture started). Known gap: the model merges undo steps within
+  500 ms, so a gesture that starts right after another edit undoes
+  together with it.
+
+**As built (M3.3, the board's commands):** delete, duplicate (16 pt
+down and right, above the original, with its subtree as plain data:
+`NodeCopy`), select all (the units a click could select), order (front,
+back, one step either way, within the parent), group (two or more
+siblings, into a group where the topmost was, everything staying in
+place) and ungroup (the children take the group's place, turned by it),
+lock and unlock, undo and redo, zoom (in, out, 100 %, fit, the
+selection) and nudging, each a command without arguments. The board's
+keys go through a `Keymap` (`keys.rs`, the shortcuts of the context
+menu's mockup); Esc and Tab stay the board's own navigation.
+
+**As built (M3.3, tools):** `BoardCanvas::tool()` (a signal) and
+`set_tool`; the `tool.*` commands with the keys of `shell.md` §3.3. A
+shape or frame tool's press starts a draw gesture: once the pointer
+travels, `board.insert_shape` (or `insert_frame`) inserts it, and its box
+follows the pointer (`board.set_box`; a line's `flip` follows the drag's
+direction); a click without a drag places the tool's size (160 × 96,
+frames 480 × 320). Either is one undo step, and Select comes back. The
+text tool inserts a text box at the click and edits it. A new node goes
+into the topmost unlocked frame at its place. The hand pans.
 
 ## 7. Text on the board
 
@@ -142,6 +220,18 @@ puts a `TextField` over the text box at the board's zoom; each edit is a
 transaction (`insert_text`, `delete_text`), so the model is always the
 truth and undo merges typing. The field is the toolkit's (IME, clipboard,
 accessibility), positioned in screen space and scaled with the zoom.
+
+**As built (M3.2).** A double-click on a text box or shape, or Enter
+with one selected, edits its text (a shape's text is its label, which
+it gets when there was none). The field is drawn in the node's box
+space under the camera, so it zooms and turns with the node; pointer
+input is mapped into that space, and a press outside the field ends
+editing and does what it would do otherwise. While editing, the tiles
+draw the node without its text. Each change of the field's text becomes
+one `text.replace` with the run that differs; an undo or a remote
+change of the text shows in the field. Esc ends editing with the node
+still selected. Screen readers get the field as a text input below the
+board, focused while it edits.
 
 ## 8. Clipboard
 
@@ -158,6 +248,18 @@ and the named styles they use (by value, so a paste into another board
 keeps its look). A paste creates new ids, offsets by 16 pt when pasting
 into the same place, and is one transaction. Pasted plain text becomes a
 text box; images come with M4.
+
+**As built (M3.3).** `board.copy`, `board.cut` and `board.paste`
+(Ctrl+C, X, V). A copy's top-level nodes have their boxes in board
+coordinates, so a node copied out of a frame pastes where it was, on
+the board; the HTML holds the nodes' text as paragraphs, then the
+marked comment. The commands only note the clipboard's work; the board
+hands it over on input (`Clipboard::set_html`, and `request_marked`,
+which gives back the board's HTML when the clipboard holds it and the
+text otherwise), and the answer arrives as `Input::Paste`. The same copy
+pasted again on the same board goes 16 pt further each time. Named
+styles the target board doesn't have become local overrides with their
+effective values. Text pastes as a text box in the middle of the view.
 
 ## 9. Accessibility
 
@@ -179,7 +281,7 @@ Added to `imaginarium-canvas`'s benches (criterion, the conventions in
 - hit testing at 10,000 nodes;
 - a 1,000-node paste.
 
-## 11. Open questions
+## 11. Decided questions
 
-1. Whether frames' names belong in tiles or on top of them (they keep
-   their screen size at every zoom). Probably on top, like the selection.
+1. **Frame names are drawn on top of the tiles** (owner, 2026-10-16), at
+   the interface's size at every zoom, like the selection.
