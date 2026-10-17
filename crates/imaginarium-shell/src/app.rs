@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use imaginarium_canvas::BoardCanvas;
 use imaginarium_model::{Document, DocumentKind, ModelError};
@@ -45,6 +46,22 @@ pub struct App {
     finishing: RefCell<Vec<std::thread::JoinHandle<Option<String>>>>,
     /// Whether the settings file is saved, and a notice from reading it.
     saving: RefCell<Saving>,
+    /// Where untitled boards are kept for crash recovery (`None`: they
+    /// aren't).
+    recovery: RefCell<Option<std::path::PathBuf>>,
+    /// The boards a crashed app left there, once looked for.
+    kept: Arc<Mutex<KeptScan>>,
+}
+
+/// The search for boards a crashed app left (`App::look_for_kept_boards`).
+#[derive(Default)]
+struct KeptScan {
+    /// The search is done.
+    done: bool,
+    /// What it found, until opened.
+    boards: Vec<imaginarium_io_native::KeptBoard>,
+    /// Wakes the window that waits for it.
+    waker: Option<Box<dyn Fn() + Send>>,
 }
 
 /// A board window, as the Settings window sees it ("This board"): its
@@ -105,6 +122,20 @@ impl BoardLink {
     }
 }
 
+/// An untitled board's name.
+const UNTITLED: &str = "Untitled board";
+
+/// A kept board's name: its title, if it has one.
+fn kept_name(document: &Document) -> String {
+    document
+        .view()
+        .meta()
+        .title()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(UNTITLED)
+        .to_owned()
+}
+
 /// What the Settings window says about the settings file.
 #[derive(Default)]
 struct Saving {
@@ -131,7 +162,94 @@ impl App {
             active_board: RefCell::default(),
             finishing: RefCell::default(),
             saving: RefCell::default(),
+            recovery: RefCell::default(),
+            kept: Arc::default(),
         })
+    }
+
+    /// Keeps untitled boards in `folder` from now on, so they survive a
+    /// crash (`shell.md` §4); it is made when the first one changes.
+    pub fn keep_untitled_in(&self, folder: std::path::PathBuf) {
+        *self.recovery.borrow_mut() = Some(folder);
+    }
+
+    /// Looks, on a thread of its own, for boards an app that closed
+    /// unexpectedly left in the recovery folder; the start window offers
+    /// them. Call it once at startup, after [`App::keep_untitled_in`].
+    pub fn look_for_kept_boards(&self) {
+        let Some(folder) = self.recovery.borrow().clone() else {
+            return;
+        };
+        let scan = self.kept.clone();
+        let looked = std::thread::Builder::new()
+            .name("kept-boards".into())
+            .spawn(move || {
+                let boards = imaginarium_io_native::kept_boards(&folder);
+                if let Ok(mut scan) = scan.lock() {
+                    scan.boards = boards;
+                    scan.done = true;
+                    if let Some(wake) = &scan.waker {
+                        wake();
+                    }
+                }
+            });
+        if looked.is_err()
+            && let Ok(mut scan) = self.kept.lock()
+        {
+            scan.done = true;
+        }
+    }
+
+    /// Wakes the caller's window (`wake` comes from
+    /// `imaginarium_ui::window_waker`) when the search for kept boards is
+    /// done; at once if it is.
+    pub(crate) fn when_kept_boards_found(&self, wake: Box<dyn Fn() + Send>) {
+        if let Ok(mut scan) = self.kept.lock() {
+            if scan.done {
+                wake();
+            }
+            scan.waker = Some(wake);
+        }
+    }
+
+    /// The boards found after a crash and not opened yet: how many, and
+    /// the first one's name.
+    pub(crate) fn kept_boards(&self) -> Option<(usize, String)> {
+        let scan = self.kept.lock().ok()?;
+        let first = scan.boards.first()?;
+        Some((scan.boards.len(), kept_name(&first.opened.document)))
+    }
+
+    /// Windows on the boards found after a crash, which go on being kept
+    /// (they are still untitled).
+    pub(crate) fn open_kept_boards(self: &Rc<Self>) -> Vec<BoardWindow> {
+        let boards = self
+            .kept
+            .lock()
+            .map(|mut scan| std::mem::take(&mut scan.boards))
+            .unwrap_or_default();
+        boards
+            .into_iter()
+            .map(|kept| {
+                let name = kept_name(&kept.opened.document);
+                self.board_window(kept.opened.document, &name)
+                    .kept_from(kept.path, *kept.session)
+            })
+            .collect()
+    }
+
+    /// Where the next untitled board is kept: a name no other board, or
+    /// another running app, has.
+    fn next_kept_path(&self) -> Option<std::path::PathBuf> {
+        thread_local! {
+            static NEXT: Cell<u64> = const { Cell::new(0) };
+        }
+        let folder = self.recovery.borrow().clone()?;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        let n = NEXT.with(|next| next.replace(next.get() + 1));
+        Some(folder.join(format!("untitled-{at}-{}-{n}.imag", std::process::id())))
     }
 
     /// Tells the Settings window how saving goes (`status`), and what
@@ -219,10 +337,15 @@ impl App {
         StartWindow::new(self.clone())
     }
 
-    /// A window on a new, untitled board.
+    /// A window on a new, untitled board, kept for crash recovery (when
+    /// the app keeps them: [`App::keep_untitled_in`]).
     pub fn new_board(self: &Rc<Self>) -> Result<BoardWindow, ModelError> {
         let document = Document::new(DocumentKind::Board)?;
-        Ok(self.board_window(document, "Untitled board"))
+        let window = self.board_window(document, UNTITLED);
+        Ok(match self.next_kept_path() {
+            Some(path) => window.kept_in(path, &format!("Imaginarium {}", self.version)),
+            None => window,
+        })
     }
 
     /// A window on the board in the file at `path`, saving every change
@@ -1000,6 +1123,149 @@ mod tests {
             .map(|setting| setting.key())
             .collect();
         assert_eq!(declared, taken);
+    }
+
+    /// A fresh folder under the workspace's `target/` (never `/tmp`).
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch")
+            .join(format!("shell-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Waits until `done`, at most 10 s.
+    fn until(mut done: impl FnMut() -> bool) {
+        let start = std::time::Instant::now();
+        while !done() && start.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Leaves a board in `folder` as a crashed app would.
+    fn leave_board(folder: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = folder.join(name);
+        let mut document = Document::new(DocumentKind::Board).unwrap();
+        let snapshot = document.export_snapshot().unwrap();
+        let autosave =
+            imaginarium_io_native::Autosave::create(path.clone(), &snapshot, "tests".into(), || {});
+        let before = document.version();
+        document
+            .transact(&imaginarium_model::Actor::User, |t| {
+                t.create_node(
+                    imaginarium_model::Parent::Root,
+                    None,
+                    &imaginarium_model::NodeKind::Frame,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        autosave.update(document.export_updates_since(&before).unwrap());
+        assert!(autosave.finish().is_none());
+        path
+    }
+
+    #[test]
+    fn an_untitled_board_is_kept_until_it_closes() {
+        let folder = scratch("untitled").join("recovery");
+        let app = app();
+        app.keep_untitled_in(folder.clone());
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        // Not saved anywhere of its own, and nothing kept while it's empty.
+        assert!(status_named(&mut board, "Save…"));
+        assert_eq!(board.path(), None);
+        let kept = board.kept_path().unwrap().to_owned();
+        assert!(kept.starts_with(&folder));
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        board_draw(&mut board);
+        // The change is due at the latest 2 s later.
+        until(|| {
+            let now = std::time::Instant::now();
+            if board.wake_at().is_some_and(|at| at <= now) {
+                board.wake(now);
+            }
+            kept.exists()
+                && imaginarium_io_native::open_path(&kept, imaginarium_io_native::Credentials::None)
+                    .is_ok_and(|opened| opened.document.view().node_count() == 1)
+        });
+        assert!(kept.exists());
+        assert!(status_named(&mut board, "Save…"));
+        // Closed on purpose: the file goes.
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert!(!kept.exists());
+    }
+
+    fn start_has(start: &mut StartWindow, label: &str) -> bool {
+        let (ui, fonts) = start.ui();
+        ui.find_by_label(fonts, label).is_some()
+    }
+
+    #[test]
+    fn after_a_crash_the_start_window_offers_the_kept_board() {
+        let folder = scratch("crash");
+        let left = leave_board(&folder, "untitled-1.imag");
+        let app = app();
+        app.keep_untitled_in(folder.clone());
+        app.look_for_kept_boards();
+        until(|| app.kept_boards().is_some());
+        let mut start = app.start_window();
+        frame(&mut start);
+        let notice = "Imaginarium closed unexpectedly. Untitled board was kept, with every change.";
+        assert!(start_has(&mut start, notice));
+        let (ui, fonts) = start.ui();
+        let button = ui.find_by_label(fonts, "Open it").unwrap();
+        let at = ui.bounds(button).unwrap().center();
+        for pressed in [true, false] {
+            start.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        let requests = start.take_requests();
+        // The board opens, still untitled; the start window stays.
+        assert_eq!(names(&requests), ["Open(\"Untitled board — Imaginarium\")"]);
+        frame(&mut start);
+        assert!(!start_has(&mut start, notice));
+        let Some(WindowRequest::Open(_, view)) = requests.into_iter().next() else {
+            panic!("no board");
+        };
+        drop(view);
+        // Closed on purpose: no longer kept.
+        assert!(app.wait_for_saves().is_empty());
+        assert!(!left.exists());
+    }
+
+    #[test]
+    fn several_kept_boards_are_offered_together() {
+        let folder = scratch("crash-several");
+        leave_board(&folder, "untitled-1.imag");
+        leave_board(&folder, "untitled-2.imag");
+        let app = app();
+        app.keep_untitled_in(folder.clone());
+        app.look_for_kept_boards();
+        until(|| app.kept_boards().is_some());
+        let mut start = app.start_window();
+        frame(&mut start);
+        assert!(start_has(
+            &mut start,
+            "Imaginarium closed unexpectedly. 2 boards were kept, with every change."
+        ));
+        assert!(start_has(&mut start, "Open them"));
+        // Without a crash, no notice.
+        let quiet = super::tests::app();
+        quiet.keep_untitled_in(scratch("no-crash"));
+        quiet.look_for_kept_boards();
+        let mut start = quiet.start_window();
+        frame(&mut start);
+        assert!(!start_has(&mut start, "Open it"));
     }
 
     fn status_named(board: &mut BoardWindow, name: &str) -> bool {

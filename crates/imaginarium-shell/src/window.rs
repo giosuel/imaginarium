@@ -45,9 +45,24 @@ const SAVE_AT_LATEST: std::time::Duration = std::time::Duration::from_secs(2);
 /// known.
 type SaveWaker = Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send>>>>;
 
+/// What the saving thread calls to wake the window through `waker`.
+fn wake_with(waker: &SaveWaker) -> impl Fn() + Send + Sync + 'static {
+    let waker = waker.clone();
+    move || {
+        if let Ok(waker) = waker.lock()
+            && let Some(wake) = waker.as_ref()
+        {
+            wake();
+        }
+    }
+}
+
 /// The file a board window saves into.
 struct FileLink {
     path: PathBuf,
+    /// The board is untitled: the file only keeps it for crash recovery
+    /// (it has no place of its own yet), and goes when the board closes.
+    untitled: bool,
     /// `None` once the window closed (it finishes on its own).
     autosave: Option<Autosave>,
     /// The document's version the file holds (or was sent).
@@ -409,7 +424,58 @@ impl BoardWindow {
     /// (opened on that file: [`imaginarium_io_native::Session::open`]).
     /// Changes the document has that the file doesn't (migrations on open)
     /// are saved first.
-    pub fn saved_in(mut self, path: PathBuf, session: imaginarium_io_native::Session) -> Self {
+    pub fn saved_in(self, path: PathBuf, session: imaginarium_io_native::Session) -> Self {
+        self.linked(path, session, false)
+    }
+
+    /// Keeps an untitled board in a file at `path` for crash recovery,
+    /// from its first change on (`shell.md` §4); the file is deleted when
+    /// the board closes. `created_with` names the app in the file.
+    pub fn kept_in(mut self, path: PathBuf, created_with: &str) -> Self {
+        let Some(document) = self
+            .ui
+            .widget::<BoardCanvas>(self.board)
+            .map(BoardCanvas::document)
+        else {
+            return self;
+        };
+        let Ok(snapshot) = document.export_snapshot() else {
+            return self;
+        };
+        let saved = document.version();
+        let revision = self.board_revision();
+        let waker: SaveWaker = Arc::default();
+        let autosave = Autosave::create(
+            path.clone(),
+            &snapshot,
+            created_with.to_owned(),
+            wake_with(&waker),
+        );
+        self.file = Some(FileLink {
+            path,
+            untitled: true,
+            autosave: Some(autosave),
+            saved,
+            revision,
+            unsent: None,
+            waker,
+        });
+        self.update_save_state();
+        self
+    }
+
+    /// Goes on keeping an untitled board found after a crash in its file
+    /// at `path`, through `session`.
+    pub fn kept_from(self, path: PathBuf, session: imaginarium_io_native::Session) -> Self {
+        self.linked(path, session, true)
+    }
+
+    fn linked(
+        mut self,
+        path: PathBuf,
+        session: imaginarium_io_native::Session,
+        untitled: bool,
+    ) -> Self {
         let Some(document) = self
             .ui
             .widget::<BoardCanvas>(self.board)
@@ -422,20 +488,14 @@ impl BoardWindow {
             .unwrap_or_else(|| document.version());
         let revision = self.board_revision();
         let waker: SaveWaker = Arc::default();
-        let wake = waker.clone();
         let id = imaginarium_io_native::FileId {
             path: path.clone(),
             doc_id: session.doc_id(),
         };
-        let autosave = Autosave::start(session, id, move || {
-            if let Ok(waker) = wake.lock()
-                && let Some(wake) = waker.as_ref()
-            {
-                wake();
-            }
-        });
+        let autosave = Autosave::start(session, id, wake_with(&waker));
         self.file = Some(FileLink {
             path,
+            untitled,
             autosave: Some(autosave),
             saved,
             revision,
@@ -448,9 +508,21 @@ impl BoardWindow {
         self
     }
 
-    /// The file the board is saved into, if it has one.
+    /// The file the board is saved into, if it has one (an untitled
+    /// board's recovery file isn't its place).
     pub fn path(&self) -> Option<&std::path::Path> {
-        self.file.as_ref().map(|file| file.path.as_path())
+        self.file
+            .as_ref()
+            .filter(|file| !file.untitled)
+            .map(|file| file.path.as_path())
+    }
+
+    /// The file an untitled board is kept in for crash recovery.
+    pub fn kept_path(&self) -> Option<&std::path::Path> {
+        self.file
+            .as_ref()
+            .filter(|file| file.untitled)
+            .map(|file| file.path.as_path())
     }
 
     fn board_revision(&self) -> u64 {
@@ -538,7 +610,9 @@ impl BoardWindow {
             (Some(imaginarium_model::Mode::ReadOnly(reason)), _) => {
                 chrome::SaveShown::ReadOnly(read_only_text(reason))
             }
+            // Kept for recovery, but not saved anywhere of its own.
             (_, None) => chrome::SaveShown::Draft,
+            (_, Some(file)) if file.untitled => chrome::SaveShown::Draft,
             (_, Some(file)) => match file.autosave.as_ref().map(Autosave::state) {
                 None | Some(SaveState::Saved) => chrome::SaveShown::Saved,
                 Some(SaveState::Saving(since)) if since.elapsed() >= SAVING_SHOWN_AFTER => {
@@ -583,16 +657,25 @@ impl BoardWindow {
     }
 
     /// Sends what isn't saved yet, and lets the saving thread finish on its
-    /// own (the app waits for it before it exits).
+    /// own (the app waits for it before it exits). An untitled board's
+    /// recovery file is deleted instead: it closed on purpose.
     fn finish_saving(&mut self) {
-        self.save_changes(true);
+        let untitled = self.file.as_ref().is_some_and(|file| file.untitled);
+        if !untitled {
+            self.save_changes(true);
+        }
         let Some(autosave) = self.file.as_mut().and_then(|file| file.autosave.take()) else {
             return;
         };
+        let finishing = if untitled {
+            autosave.discard_in_background()
+        } else {
+            autosave.finish_in_background()
+        };
         match &self.app {
-            Some(app) => app.finishing(autosave.finish_in_background()),
+            Some(app) => app.finishing(finishing),
             None => {
-                let _ = autosave.finish();
+                let _ = finishing.join();
             }
         }
     }

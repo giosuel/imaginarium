@@ -3,8 +3,10 @@
 //! The start window (`shell.md` §4, the Start mockups): the app's name and
 //! version, New board and Open… on the left, recent boards on the right.
 //!
-//! Open…, the recent boards and crash recovery come with files (M3.6);
-//! until then Open… is disabled and the recent list says so. The "Start
+//! After a crash, a notice on the right offers the boards that were kept
+//! (`App::look_for_kept_boards`). Open… and the recent boards come with
+//! the rest of files (M3.6); until then Open… is disabled and the recent
+//! list says so. The "Start
 //! from" templates come with M4's shape libraries, the Settings, Shortcuts
 //! and What's new links with the windows they open.
 
@@ -34,6 +36,8 @@ use crate::toolbar::shortcut;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StartAsk {
     NewBoard,
+    /// Open the boards kept after a crash.
+    OpenKept,
     /// Open Settings at this section.
     Settings(crate::settings::Section),
 }
@@ -56,6 +60,13 @@ pub struct StartWindow {
     subscription: imaginarium_settings::SubscriptionId,
     /// It asked to close (after New board).
     closing: bool,
+    /// The right side, and what it shows below the notice.
+    right: WidgetId,
+    recent: [WidgetId; 2],
+    /// The crash notice, while it shows.
+    notice: Option<WidgetId>,
+    /// It asked to be woken when the search for kept boards is done.
+    waiting_for_kept: bool,
     close_after: Option<u64>,
     frames: u64,
 }
@@ -88,13 +99,13 @@ impl StartWindow {
             }
         });
         let divider = ui.add(Flex::column().width(1.0).background(Token::Divider));
-        let recent = recent(&mut ui);
+        let (right, recent) = recent(&mut ui);
         let root = ui.add_with_children(
             Flex::row()
                 .fill()
                 .background(Token::BoardBg)
                 .style(|style| style.align_items = taffy::AlignItems::STRETCH),
-            &[side, divider, recent],
+            &[side, divider, right],
         );
         ui.set_root(root);
         // Nothing has the keys at first, so no focus ring shows (the
@@ -111,9 +122,48 @@ impl StartWindow {
             startup_changed,
             subscription,
             closing: false,
+            right,
+            recent,
+            notice: None,
+            waiting_for_kept: false,
             close_after: None,
             frames: 0,
         }
+    }
+
+    /// Shows the crash notice while there are kept boards to open, and
+    /// asks to be woken when the search for them is done.
+    fn sync_notice(&mut self) {
+        if !self.waiting_for_kept
+            && let Some(wake) = imaginarium_ui::window_waker()
+        {
+            self.app.when_kept_boards_found(Box::new(wake));
+            self.waiting_for_kept = true;
+        }
+        let kept = self.app.kept_boards();
+        if kept.is_some() == self.notice.is_some() {
+            return;
+        }
+        if let Some(notice) = self.notice.take() {
+            self.ui.remove(notice);
+        }
+        let mut children = self.recent.to_vec();
+        if let Some((count, name)) = kept {
+            let notice = notice(&mut self.ui, count, &name, &self.asks);
+            children.insert(0, notice);
+            self.notice = Some(notice);
+        }
+        self.ui.set_children(self.right, &children);
+    }
+
+    /// Opens the boards kept after a crash, each in its window. The start
+    /// window stays (for the other boards and New board).
+    pub fn open_kept_boards(&mut self) {
+        for window in self.app.open_kept_boards() {
+            self.requests
+                .push(WindowRequest::Open(window.options(), Box::new(window)));
+        }
+        self.sync_notice();
     }
 
     /// Closes the window after `frames` frames (for scripted runs).
@@ -178,6 +228,7 @@ impl StartWindow {
         for ask in asks {
             match ask {
                 StartAsk::NewBoard => self.new_board(),
+                StartAsk::OpenKept => self.open_kept_boards(),
                 StartAsk::Settings(section) => self.open_settings(section),
             }
         }
@@ -373,8 +424,67 @@ fn big_button(
     button.add_to(ui, &children)
 }
 
-/// The right side: the recent boards. None yet: files come with M3.6.
-fn recent(ui: &mut Ui) -> WidgetId {
+/// The notice after a crash (the Start mockup): which boards were kept,
+/// and a button that opens them.
+fn notice(ui: &mut Ui, count: usize, name: &str, asks: &StartAsks) -> WidgetId {
+    let icon = ui.add(Icon::named("rotate-ccw", 16.0, Token::OnNotice));
+    let lead = "Imaginarium closed unexpectedly. ";
+    let (text, bold, button) = if count == 1 {
+        (
+            format!("{lead}{name} was kept, with every change."),
+            lead.len()..lead.len() + name.len(),
+            "Open it",
+        )
+    } else {
+        let boards = format!("{count} boards");
+        (
+            format!("{lead}{boards} were kept, with every change."),
+            lead.len()..lead.len() + boards.len(),
+            "Open them",
+        )
+    };
+    let label = ui.add(
+        Label::new(text.clone(), TextStyle::new(13.0))
+            .color(Token::OnNotice)
+            .highlight(vec![bold], 700.0, Token::OnNotice)
+            .grow(1.0),
+    );
+    let caption = ui.add(
+        Label::new(button, TextStyle::new(12.0).weight(600.0))
+            .color(Token::OnNotice)
+            .single_line(),
+    );
+    let asks = asks.clone();
+    let colors = ButtonColors {
+        background: Token::PanelBg.into(),
+        text: Token::OnNotice.into(),
+        border: Some(Token::NoticeControlBorder.into()),
+        ..ButtonColors::secondary()
+    };
+    let open = ButtonBox::new(button, colors, move || {
+        asks.borrow_mut().push(StartAsk::OpenKept);
+    })
+    .height(28.0)
+    .padding(10.0, 10.0)
+    .radius(7.0)
+    .add_to(ui, &[caption]);
+    ui.add_with_children(
+        Flex::row()
+            .gap(10.0)
+            .align_center()
+            .padding(12.0, 10.0)
+            .radius(10.0)
+            .background(Token::Notice)
+            .border(1.0, Token::NoticeBorder)
+            .role(Role::Alert, text),
+        &[icon, label, open],
+    )
+}
+
+/// The right side: the recent boards (none yet: they come with M3.6 part
+/// 5), and the crash notice above them when there is one. Returns the
+/// side and what it shows below the notice.
+fn recent(ui: &mut Ui) -> (WidgetId, [WidgetId; 2]) {
     let title = ui.add(
         Label::new("Recent", TextStyle::new(15.0).weight(600.0))
             .color(Token::Text)
@@ -407,18 +517,20 @@ fn recent(ui: &mut Ui) -> WidgetId {
             .role(Role::Group, "Recent boards"),
         &[icon, empty, later],
     );
-    ui.add_with_children(
+    let side = ui.add_with_children(
         Flex::column().gap(16.0).grow(1.0).style(|style| {
             style.padding = padding(28.0, 28.0, 24.0, 20.0);
             style.min_size.width = length(0.0);
         }),
         &[title, tile],
-    )
+    );
+    (side, [title, tile])
 }
 
 impl View for StartWindow {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         self.handle_asks();
+        self.sync_notice();
         self.ui
             .layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
         self.ui.paint(&mut self.fonts, scene);
