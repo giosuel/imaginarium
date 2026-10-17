@@ -747,6 +747,7 @@ pub struct ButtonBox {
     tooltip: Option<(String, crate::layers::Placement)>,
     focus_on_click: bool,
     selected: Option<Flag>,
+    role: Role,
     action: Box<dyn FnMut()>,
     pressed: bool,
     /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
@@ -780,6 +781,7 @@ impl ButtonBox {
             tooltip: None,
             focus_on_click: true,
             selected: None,
+            role: Role::Button,
             action: Box::new(action),
             pressed: false,
             tone: crate::animation::Transition::new(0.0),
@@ -847,6 +849,13 @@ impl ButtonBox {
     /// A click leaves the focus where it was ([`Widget::focus_on_click`]).
     pub fn keep_focus(mut self) -> Self {
         self.focus_on_click = false;
+        self
+    }
+
+    /// What screen readers call it ([`Role::Button`] unless a menu's
+    /// row: [`Role::MenuItem`]).
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = role;
         self
     }
 
@@ -1011,7 +1020,7 @@ impl Widget for ButtonBox {
     }
 
     fn accessibility(&mut self, cx: &mut Cx<'_>) -> Option<Node> {
-        let mut node = Node::new(Role::Button);
+        let mut node = Node::new(self.role);
         if self.selected.as_ref().is_some_and(|selected| selected()) {
             node.set_selected(true);
         }

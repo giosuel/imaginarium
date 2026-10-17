@@ -2209,6 +2209,13 @@ impl Ui {
         })
     }
 
+    /// The widget the pointer would reach at `point` (window space), from
+    /// the top layer down, as a click there would: for a view deciding
+    /// what a right-click is about.
+    pub fn widget_at(&self, point: Point) -> Option<WidgetId> {
+        self.hit_top(point)
+    }
+
     /// The widget a screen reader knows as `label`: the first in the tree
     /// whose own node has that name. For scripted runs and tests of whole
     /// windows, which find controls the way people with a screen reader
