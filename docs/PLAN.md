@@ -521,6 +521,8 @@ Decided (2026-10-16):
   set; M3.5 has the settings window and the board background.
 - **M3.6, files, comes next** (2026-10-17): "3) yes sounds good, go
   ahead".
+- **ADR-0022 is accepted** (2026-10-17): "Yes go ahead". A setting can
+  be per board (`.per_document()`), with the board's value in its file.
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.

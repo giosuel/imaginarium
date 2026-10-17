@@ -1,6 +1,6 @@
 # 0022. Settings a document can override
 
-- Status: Proposed (M3.5, 2026-10-17; for the owner to accept with its PR)
+- Status: Accepted (owner, 2026-10-17)
 - Date: 2026-10-17
 
 ## Context

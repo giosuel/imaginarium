@@ -503,7 +503,7 @@ open it), one at a time:
   the board refuses shows on its row, and when the board closes Settings
   goes back to For me (never editing your settings instead). A board's
   value this version can't use is ignored, and kept in the file.
-  ADR-0022 (proposed) records the decision.
+  ADR-0022 (accepted) records the decision.
 - **Not yet:** the mockup's theme cards and accent swatches (with the theme settings,
   M3.7: following the system, light, high contrast and reduced motion
   are that milestone's), ↑↓ in a dropdown's list (Tab moves through it), and
