@@ -5,7 +5,7 @@
 //! the accessibility tree.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use accesskit::{Action, ActionRequest, Node, NodeId};
@@ -360,8 +360,13 @@ impl Cx<'_> {
 }
 
 thread_local! {
-    /// Widgets whose signals changed: (widget, needs layout).
-    static PENDING: RefCell<Vec<(WidgetId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// Widgets whose signals changed: (tree, widget, needs layout). A
+    /// widget id means something only in its own tree, and with several
+    /// windows several trees take from here. `None`: [`invalidate`]'s,
+    /// for whichever tree comes first.
+    static PENDING: RefCell<Vec<(Option<u64>, WidgetId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The id of the next tree.
+    static NEXT_TREE: Cell<u64> = const { Cell::new(0) };
 }
 
 /// How long the pointer rests on a widget before its tooltip shows
@@ -369,10 +374,18 @@ thread_local! {
 pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Marks `id` for repainting (and re-layout if `layout`), and asks for a
-/// frame. Effects call this; it is safe while the tree is borrowed.
+/// frame. Effects call this; it is safe while the tree is borrowed. With
+/// several windows, prefer [`Ui::watch`], which knows the widget's tree:
+/// this one marks `id` in the next tree laid out.
 pub fn invalidate(id: WidgetId, layout: bool) {
-    PENDING.with(|pending| pending.borrow_mut().push((id, layout)));
+    PENDING.with(|pending| pending.borrow_mut().push((None, id, layout)));
     request_frame();
+}
+
+/// [`invalidate`], in tree `tree`: the frame is asked of its window.
+fn invalidate_in(tree: u64, id: WidgetId, layout: bool) {
+    PENDING.with(|pending| pending.borrow_mut().push((Some(tree), id, layout)));
+    crate::window::request_frame_for_tree(tree);
 }
 
 struct NodeData {
@@ -481,11 +494,26 @@ pub struct Ui {
     /// Whether the last input was the keyboard (focus rings show) rather
     /// than the pointer.
     keyboard: bool,
+    /// This tree's id, unique on its thread (for [`invalidate_in`]).
+    tree: u64,
 }
 
 impl Default for Ui {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        // Its widgets' changes would wait for it forever.
+        let tree = self.tree;
+        let _ = PENDING.try_with(|pending| {
+            if let Ok(mut pending) = pending.try_borrow_mut() {
+                pending.retain(|(of, _, _)| *of != Some(tree));
+            }
+        });
+        crate::window::unbind_tree(tree);
     }
 }
 
@@ -517,6 +545,7 @@ impl Ui {
             pending_return: None,
             lists: Vec::new(),
             keyboard: true,
+            tree: NEXT_TREE.with(|next| next.replace(next.get() + 1)),
         }
     }
 
@@ -1120,10 +1149,11 @@ impl Ui {
     /// widget.
     pub fn watch(&mut self, id: WidgetId, layout: bool, mut watch: impl FnMut() + 'static) {
         let mut first = true;
+        let tree = self.tree;
         let effect = imaginarium_reactive::effect(move || {
             watch();
             if !std::mem::take(&mut first) {
-                invalidate(id, layout);
+                invalidate_in(tree, id, layout);
             }
         });
         if let Some(node) = self.node_mut(id) {
@@ -1174,8 +1204,18 @@ impl Ui {
     }
 
     fn apply_pending(&mut self) {
-        let pending = PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
-        for (id, layout) in pending {
+        // The window it is used in, for frames its signals ask for.
+        crate::window::bind_tree(self.tree);
+        let tree = self.tree;
+        let pending = PENDING.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            let (mine, others) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|(of, _, _)| of.is_none_or(|of| of == tree));
+            *pending = others;
+            mine
+        });
+        for (_, id, layout) in pending {
             self.mark(id, layout);
         }
         // A theme switch touches every widget: colors, and the text that

@@ -13,8 +13,9 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-/// Texts read from the clipboard, waiting for the window to deliver them.
-static PASTED: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+/// Texts read from the clipboard, waiting for the window to deliver them,
+/// each with the window that asked ([`crate::window::current_window`]).
+static PASTED: Mutex<VecDeque<(Option<u64>, String)>> = Mutex::new(VecDeque::new());
 
 /// Wakes the window's event loop when a text was read.
 type Waker = Box<dyn Fn() + Send>;
@@ -27,20 +28,22 @@ pub(crate) fn set_waker(waker: impl Fn() + Send + 'static) {
     }
 }
 
-/// The texts read since the last call, oldest first.
-pub(crate) fn take_pasted() -> Vec<String> {
+/// The texts read since the last call, oldest first, with the windows
+/// that asked for them.
+pub(crate) fn take_pasted() -> Vec<(Option<u64>, String)> {
     PASTED
         .lock()
         .map(|mut pasted| pasted.drain(..).collect())
         .unwrap_or_default()
 }
 
-/// Where read texts go: the window's queue, or a test's.
-type Sink = Box<dyn Fn(String) + Send>;
+/// Where read texts go (with the window that asked): the window's queue,
+/// or a test's.
+type Sink = Box<dyn Fn(Option<u64>, String) + Send>;
 
-fn deliver(text: String) {
+fn deliver(target: Option<u64>, text: String) {
     if let Ok(mut pasted) = PASTED.lock() {
-        pasted.push_back(text);
+        pasted.push_back((target, text));
     }
     if let Ok(waker) = WAKER.lock()
         && let Some(wake) = waker.as_ref()
@@ -98,13 +101,15 @@ impl Backend for System {
 
 enum Request {
     Set(String),
-    Get,
+    /// The text, for the window with this key.
+    Get(Option<u64>),
     SetHtml {
         html: String,
         text: String,
     },
-    /// The HTML if it holds `marker`, else the text.
-    GetMarked(String),
+    /// The HTML if it holds `marker`, else the text, for the window with
+    /// this key.
+    GetMarked(String, Option<u64>),
 }
 
 /// The system clipboard, opened on its thread on first use. Without one
@@ -135,7 +140,7 @@ impl Clipboard {
     /// that hands read texts to `sink`.
     pub(crate) fn with_backend(
         open: impl Fn() -> Box<dyn Backend> + Send + Sync + 'static,
-        sink: impl Fn(String) + Send + 'static,
+        sink: impl Fn(Option<u64>, String) + Send + 'static,
     ) -> Self {
         Self {
             requests: None,
@@ -170,7 +175,7 @@ impl Clipboard {
     /// Asks for the clipboard's text, which arrives as
     /// [`Input::Paste`](crate::Input::Paste) if there is any.
     pub fn request_text(&mut self) {
-        self.send(Request::Get);
+        self.send(Request::Get(crate::window::current_window()));
     }
 
     /// Puts `html` on the clipboard, with `text` for apps that take only
@@ -186,7 +191,10 @@ impl Clipboard {
     /// copied), else its text; either arrives as
     /// [`Input::Paste`](crate::Input::Paste).
     pub fn request_marked(&mut self, marker: &str) {
-        self.send(Request::GetMarked(marker.to_owned()));
+        self.send(Request::GetMarked(
+            marker.to_owned(),
+            crate::window::current_window(),
+        ));
     }
 }
 
@@ -210,7 +218,7 @@ fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>, sink: Sink)
                 fallback = text;
                 fallback_html = Some(html);
             }
-            Request::GetMarked(marker) => {
+            Request::GetMarked(marker, target) => {
                 let (html, text) = if backend.available() {
                     (backend.get_html(), None)
                 } else {
@@ -227,17 +235,17 @@ fn serve(mut backend: Box<dyn Backend>, requests: Receiver<Request>, sink: Sink)
                     }),
                 };
                 if let Some(text) = text.filter(|text| !text.is_empty()) {
-                    sink(text);
+                    sink(target, text);
                 }
             }
-            Request::Get => {
+            Request::Get(target) => {
                 let text = if backend.available() {
                     backend.get()
                 } else {
                     Some(fallback.clone())
                 };
                 if let Some(text) = text.filter(|text| !text.is_empty()) {
-                    sink(text);
+                    sink(target, text);
                 }
             }
         }
@@ -274,9 +282,12 @@ mod tests {
         fn set(&mut self, _text: &str) {}
     }
 
-    fn collector() -> (impl Fn(String) + Send + 'static, mpsc::Receiver<String>) {
+    fn collector() -> (
+        impl Fn(Option<u64>, String) + Send + 'static,
+        mpsc::Receiver<String>,
+    ) {
         let (sender, receiver) = mpsc::channel();
-        (move |text| drop(sender.send(text)), receiver)
+        (move |_, text| drop(sender.send(text)), receiver)
     }
 
     #[test]

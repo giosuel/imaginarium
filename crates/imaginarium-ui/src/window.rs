@@ -537,6 +537,44 @@ pub fn request_frame() {
     FRAME_REQUESTED.with(|requested| requested.set(true));
 }
 
+thread_local! {
+    /// The window whose view is being called, if any.
+    static CURRENT: Cell<Option<WindowId>> = const { Cell::new(None) };
+    /// Widget trees and the windows they are in.
+    static TREES: std::cell::RefCell<std::collections::HashMap<u64, WindowId>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The key of the window whose view is being called (a clipboard read
+/// remembers who asked).
+pub(crate) fn current_window() -> Option<u64> {
+    CURRENT.with(Cell::get).map(u64::from)
+}
+
+/// Tree `tree` is used in the window being called.
+pub(crate) fn bind_tree(tree: u64) {
+    if let Some(window) = CURRENT.with(Cell::get) {
+        TREES.with(|trees| {
+            trees.borrow_mut().insert(tree, window);
+        });
+    }
+}
+
+/// Tree `tree` is gone.
+pub(crate) fn unbind_tree(tree: u64) {
+    let _ = TREES.try_with(|trees| {
+        if let Ok(mut trees) = trees.try_borrow_mut() {
+            trees.remove(&tree);
+        }
+    });
+}
+
+/// A frame for tree `tree`'s window. Until frames are asked per window,
+/// every window draws.
+pub(crate) fn request_frame_for_tree(_tree: u64) {
+    request_frame();
+}
+
 /// Opens a window showing `view` and runs until it is closed (by the user
 /// or [`View::should_close`]) and every window it opened is closed too.
 /// Blocks the calling thread, which must be the main thread on some
@@ -569,6 +607,7 @@ pub fn run_with_gpu<'v>(
         first: None,
         focused: None,
         gpu: Some(gpu),
+        shared: None,
         proxy,
         started: Instant::now(),
         stats: RunStats::default(),
@@ -628,6 +667,9 @@ struct Shell<'v> {
     focused: Option<WindowId>,
     /// The GPU opening meanwhile, until the first frame takes it.
     gpu: Option<GpuStart>,
+    /// The GPU the windows share once it is open, with a renderer ready
+    /// for the next window.
+    shared: Option<imaginarium_render::SharedGpu>,
     proxy: EventLoopProxy<UserEvent>,
     started: Instant,
     stats: RunStats,
@@ -805,23 +847,24 @@ impl<'v> Shell<'v> {
             return Err(UiError::Window("no such window".into()));
         };
         let (window, physical) = (state.window.clone(), state.physical);
-        if let Some(other) = self
-            .windows
-            .values()
-            .find_map(|other| other.renderer.as_ref())
-        {
-            return Ok(other.sibling(window, physical.width, physical.height)?);
+        let renderer = match &mut self.shared {
+            Some(shared) => shared.window(window, physical.width, physical.height)?,
+            None => {
+                let gpu = self
+                    .gpu
+                    .take()
+                    .unwrap_or_else(|| GpuStart::spawn(&state.options.gpu));
+                let renderer =
+                    WindowRenderer::with_start(gpu, window, physical.width, physical.height)?;
+                self.shared = Some(renderer.shared_gpu());
+                renderer
+            }
+        };
+        // The next window's Vello renderer builds off the UI thread.
+        if let Some(shared) = &mut self.shared {
+            shared.prepare();
         }
-        let gpu = self
-            .gpu
-            .take()
-            .unwrap_or_else(|| GpuStart::spawn(&state.options.gpu));
-        Ok(WindowRenderer::with_start(
-            gpu,
-            window,
-            physical.width,
-            physical.height,
-        )?)
+        Ok(renderer)
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
@@ -932,10 +975,16 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
         let event = match event {
             UserEvent::Access(event) => event,
             UserEvent::Pasted => {
-                // Pasted text goes where the keys are.
-                let target = self.focused.and_then(|id| self.windows.get_mut(&id));
-                if let Some(state) = target {
-                    for text in crate::clipboard::take_pasted() {
+                // Pasted text goes to the window that asked, else where
+                // the keys are.
+                for (asked, text) in crate::clipboard::take_pasted() {
+                    let target = self
+                        .windows
+                        .keys()
+                        .copied()
+                        .find(|id| Some(u64::from(*id)) == asked)
+                        .or(self.focused);
+                    if let Some(state) = target.and_then(|id| self.windows.get_mut(&id)) {
                         state.deliver(Input::Paste(text));
                     }
                 }
@@ -1105,7 +1154,21 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
         // Windows to open or close, after the timers: one may have ended
         // a scripted run.
         self.handle_requests();
-        self.windows.retain(|_, state| !state.closing);
+        let closing: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.closing)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closing {
+            // Its Vello renderer serves the next window (the start window's
+            // goes to the board it opens).
+            if let Some(state) = self.windows.remove(&id)
+                && let (Some(renderer), Some(shared)) = (state.renderer, &mut self.shared)
+            {
+                renderer.recycle(shared);
+            }
+        }
         if self
             .focused
             .is_some_and(|id| !self.windows.contains_key(&id))
