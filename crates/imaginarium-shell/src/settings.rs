@@ -1243,6 +1243,15 @@ fn padding(left: f32, right: f32, top: f32, bottom: f32) -> taffy::Rect<taffy::L
     }
 }
 
+/// A numeric value as a number.
+fn value_number(value: &Value) -> f64 {
+    match value {
+        Value::Int(n) => *n as f64,
+        Value::Float(x) => *x,
+        _ => 0.0,
+    }
+}
+
 /// The order of the Appearance section, as the Settings mockup has it.
 const ORDER: &[&str] = &[
     "ui.theme",
@@ -1513,7 +1522,13 @@ pub(crate) fn choices(declaration: &dyn AnySetting) -> Vec<(Value, String)> {
                     } else {
                         Value::Float(value)
                     };
-                    let name = format_value(&value);
+                    // The interface size reads as a percentage (the mockup's
+                    // "110 %").
+                    let name = if declaration.key() == crate::look::SCALE.key() {
+                        format!("{:.0} %", value_number(&value) * 100.0)
+                    } else {
+                        format_value(&value)
+                    };
                     (value, name)
                 })
                 .collect()
@@ -1763,7 +1778,7 @@ mod tests {
     )
     .range(5, 600);
     static SIZE: Setting<f64> = Setting::new(
-        "ui.scale",
+        "ui.size_for_tests",
         || 1.0,
         Scope::App,
         "Interface size",

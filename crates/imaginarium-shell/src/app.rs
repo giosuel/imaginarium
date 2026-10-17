@@ -2232,6 +2232,25 @@ mod tests {
     }
 
     #[test]
+    fn the_interface_size_is_a_dropdown_of_percentages() {
+        let app = app();
+        crate::look::follow(&mut app.settings().borrow_mut());
+        let mut window = app.settings_window().unwrap();
+        settings_frame(&mut window);
+        press(&mut window, "Appearance");
+        press(&mut window, "Interface size");
+        settings_frame(&mut window);
+        press(&mut window, "120 %");
+        let set = app.settings().borrow().get(&crate::look::SCALE).unwrap();
+        assert!((set - 1.2).abs() < 1e-9, "{set}");
+        assert!((imaginarium_ui::interface_scale() - 1.2).abs() < 1e-9);
+        // Its reset puts it back to 100 %.
+        settings_frame(&mut window);
+        press(&mut window, "Reset Interface size");
+        assert!((imaginarium_ui::interface_scale() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn the_board_background_is_a_segmented_control_in_appearance() {
         let app = app();
         let mut window = app.settings_window().unwrap();

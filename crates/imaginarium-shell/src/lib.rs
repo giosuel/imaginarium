@@ -73,6 +73,7 @@ pub static SETTINGS: &[&dyn imaginarium_settings::AnySetting] = &[
     &look::THEME,
     &look::ACCENT,
     &look::REDUCE_MOTION,
+    &look::SCALE,
     &TOOLBAR_POSITION,
     &SHOW_START_WINDOW,
 ];

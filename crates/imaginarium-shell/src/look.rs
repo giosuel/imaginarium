@@ -137,6 +137,24 @@ pub static REDUCE_MOTION: Setting<Motion> = Setting::new(
 )
 .synonyms(&["animations", "motion", "accessibility"]);
 
+/// `ui.scale`: the interface size, as a factor (1.1 is 110 %).
+pub static SCALE: Setting<f64> = Setting::new(
+    "ui.scale",
+    || 1.0,
+    Scope::App,
+    "Interface size",
+    "Scales panels and menus, not the board.",
+)
+.range(0.8, 2.0, 0.1)
+.synonyms(&[
+    "ui size",
+    "text size",
+    "bigger",
+    "smaller",
+    "scaling",
+    "zoom interface",
+]);
+
 /// The look `settings` ask for.
 pub fn appearance(settings: &Registry) -> Appearance {
     let theme = match settings.get(&THEME).unwrap_or_default() {
@@ -160,8 +178,13 @@ pub fn appearance(settings: &Registry) -> Appearance {
 /// settings changes (from Settings, the palette, the settings file).
 pub fn follow(settings: &mut Registry) {
     imaginarium_ui::appearance::set_appearance(appearance(settings));
+    imaginarium_ui::set_interface_scale(settings.get(&SCALE).unwrap_or(1.0));
     settings.subscribe(|change| {
         use imaginarium_settings::SettingType;
+        if change.key == SCALE.key() {
+            imaginarium_ui::set_interface_scale(f64::from_value(&change.new).unwrap_or(1.0));
+            return;
+        }
         let Some(mut look) = imaginarium_ui::appearance::appearance() else {
             return;
         };
