@@ -21,9 +21,9 @@ use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
     AccessTree, Anchor, Button, ButtonBox, ButtonColors, DEFAULT_ACCENT, Flex, FrameInfo, Icon,
-    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Switch, TextInput, Theme,
-    ThemeKind, Token, Ui, UiError, View, VirtualList, WidgetId, WindowOptions, animation,
-    set_theme, theme,
+    IconButton, Input, InputColors, Label, LayerId, LayerOptions, Scroll, Swatch, SwatchShape,
+    Switch, TextInput, Theme, ThemeKind, Token, Ui, UiError, View, VirtualList, WidgetId,
+    WindowOptions, animation, set_theme, theme,
 };
 
 /// What a button asked for; the view does it after the input, when it
@@ -499,6 +499,26 @@ fn main() -> Result<(), UiError> {
         &[row, switch],
     );
 
+    // Swatches: a color grid (no color, a color, the current one), and
+    // the contextual toolbar's dot and ring.
+    let rgb = |hex: u32| {
+        imaginarium_render::peniko::Color::from_rgb8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+    };
+    let swatches = [
+        ui.add(Swatch::new(None, "No fill", || {})),
+        ui.add(Swatch::new(Some(rgb(0xffffff)), "White", || {})),
+        ui.add(Swatch::new(Some(rgb(0x2b3163)), "Indigo", || {}).selected(true)),
+        ui.add(Swatch::new(Some(rgb(0x46380f)), "Amber", || {})),
+        ui.add(Swatch::new(Some(rgb(0x163a26)), "Green", || {})),
+        ui.add(Swatch::shown(Some(rgb(0x2b3163)), SwatchShape::Dot, 18.0)),
+        ui.add(Swatch::shown(Some(rgb(0xc4c4cc)), SwatchShape::Ring, 18.0)),
+    ];
+    let swatches = section(
+        &mut ui,
+        "Swatches · none, colors, the current one; the toolbar's dot and ring",
+        &swatches,
+    );
+
     // Inputs.
     let empty = ui.add(TextInput::new(
         "Name",
@@ -652,6 +672,7 @@ fn main() -> Result<(), UiError> {
             icon_buttons,
             boxes,
             palette_bits,
+            swatches,
             inputs,
             text,
             layers,
