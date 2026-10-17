@@ -78,6 +78,7 @@ impl GpuInfo {
     }
 }
 
+#[derive(Clone)]
 struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -394,6 +395,8 @@ pub struct WindowRenderer {
     bitmap_fonts: BitmapFonts,
     startup: GpuStartup,
     timer: Option<GpuTimer>,
+    /// What it was opened with, for windows that share its GPU.
+    options: GpuOptions,
 }
 
 /// Which fonts have bitmap glyphs (color emoji in CBDT or sbix, EBDT), by
@@ -851,7 +854,53 @@ impl WindowRenderer {
             textures,
             bitmap_fonts: BitmapFonts::default(),
             startup,
+            options: options.clone(),
         })
+    }
+
+    /// A renderer for another window on the same GPU (one window per
+    /// document): its own surface and Vello renderer, the device shared,
+    /// so a second window doesn't open the GPU again.
+    pub fn sibling(
+        &self,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RenderError> {
+        let creating = Instant::now();
+        let surface = self
+            .instance
+            .create_surface(window)
+            .map_err(|err| RenderError::Surface(err.to_string()))?;
+        if !self.gpu.adapter.is_surface_supported(&surface) {
+            // An odd setup (another display's GPU): open one for it.
+            let instance = self.instance.clone();
+            let gpu = pollster::block_on(open(&instance, &self.options, Some(&surface)))?;
+            return Self::finish(
+                instance,
+                surface,
+                gpu,
+                None,
+                width,
+                height,
+                &self.options,
+                GpuStartup::default(),
+            );
+        }
+        let startup = GpuStartup {
+            surface: creating.elapsed(),
+            ..GpuStartup::default()
+        };
+        Self::finish(
+            self.instance.clone(),
+            surface,
+            self.gpu.clone(),
+            None,
+            width,
+            height,
+            &self.options,
+            startup,
+        )
     }
 
     /// The GPU in use.
