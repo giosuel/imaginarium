@@ -830,6 +830,11 @@ impl<V: View> ApplicationHandler<UserEvent> for Shell<V> {
                 self.deliver(Input::PointerMoved(self.pointer));
             }
             WindowEvent::CursorLeft { .. } => self.deliver(Input::PointerLeft),
+            // The left button is `primary`; `primary: false` is the right
+            // one. The others (middle, back, forward) aren't delivered yet,
+            // so they don't open context menus.
+            WindowEvent::MouseInput { button, .. }
+                if !matches!(button, MouseButton::Left | MouseButton::Right) => {}
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 let clicks = self.clicks.count(button, pressed, self.pointer);

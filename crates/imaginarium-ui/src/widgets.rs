@@ -748,6 +748,8 @@ pub struct ButtonBox {
     focus_on_click: bool,
     selected: Option<Flag>,
     role: Role,
+    /// Can't be used now: no action, not focusable, greyed by its owner.
+    disabled: bool,
     action: Box<dyn FnMut()>,
     pressed: bool,
     /// The background's tone: 0 at rest, 1 hovered, 2 pressed.
@@ -782,6 +784,7 @@ impl ButtonBox {
             focus_on_click: true,
             selected: None,
             role: Role::Button,
+            disabled: false,
             action: Box::new(action),
             pressed: false,
             tone: crate::animation::Transition::new(0.0),
@@ -849,6 +852,13 @@ impl ButtonBox {
     /// A click leaves the focus where it was ([`Widget::focus_on_click`]).
     pub fn keep_focus(mut self) -> Self {
         self.focus_on_click = false;
+        self
+    }
+
+    /// Can't be used now (a menu's row that doesn't apply): it does
+    /// nothing, the keyboard skips it, and screen readers hear so.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -941,6 +951,9 @@ impl Widget for ButtonBox {
     }
 
     fn event(&mut self, cx: &mut Cx<'_>, input: &Input) -> bool {
+        if self.disabled {
+            return matches!(input, Input::PointerButton { primary: true, .. });
+        }
         match input {
             Input::PointerButton {
                 primary: true,
@@ -977,7 +990,7 @@ impl Widget for ButtonBox {
     }
 
     fn focusable(&self) -> bool {
-        true
+        !self.disabled
     }
 
     fn focus_on_click(&self) -> bool {
@@ -1026,12 +1039,16 @@ impl Widget for ButtonBox {
         }
         node.set_label(self.label.clone());
         node.set_bounds(access_rect(cx.bounds()));
-        node.add_action(Action::Click);
+        if self.disabled {
+            node.set_disabled();
+        } else {
+            node.add_action(Action::Click);
+        }
         Some(node)
     }
 
     fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
-        if request.action == Action::Click {
+        if request.action == Action::Click && !self.disabled {
             (self.action)();
             true
         } else {
@@ -1704,12 +1721,19 @@ impl Widget for Swatch {
                 }
                 true
             }
+            // Once per press; a held key's repeats are taken, not passed on.
             Input::Key {
                 key,
                 pressed: true,
-                repeat: false,
+                repeat,
                 ..
-            } if *key == Key::Enter || *key == Key::Character(" ".into()) => self.run(),
+            } if *key == Key::Enter || *key == Key::Character(" ".into()) => {
+                if *repeat {
+                    true
+                } else {
+                    self.run()
+                }
+            }
             _ => false,
         }
     }
@@ -1734,12 +1758,10 @@ impl Widget for Swatch {
         // A shown color says nothing of its own: its button names it.
         self.action.as_ref()?;
         let mut node = Node::new(Role::Button);
-        let label = if self.selected {
-            format!("{} (selected)", self.label)
-        } else {
-            self.label.clone()
-        };
-        node.set_label(label);
+        node.set_label(self.label.clone());
+        if self.selected {
+            node.set_selected(true);
+        }
         node.set_bounds(access_rect(cx.bounds()));
         node.add_action(Action::Click);
         Some(node)

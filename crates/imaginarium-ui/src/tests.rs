@@ -2052,13 +2052,51 @@ fn a_swatch_picks_its_color_and_says_when_it_is_the_current_one() {
     ui.input(&mut fonts, &pointer(at, true, true));
     ui.input(&mut fonts, &pointer(at, true, false));
     assert_eq!(clicks.get(), 1);
-    assert_eq!(
-        ui.find_by_label(&mut fonts, "Indigo (selected)"),
-        Some(indigo)
-    );
+    let update = check_access(&mut ui, &mut fonts);
+    let node = update
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == NodeId(indigo.access_base()))
+        .map(|(_, node)| node)
+        .unwrap();
+    assert_eq!(node.is_selected(), Some(true));
     // The one that only shows a color is no control.
     let at = ui.bounds(shown).unwrap().center();
     ui.input(&mut fonts, &pointer(at, true, true));
     ui.input(&mut fonts, &pointer(at, true, false));
     assert_eq!(clicks.get(), 1);
+}
+
+#[test]
+fn a_disabled_button_box_does_nothing_and_is_skipped() {
+    use crate::widgets::ButtonBox;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let counter = clicks.clone();
+    let text = ui.add(Label::new("Group", TextStyle::new(13.0)));
+    let row = ui.add_with_children(
+        ButtonBox::new("Group", ButtonColors::quiet(), move || {
+            counter.set(counter.get() + 1)
+        })
+        .size(200.0, 32.0)
+        .disabled(true),
+        &[text],
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[row]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    let at = ui.bounds(row).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(clicks.get(), 0);
+    assert_ne!(ui.focused(), Some(row));
+    let update = check_access(&mut ui, &mut fonts);
+    let node = update
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == NodeId(row.access_base()))
+        .map(|(_, node)| node)
+        .unwrap();
+    assert!(node.is_disabled());
 }
