@@ -30,6 +30,7 @@ pub struct Flex {
     radius: f64,
     shadow: bool,
     clips: bool,
+    pass_through: bool,
     role: Option<(Role, String)>,
 }
 
@@ -45,6 +46,7 @@ impl Flex {
             radius: 0.0,
             shadow: false,
             clips: false,
+            pass_through: false,
             role: None,
         }
     }
@@ -162,11 +164,28 @@ impl Flex {
         self.role = Some((role, label.into()));
         self
     }
+
+    /// Lets the pointer through to what is below, except over its
+    /// children: an overlay that places panels over the board.
+    pub fn pass_through(mut self) -> Self {
+        self.pass_through = true;
+        self
+    }
+
+    /// Its layout, to change after it was added (through
+    /// [`Ui::widget_mut`]; the tree lays it out again).
+    pub fn style_mut(&mut self) -> &mut Style {
+        &mut self.style
+    }
 }
 
 impl Widget for Flex {
     fn style(&self) -> Style {
         self.style.clone()
+    }
+
+    fn passes_pointer(&self) -> bool {
+        self.pass_through
     }
 
     fn paint(&mut self, cx: &mut Cx<'_>, scene: &mut Scene) {
@@ -907,6 +926,10 @@ impl Widget for IconButton {
 
     fn focusable(&self) -> bool {
         self.is_enabled()
+    }
+
+    fn focus_on_click(&self) -> bool {
+        false
     }
 
     fn focus_changed(&mut self, cx: &mut Cx<'_>, _focused: bool) {

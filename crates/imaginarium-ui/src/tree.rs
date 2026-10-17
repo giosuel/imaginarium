@@ -101,6 +101,19 @@ pub trait Widget: Any {
         false
     }
 
+    /// Whether a click gives it the focus (when [`Widget::focusable`]).
+    /// Tool bar buttons say no: a click on a tool leaves the keyboard
+    /// where it was (the board), while Tab still reaches them.
+    fn focus_on_click(&self) -> bool {
+        true
+    }
+
+    /// Whether the pointer goes through it to what is below, where none
+    /// of its children is: an overlay laying out panels over the board.
+    fn passes_pointer(&self) -> bool {
+        false
+    }
+
     /// It gained or lost the focus.
     fn focus_changed(&mut self, cx: &mut Cx<'_>, focused: bool) {
         let _ = (cx, focused);
@@ -1663,7 +1676,7 @@ impl Ui {
             .iter()
             .rev()
             .find_map(|&child| self.hit(child, point))
-            .or(inside.then_some(id))
+            .or((inside && !node.widget.passes_pointer()).then_some(id))
     }
 
     /// The widget at `point`, from the top layer down: tooltips are passed
@@ -1796,7 +1809,13 @@ impl Ui {
                             .into_iter()
                             .find(|&id| self.node(id).is_some_and(|node| node.widget.focusable()))
                     });
-                    self.set_focus(fonts, focus);
+                    let keeps = focus.is_some_and(|id| {
+                        self.node(id)
+                            .is_some_and(|node| !node.widget.focus_on_click())
+                    });
+                    if !keeps {
+                        self.set_focus(fonts, focus);
+                    }
                     self.capture = target;
                     self.implicit_capture = true;
                 }

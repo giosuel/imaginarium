@@ -1784,3 +1784,47 @@ fn hiding_a_tooltip_leaves_a_popover_opened_after_it() {
     check_access(&mut ui, &mut fonts);
     set_clock_for_tests(None);
 }
+
+#[test]
+fn an_overlay_passes_the_pointer_through_except_over_its_panels() {
+    use crate::widgets::IconButton;
+    let mut fonts = Fonts::bundled_only();
+    let mut ui = Ui::new();
+    let clicks = Rc::new(Cell::new(0));
+    let below = ui.add(button(&clicks));
+    let below = ui.add_with_children(Flex::column().fill(), &[below]);
+    let tool_clicks = Rc::new(Cell::new(0));
+    let counter = tool_clicks.clone();
+    let tool =
+        IconButton::new("hand", "Hand", move || counter.set(counter.get() + 1)).add_to(&mut ui);
+    let overlay = ui.add_with_children(
+        Flex::row().pass_through().style(|style| {
+            style.position = taffy::Position::Absolute;
+            style.inset = taffy::Rect {
+                left: length(0.0),
+                right: length(0.0),
+                top: length(0.0),
+                bottom: length(0.0),
+            };
+            style.justify_content = taffy::JustifyContent::FLEX_END;
+            style.align_items = taffy::AlignItems::FLEX_START;
+        }),
+        &[tool],
+    );
+    let root = ui.add_with_children(Flex::column().fill(), &[below, overlay]);
+    ui.set_root(root);
+    frame(&mut ui, &mut fonts);
+    // The button under the overlay still gets its click.
+    let go = ui.widget_children_for_tests(below)[0];
+    let at = ui.bounds(go).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!(clicks.get(), 1);
+    // The overlay's own panel gets its click, and the focus stays below.
+    ui.set_focus(&mut fonts, Some(go));
+    let at = ui.bounds(tool).unwrap().center();
+    ui.input(&mut fonts, &pointer(at, true, true));
+    ui.input(&mut fonts, &pointer(at, true, false));
+    assert_eq!((clicks.get(), tool_clicks.get()), (1, 1));
+    assert_eq!(ui.focused(), Some(go), "a click on a tool keeps the focus");
+}
