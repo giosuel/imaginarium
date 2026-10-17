@@ -11,10 +11,9 @@ Last updated: 2026-10-17
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.6, Files** (below): autosave and crash recovery,
-  open and save dialogs, recent files, which fill the start window's
-  placeholders. (M3.7, themes, may come first: M3.5 to M3.7 are in any
-  order.) M3.5 is done (2026-10-17), in four stacked parts, each reviewed
+- **Next step:** **M3.6 part 2, crash recovery** (below). M3.6 part 1,
+  saving every change into a board's file, is done (2026-10-17). M3.5 is
+  done (2026-10-17), in four stacked parts, each reviewed
   by a fresh agent: the settings file
   (https://github.com/giosuel/imaginarium/pull/61), the Settings window
   (https://github.com/giosuel/imaginarium/pull/62), the board background
@@ -1127,7 +1126,18 @@ What M3 builds on:
   - search, scopes and every kind of setting;
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
-- [ ] **M3.6 Files:**
+- [ ] **M3.6 Files**, in parts:
+  - [x] **part 1, saving** (2026-10-17, `shell.md` §3.1 "As built"):
+    every change of a board opened from a file goes into the file on a
+    saving thread, with the pill's states; read-only for newer files;
+  - part 2, crash recovery for boards without a file, and the start
+    window's recovery notice;
+  - part 3, the open and save dialogs: Open…, Save…, Save a copy, rename
+    and move;
+  - part 4, closing a board with unsaved changes (the SaveClose mockup);
+  - part 5, recent boards in the start window, Open another board…,
+    dropping a file;
+  The plan, as first written:
   - autosave of every change on a worker, and crash recovery;
   - native open and save dialogs; closing an unsaved board asks Save…,
     Don't save or Cancel; rename, move, save a copy;

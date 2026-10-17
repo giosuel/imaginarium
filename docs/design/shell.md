@@ -81,6 +81,26 @@ move it), and the save state:
 | Can't save | ⚠ Can't save · retrying | The write failed (disk full, the file went away). Keeps retrying; the menu offers Save a copy |
 | Read-only | 🔒 Read-only · made with a newer version | `Mode::ReadOnly` (newer `required_features`) |
 
+**As built (M3.6 part 1, saving).** A board opened from a file
+(`App::open_board`; the app opens the file named on its command line)
+saves every change into that file on its own:
+- After a change the board window sends the document's updates since the
+  last time to the file's saving thread (`imaginarium_io_native::
+  Autosave`), which appends them as `UPDT` records and commits them with
+  a new index (spec §9.3); everything waiting goes into one commit. Every
+  200 records it sends a snapshot instead, so the file opens without
+  replaying them all. The UI thread only exports the updates.
+- A failed write is retried every 2 s, after opening the file again;
+  closing the board writes what is pending first.
+- The pill shows the state from the SaveStates mockup: **✓ Saved**,
+  **Saving…** (only after 500 ms), **Can't save · retrying** (the reason
+  for screen readers), **Read-only · made with a newer version** (such a
+  file is never written), and **Not saved · Save…** for a board without a
+  file.
+- A file whose last save was torn opens with what could be recovered and
+  goes on from a fresh snapshot (spec §9.5).
+- Encrypted files can't be saved into yet (their keys aren't kept).
+
 ### 3.2 Top right
 
 Search (opens the palette, `Ctrl+K`), AI (the assistant, a placeholder

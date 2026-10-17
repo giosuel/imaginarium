@@ -515,6 +515,12 @@ Decided (2026-10-16):
 - **The arrow shortcuts for z-order stay** (2026-10-17): "2) yes".
   Mod+Shift+Up/Down (to front, to back) and Mod+Up/Down (forward,
   backward) keep working next to Mod+] and Mod+[.
+- **The theme settings go with M3.7** (2026-10-17): "2) yes sounds
+  good". Theme, accent, reduce motion and interface size, and the
+  Settings mockup's theme cards and swatches, come with the themes they
+  set; M3.5 has the settings window and the board background.
+- **M3.6, files, comes next** (2026-10-17): "3) yes sounds good, go
+  ahead".
 
 Open:
 1. **Hub name.** "Imaginarium Hub" is the working name.
