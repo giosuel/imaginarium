@@ -1,6 +1,7 @@
 # Shell: the window around the board
 
-Status: **Draft** (M3.0). Crates: `imaginarium-shell` (new in M3.4) and
+Status: **Being built** (M3.4: the board window, §3.1 to §3.4, is
+built; the rest follows). Crates: `imaginarium-shell` (new in M3.4) and
 `imaginarium-app`, on the toolkit (`imaginarium-ui`, `ui-toolkit.md`).
 The board itself, its items and its editing, is in `canvas.md`.
 
@@ -117,6 +118,40 @@ Zoom (−, the percentage, which opens Fit / 100 % / zoom to selection, +),
 undo and redo on the left; Help and shortcuts (`?`) on the right. If the
 tool bar is docked at the bottom, they keep their corners and the bar sits
 between them.
+
+**As built (M3.4, the board window).** `imaginarium-shell`'s
+`BoardWindow` is the window's view; `imaginarium-app` opens one on a new
+board (`--demo` shows the mockups' board).
+- **Layout.** The board fills the window. The panels sit in an overlay
+  that fills it too, made of boxes that let the pointer through
+  (`Flex::pass_through`), so the board gets every click between the
+  panels. The tool bar has a stage of its own laid out for its dock.
+- **Commands.** Every button runs a board command by id (`tool.*`,
+  `view.zoom_*`, `edit.undo`, `edit.redo`) through a queue the window
+  drains after each input, so the palette and the AI can do the same.
+  Tooltips take their keys from the board's keymap (Ctrl or ⌘), so they
+  always show the real shortcut. The selected tool, the zoom percentage
+  and undo and redo follow the board's signals (`tool()`, `status()`).
+- **Focus.** Tool bar and panel buttons take a click without taking the
+  keyboard (`Widget::focus_on_click`): after a click on a tool, the
+  board's keys still work. Tab reaches them. A click on a panel's
+  background gives the keys back to the board.
+- **Placeholders.** The app button, the name, Save…, Search, AI, Share
+  and help open a note saying which milestone brings them (M3.6, the
+  palette next, M6, M8, M3.9).
+- **The tool bar.** Docked left by default (`ui.toolbar.position`). The
+  grip drags it: the edges show their drop zones, the nearest stronger,
+  with a hint ("Release to dock it on the left · Shift keeps it
+  floating"). Released with the pointer in the outer quarter of the
+  window toward an edge, it docks there; elsewhere, or with Shift, it
+  floats, kept inside the window (also when the window shrinks). A
+  double-click on the grip puts it back on the left. The setting isn't
+  saved to disk yet: settings files come with M3.5.
+- **Zoom.** The percentage opens a menu: fit, 100 % and the selection,
+  with their keys.
+- **Not yet:** the arrow keys between tools and `F6` (the focus between
+  the board and the panels), double-clicking a tool to keep it, and the
+  title following a rename (M3.6).
 
 ### 3.5 The contextual toolbar
 

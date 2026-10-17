@@ -4,16 +4,18 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 ## Current position
 
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.4 The shell** (`imaginarium-shell`,
-  `imaginarium-app`): the window around the board, built from the
-  mockups. M3.3 is done (2026-10-17): the board's commands, tools and
+- **Next step:** **M3.4 part 2, the command palette** (`Ctrl+K`) on
+  the board's real registry, opened by the Search button. Part 1 is done
+  (2026-10-17): the board window (`imaginarium-shell`; `imaginarium-app`
+  opens it), reviewed by a fresh agent, stacked on M3.3's PRs. M3.3 is
+  done (2026-10-17): the board's commands, tools and
   clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
   `imaginarium-canvas` shows and edits a board. Each part was reviewed by
   a fresh agent; the PRs are stacked on M3.1's
@@ -26,7 +28,7 @@ Last updated: 2026-10-16
   - M3.0 is done: the mockups (owner's design canvas, not committed),
     `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
     §5.6 (#37).
-- **Code status:** Cargo workspace with 17 crates. Working: `xtask` (repo
+- **Code status:** Cargo workspace with 18 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -42,7 +44,9 @@ Last updated: 2026-10-16
   frame pipeline, the widget tree on Taffy with signals, widgets,
   clipboard, layers, scrolling, icons, animation), `imaginarium-canvas`
   (the board: a document's nodes on the tile canvas, selection, handles,
-  text in place, the board's commands) and `imaginarium-gate` (the M2 gate app: a board with text,
+  text in place, the board's commands), `imaginarium-shell` (the board
+  window: panels and the tool bar), `imaginarium-app` (opens a board
+  window) and `imaginarium-gate` (the M2 gate app: a board with text,
   search, in-place editing, a command palette, measurements,
   `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
@@ -1054,7 +1058,14 @@ What M3 builds on:
     the gate's hard-coded ones.
   - **The command context:** the document, the selection and the view.
 - [ ] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`):
-  - the pill (mode, zoom; share and AI as placeholders);
+  - [x] **part 1, the board window** (2026-10-17, `shell.md` §3 "As
+    built"): the pill, search, AI and share (placeholders that say what
+    is coming), zoom and undo, help, and the tool bar, docked left,
+    dragged to any edge or floating (`ui.toolbar.position`). Toolkit:
+    hover tooltips, `IconButton`, `ButtonBox`, overlays that let the
+    pointer through, clicks that keep the focus, the window's app ID
+    (`ch.giosuel.Imaginarium`). Left for later parts: arrow keys in the
+    tool bar, `F6`, double-click to keep a tool;
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;
@@ -1134,6 +1145,9 @@ What M3 builds on:
   and lay out off-screen labels lazily or on a worker.
 - **A gesture right after another edit undoes together with it**: the
   model merges undo steps within 500 ms (`UndoConfig`), groups included.
+- **The demo board can be undone** (M3.4): `--demo` builds the Launch
+  plan board as the user's edits, so undo takes it apart. Opened files
+  (M3.6) start without history.
 - **Pasting big copies parses on the UI thread** (M3.3): a payload is
   capped at 64 MB; moving the parsing to a worker is left for when
   pastes get that big. Also not yet: a paste doesn't remap references
