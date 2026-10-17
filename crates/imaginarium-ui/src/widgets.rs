@@ -1949,19 +1949,24 @@ impl Widget for Slider {
         node.set_min_numeric_value(min);
         node.set_max_numeric_value(max);
         node.set_bounds(access_rect(cx.bounds()));
+        node.set_numeric_value_step((max - min) / 20.0);
         node.add_action(Action::SetValue);
+        node.add_action(Action::Increment);
+        node.add_action(Action::Decrement);
         Some(node)
     }
 
     fn access_action(&mut self, _cx: &mut Cx<'_>, request: &ActionRequest) -> bool {
-        match (request.action, &request.data) {
-            (Action::SetValue, Some(accesskit::ActionData::NumericValue(value))) => {
-                let (min, max) = self.range;
-                (self.on_change)(value.clamp(min, max));
-                true
-            }
-            _ => false,
-        }
+        let (min, max) = self.range;
+        let step = (max - min) / 20.0;
+        let value = match (request.action, &request.data) {
+            (Action::SetValue, Some(accesskit::ActionData::NumericValue(value))) => *value,
+            (Action::Increment, _) => self.shown() + step,
+            (Action::Decrement, _) => self.shown() - step,
+            _ => return false,
+        };
+        (self.on_change)(value.clamp(min, max));
+        true
     }
 }
 
