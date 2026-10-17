@@ -160,6 +160,10 @@ fn main() -> anyhow::Result<()> {
     };
     let setup = started.elapsed();
     let stats = imaginarium_ui::run_with_gpu(gpu, options, view).context("running the app")?;
+    // Boards closed last may still be writing their last changes.
+    for err in app.wait_for_saves() {
+        eprintln!("imaginarium: a board's last changes weren't saved: {err}");
+    }
     // Writes what is pending, then says if saving failed.
     if let Some(err) = writer.and_then(FileWriter::finish) {
         eprintln!("imaginarium: settings not saved: {err}");

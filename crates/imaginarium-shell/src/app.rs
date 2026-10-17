@@ -41,6 +41,8 @@ pub struct App {
     settings_open: Cell<bool>,
     /// The board window used last, for This board in Settings.
     active_board: RefCell<std::rc::Weak<BoardLink>>,
+    /// Closed boards' saving threads finishing.
+    finishing: RefCell<Vec<std::thread::JoinHandle<Option<String>>>>,
     /// Whether the settings file is saved, and a notice from reading it.
     saving: RefCell<Saving>,
 }
@@ -127,6 +129,7 @@ impl App {
             boards: Cell::new(0),
             settings_open: Cell::new(false),
             active_board: RefCell::default(),
+            finishing: RefCell::default(),
             saving: RefCell::default(),
         })
     }
@@ -233,22 +236,32 @@ impl App {
             || "Board".to_owned(),
             |stem| stem.to_string_lossy().into_owned(),
         );
-        let (opened, session) = imaginarium_io_native::Session::open(path)
+        let opening = imaginarium_io_native::Session::open(path)
             .map_err(|err| format!("{} can't be opened: {err}", path.display()))?;
-        let read_only = !matches!(opened.document.mode(), imaginarium_model::Mode::Editable);
-        let recovered = opened.recovery.is_some();
-        let window = self.board_window(opened.document, &name);
-        if read_only {
-            // Nothing is written into a file this version doesn't fully
-            // understand.
-            return Ok(window);
-        }
-        let autosave = imaginarium_io_native::Autosave::start(
-            session,
-            path.to_owned(),
-            imaginarium_ui::frame_waker(),
-        );
-        Ok(window.saved_in(path.to_owned(), autosave, recovered))
+        Ok(match opening {
+            imaginarium_io_native::Opening::Editable(opened, session) => self
+                .board_window(opened.document, &name)
+                .saved_in(path.to_owned(), session),
+            // Nothing is written into it; the pill says why.
+            imaginarium_io_native::Opening::ReadOnly(opened) => {
+                self.board_window(opened.document, &name)
+            }
+        })
+    }
+
+    /// A closed board's saving thread finishing (the app waits for it
+    /// before it exits).
+    pub(crate) fn finishing(&self, save: std::thread::JoinHandle<Option<String>>) {
+        self.finishing.borrow_mut().push(save);
+    }
+
+    /// Waits for the closed boards' saves to finish; why the ones that
+    /// failed did (their last changes aren't in the file).
+    pub fn wait_for_saves(&self) -> Vec<String> {
+        std::mem::take(&mut *self.finishing.borrow_mut())
+            .into_iter()
+            .filter_map(|save| save.join().ok().flatten())
+            .collect()
     }
 
     /// A window on `document`, named `name`.
@@ -989,6 +1002,11 @@ mod tests {
         assert_eq!(declared, taken);
     }
 
+    fn status_named(board: &mut BoardWindow, name: &str) -> bool {
+        let (ui, fonts) = board.ui();
+        ui.find_by_label(fonts, name).is_some()
+    }
+
     #[test]
     fn a_board_opened_from_a_file_saves_every_change() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1010,26 +1028,31 @@ mod tests {
         let mut board = app.open_board(&path).unwrap();
         assert_eq!(board.options().title, "Launch plan — Imaginarium");
         board_draw(&mut board);
-        // Two shapes, then the window closes.
-        for _ in 0..2 {
-            board
-                .execute("board.insert_frame", &imaginarium_commands::Args::new())
-                .unwrap();
-            board_draw(&mut board);
-        }
-        let shapes = board.board().unwrap().document().view().node_count();
-        assert_eq!(shapes, 2);
+        assert!(status_named(&mut board, "Saved"));
+        // A second window on the same file can only read it, and says so.
+        let mut second = app.open_board(&path).unwrap();
+        board_draw(&mut second);
+        assert!(status_named(
+            &mut second,
+            "Read-only · open in another window"
+        ));
+        drop(second);
+        // Two frames, then the window closes right after a change, before
+        // any frame could send it.
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        assert_eq!(board.board().unwrap().document().view().node_count(), 2);
         drop(board);
+        assert!(app.wait_for_saves().is_empty());
         let reopened =
             imaginarium_io_native::open_path(&path, imaginarium_io_native::Credentials::None)
                 .unwrap();
         assert_eq!(reopened.document.view().node_count(), 2);
-        // The pill says Saved, not Not saved, for a board with a file.
-        let mut board = app.open_board(&path).unwrap();
-        board_draw(&mut board);
-        let (ui, fonts) = board.ui();
-        assert!(ui.find_by_label(fonts, "Save…").is_none());
-        drop(board);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

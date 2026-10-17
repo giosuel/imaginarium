@@ -98,8 +98,8 @@ pub(crate) enum SaveShown {
     Saving,
     /// The write failed; it is retried.
     Failed(String),
-    /// Opened read-only (made with a newer version).
-    ReadOnly,
+    /// Opened read-only, and why ("made with a newer version").
+    ReadOnly(String),
 }
 
 /// The pill's save state as widgets, for its slot. The Save… button is
@@ -110,6 +110,7 @@ pub(crate) fn save_state(
     asks: &Asks,
     anchors: &mut HashMap<Placeholder, WidgetId>,
 ) -> Vec<WidgetId> {
+    // Each state is a status a screen reader can read.
     let status = |ui: &mut Ui, icon: &str, text: &str, ink: Token, weight: f32| {
         let icon = ui.add(Icon::named(icon, 14.0, ink));
         let label = ui.add(
@@ -117,7 +118,10 @@ pub(crate) fn save_state(
                 .color(ink)
                 .single_line(),
         );
-        ui.add_with_children(Flex::row().gap(6.0), &[icon, label])
+        ui.add_with_children(
+            Flex::row().gap(6.0).role(accesskit::Role::Status, text),
+            &[icon, label],
+        )
     };
     match shown {
         SaveShown::Saved => vec![status(ui, "check", "Saved", Token::TextMuted, 400.0)],
@@ -136,16 +140,16 @@ pub(crate) fn save_state(
                 Token::Warning,
                 500.0,
             );
-            // Why, for the pointer and for screen readers.
+            // Why, for screen readers.
             vec![ui.add_with_children(
                 Flex::row().role(accesskit::Role::Status, format!("Can't save: {reason}")),
                 &[row],
             )]
         }
-        SaveShown::ReadOnly => vec![status(
+        SaveShown::ReadOnly(why) => vec![status(
             ui,
             "lock",
-            "Read-only · made with a newer version",
+            &format!("Read-only · {why}"),
             Token::TextMuted,
             400.0,
         )],
