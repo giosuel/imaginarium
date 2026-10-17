@@ -596,6 +596,12 @@ impl BoardWindow {
         Some(with)
     }
 
+    /// Whether a file dialog or file work runs for this window.
+    #[cfg(test)]
+    pub(crate) fn is_busy(&self) -> bool {
+        self.file_work.is_some()
+    }
+
     /// What the shell's commands see of this window.
     fn shell_cx(&self) -> ShellCx {
         let mode = self.board().map(|board| board.document().mode().clone());
@@ -744,6 +750,14 @@ impl BoardWindow {
                         .take()
                         .filter(|file| file.untitled)
                         .map(|file| file.path);
+                    // A board whose own file failed, now with no file at
+                    // all: kept for recovery from here on.
+                    let kept = kept.or_else(|| {
+                        self.file
+                            .is_none()
+                            .then(|| self.app.as_ref().and_then(|app| app.next_kept_path()))
+                            .flatten()
+                    });
                     if let Some(back) = not.back {
                         let (path, session, saved) = *back;
                         self.link_with(path, session, untitled, saved);
@@ -823,10 +837,9 @@ impl BoardWindow {
                     .is_some_and(|autosave| matches!(autosave.state(), SaveState::Failed(_)))
         });
         if failing && let Some(autosave) = self.file.take().and_then(|file| file.autosave) {
-            let finishing = autosave.finish_in_background();
-            if let Some(app) = &self.app {
-                app.finishing(finishing, "a board's last changes weren't saved");
-            }
+            // Its last try may fail too; the board goes to its new place
+            // (or is kept for recovery), so that isn't news at exit.
+            drop(autosave.finish_in_background());
         }
         let link = self
             .file
@@ -872,6 +885,7 @@ impl BoardWindow {
             None => {
                 let snapshot = self.board().map(|board| board.document().export_snapshot());
                 let Some(Ok(snapshot)) = snapshot else {
+                    self.close_when_saved = false;
                     self.show_message("Can't save the board", "The board can't be written.");
                     return;
                 };
@@ -1589,7 +1603,7 @@ impl BoardWindow {
 
     /// Why closing would lose work, if it would: an untitled board with
     /// something in it (`None` inside), or one whose file fails (why).
-    fn unsaved(&self) -> Option<Option<String>> {
+    pub(crate) fn unsaved(&self) -> Option<Option<String>> {
         let board = self.board()?;
         let editable = matches!(board.document().mode(), imaginarium_model::Mode::Editable);
         match &self.file {
@@ -1610,6 +1624,10 @@ impl BoardWindow {
     fn may_close(&mut self) -> bool {
         if self.app.is_none() {
             return true;
+        }
+        // Saving on the way to closing: it closes when that is done.
+        if self.close_when_saved && self.file_work.is_some() {
+            return false;
         }
         let Some(failed) = self.unsaved() else {
             return true;
@@ -1645,6 +1663,11 @@ impl BoardWindow {
                 if self.file_work.is_none() {
                     self.close_when_saved = true;
                     self.start_file_work(&Ask::Place);
+                } else {
+                    self.show_message(
+                        "Can't save the board yet",
+                        "A file dialog is open for this board. Finish it, then close again.",
+                    );
                 }
             }
         }
@@ -2497,6 +2520,11 @@ impl View for BoardWindow {
         {
             app.board_active(&self.link);
         }
+        // While the close dialog asks, the keys are its own: no shortcut,
+        // menu or board behind it (shell.md §3.9).
+        let asking = self
+            .close_dialog
+            .is_some_and(|dialog| self.ui.is_layer_open(dialog));
         // The Menu key opens the context menu, as Shift+F10 does.
         if let Input::Key {
             key: Key::Other(name),
@@ -2504,6 +2532,7 @@ impl View for BoardWindow {
             ..
         } = input
             && name == "ContextMenu"
+            && !asking
         {
             self.ui.note_keyboard();
             self.asks.borrow_mut().push(Ask::ContextMenu);
@@ -2519,6 +2548,7 @@ impl View for BoardWindow {
         } = input
             && let Some(press) = imaginarium_canvas::keys::key_press(key, *modifiers)
             && let Some(command) = self.keymap.command_for_press(press)
+            && (!asking || command.as_str() == "window.close")
         {
             self.ui.note_keyboard();
             // A held Ctrl+N or Ctrl+W would open or close a window per
@@ -2538,6 +2568,7 @@ impl View for BoardWindow {
             ..
         } = input
             && self.palette.is_none()
+            && !asking
             && self.ui.widget_at(*position) == Some(self.board)
         {
             self.context_menu(*position);
@@ -2566,6 +2597,7 @@ impl View for BoardWindow {
         // most of them: Esc goes back to the board (shell.md §6), and
         // other keys are the board's shortcuts, as if it had them.
         if !handled
+            && !asking
             && let Input::Key {
                 key, pressed: true, ..
             } = input

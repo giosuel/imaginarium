@@ -269,7 +269,7 @@ impl App {
 
     /// Where the next untitled board is kept: a name no other board, or
     /// another running app, has.
-    fn next_kept_path(&self) -> Option<std::path::PathBuf> {
+    pub(crate) fn next_kept_path(&self) -> Option<std::path::PathBuf> {
         thread_local! {
             static NEXT: Cell<u64> = const { Cell::new(0) };
         }
@@ -1270,8 +1270,8 @@ mod tests {
         board_draw(&mut board);
         // Cancelled in the save dialog: the window stays.
         press_named(&mut board, "Save…");
-        until(|| answers.asked.lock().unwrap().len() == 1);
-        board_draw(&mut board);
+        run_until(&mut board, |board| !board.is_busy());
+        assert!(!board.is_busy());
         assert!(requests_of(&mut board).is_empty());
         // Saved: then it closes.
         let target = dir.join("Kept.imag");
@@ -1288,6 +1288,73 @@ mod tests {
         drop(board);
         assert!(app.wait_for_saves().is_empty());
         assert_eq!(nodes_in(&target), 1);
+    }
+
+    fn key_press(board: &mut BoardWindow, key: Key) {
+        board.input(&Input::Key {
+            key,
+            text: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        });
+        board_draw(board);
+    }
+
+    #[test]
+    fn the_close_dialog_keeps_the_keys_while_it_asks() {
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        board.input(&ctrl("w"));
+        board_draw(&mut board);
+        // Shortcuts don't reach past it: no save dialog, no palette.
+        board.input(&ctrl("s"));
+        board.input(&ctrl("k"));
+        board_draw(&mut board);
+        assert!(answers.asked.lock().unwrap().is_empty());
+        assert!(!status_named(&mut board, "Search commands and settings"));
+        // A key it has no use for (Shift alone) leaves the keys on Save…:
+        // Enter still saves.
+        key_press(&mut board, Key::Other("Shift".into()));
+        key_press(&mut board, Key::Character("a".into()));
+        key_press(&mut board, Key::Enter);
+        until(|| !answers.asked.lock().unwrap().is_empty());
+        assert_eq!(answers.asked.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn save_in_the_close_dialog_writes_a_failing_board_anew() {
+        let dir = scratch("close-failed-save");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 1);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&path).unwrap();
+        board_draw(&mut board);
+        std::fs::remove_file(&path).unwrap();
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| board.unsaved().is_some());
+        let target = dir.join("Plan again.imag");
+        *answers.save.lock().unwrap() = Some(target.clone());
+        assert!(!board.close_requested());
+        board_draw(&mut board);
+        press_named(&mut board, "Save…");
+        let mut seen = Vec::new();
+        run_until(&mut board, |board| {
+            seen.extend(requests_of(board));
+            seen.iter().any(|request| request == "Close")
+        });
+        assert!(seen.iter().any(|request| request == "Close"), "{seen:?}");
+        drop(board);
+        app.wait_for_saves();
+        assert_eq!(nodes_in(&target), 2);
     }
 
     #[test]
