@@ -342,15 +342,21 @@ when the last board closes.
   the close button (`View::close_requested`); the run ends with the last
   window. The windows share one GPU device (`SharedGpu`), the app's
   fonts (`Fonts::share`, one scan of the system's fonts), settings and
-  tile workers (`App`). The next window's Vello renderer is built on a
-  thread ahead of time, or is the one a closed window left (the start
-  window's goes to the board it opens).
+  tile workers (`App`). Once a window that opens others
+  (`WindowOptions::more_windows`: the start window and boards) has drawn,
+  the next window's Vello renderer is built on a thread, so that window
+  opens without compiling pipelines first. Programs of one window (the
+  gate, the examples) don't build one.
 - **Per window:** a frame asked for by a view (`request_frame`) draws
   only its window; a signal change draws the window whose widget tree
   watches it, wherever the change came from; the scale factor, input
-  method resets and pasted text are the window's own. A window that
+  method resets and pasted text are the window's own (text asked for by
+  a window that closed meanwhile is dropped). A theme switch, or a
+  setting another window follows (the tool bar's position), draws every
+  window (`request_frame_everywhere`). A window that
   fails (no surface, no GPU) closes alone, listed in
-  `RunStats::window_errors`; the run fails only if it was the last.
+  `RunStats::window_errors` (the app prints them); the run fails only if
+  it was the last.
 - **Held keys:** `Ctrl+N` and `Ctrl+W` act once while held, and the
   start window opens one board however often New board is pressed.
 - **Closing:** `Ctrl+W` (`window.close`) or the close button. A board

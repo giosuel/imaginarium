@@ -330,6 +330,17 @@ mod tests {
     }
 
     #[test]
+    fn a_held_ctrl_w_closes_once() {
+        let app = app();
+        let mut first = app.new_board().unwrap();
+        let _second = app.new_board().unwrap();
+        first.input(&ctrl("w"));
+        first.input(&repeated(ctrl("w")));
+        assert_eq!(names(&first.take_requests()), ["Close"]);
+        assert_eq!(app.boards(), 1);
+    }
+
+    #[test]
     fn window_commands_need_the_app() {
         // A board window outside the app (tests, embedding) can't open
         // windows: the palette doesn't offer it.

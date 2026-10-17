@@ -105,6 +105,7 @@ impl StartWindow {
             background: theme().color(Token::BoardBg),
             app_id: Some("ch.giosuel.Imaginarium".into()),
             resizable: false,
+            more_windows: true,
             ..WindowOptions::default()
         }
     }

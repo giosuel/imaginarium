@@ -1380,3 +1380,14 @@ fn the_inspector_leaves_help_and_a_right_bar_free() {
     assert!(!overlap(panel, bar), "{panel:?} {bar:?}");
     assert!(!overlap(panel, help), "{panel:?} {help:?}");
 }
+
+#[test]
+fn the_palette_hides_window_commands_outside_the_app() {
+    // A board window on its own (as here) can't open windows.
+    let mut window = Harness::new();
+    window.input(mod_k());
+    type_text(&mut window, "new board");
+    let (ui, fonts) = window.window.ui();
+    assert!(ui.find_by_label(fonts, "New board").is_none());
+    assert!(ui.find_by_label(fonts, "Close window").is_none());
+}

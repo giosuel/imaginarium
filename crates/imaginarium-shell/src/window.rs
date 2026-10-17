@@ -284,6 +284,9 @@ impl BoardWindow {
         let subscription = settings.borrow_mut().subscribe(move |change| {
             if change.key == TOOLBAR_POSITION.key() {
                 flag.store(true, Ordering::Relaxed);
+                // The change may come from another window: this one
+                // draws to follow it.
+                imaginarium_ui::request_frame_everywhere();
             }
         });
         let dock = settings
@@ -358,6 +361,7 @@ impl BoardWindow {
             size: Size::new(1440.0, 900.0),
             background: theme().color(Token::BoardBg),
             app_id: Some("ch.giosuel.Imaginarium".into()),
+            more_windows: true,
             ..WindowOptions::default()
         }
     }

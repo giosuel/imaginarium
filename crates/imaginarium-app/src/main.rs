@@ -86,6 +86,10 @@ fn main() -> anyhow::Result<()> {
     };
     let setup = started.elapsed();
     let stats = imaginarium_ui::run_with_gpu(gpu, options, view).context("running the app")?;
+    // Windows that failed while others stayed open.
+    for err in &stats.window_errors {
+        eprintln!("imaginarium: a window closed: {err}");
+    }
     if frames.is_some() {
         report(&stats, setup);
     }
