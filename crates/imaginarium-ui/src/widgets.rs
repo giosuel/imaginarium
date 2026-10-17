@@ -658,9 +658,10 @@ type Flag = Rc<dyn Fn() -> bool>;
 /// A square button showing an icon: tool bars, zoom controls. Its label
 /// names it for screen readers and, with its shortcut, in a tooltip
 /// ("Rectangle · R"). Quiet: no fill until hovered; a selected button (the
-/// active tool) has the accent's tint and its icon in [`Token::AccentInk`];
+/// active tool) is filled with [`Token::AccentSoft`] and its icon in [`Token::AccentInk`];
 /// a disabled one is drawn in [`Token::Disabled`] and does nothing.
 ///
+/// [`Token::AccentSoft`]: crate::theme::Token::AccentSoft
 /// [`Token::AccentInk`]: crate::theme::Token::AccentInk
 /// [`Token::Disabled`]: crate::theme::Token::Disabled
 ///
@@ -823,7 +824,7 @@ impl Widget for IconButton {
         // The selected tint is the resting fill; hover and press darken
         // from there, as on a quiet button from nothing.
         let rest = if selected {
-            theme.color(Token::ControlActive)
+            theme.color(Token::AccentSoft)
         } else {
             theme.color(Token::ControlHover).with_alpha(0.0)
         };

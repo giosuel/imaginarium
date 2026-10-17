@@ -32,6 +32,10 @@ pub enum Token {
     ControlHover,
     /// The active tool or chosen option (a tint of the accent).
     ControlActive,
+    /// The selected tool in the tool bar: a stronger tint than
+    /// [`Token::ControlActive`], as the tool bar mockup draws it. Only
+    /// [`Token::AccentInk`] icons go on it.
+    AccentSoft,
     /// Body text and icons.
     Text,
     /// Body text that steps back a little: a dialog's explanation.
@@ -69,7 +73,7 @@ pub enum Token {
 
 impl Token {
     /// Every token, in declaration order.
-    pub const ALL: [Token; 24] = [
+    pub const ALL: [Token; 25] = [
         Token::BoardBg,
         Token::BoardDot,
         Token::PanelBg,
@@ -78,6 +82,7 @@ impl Token {
         Token::Divider,
         Token::ControlHover,
         Token::ControlActive,
+        Token::AccentSoft,
         Token::Text,
         Token::TextSecondary,
         Token::TextMuted,
@@ -158,6 +163,7 @@ impl Theme {
                 (Token::Divider, rgb(0x28282e)),
                 (Token::ControlHover, rgb(0x2a2a30)),
                 (Token::ControlActive, mix(accent, panel, 0.72)),
+                (Token::AccentSoft, mix(accent, panel, 0.62)),
                 (Token::Text, rgb(0xededf0)),
                 (Token::TextSecondary, rgb(0xd4d4d8)),
                 (Token::TextMuted, rgb(0xa1a1aa)),
@@ -199,6 +205,7 @@ impl Theme {
                 (Token::Divider, rgb(0xefeff2)),
                 (Token::ControlHover, rgb(0xf1f1f4)),
                 (Token::ControlActive, mix(accent, panel, 0.88)),
+                (Token::AccentSoft, mix(accent, panel, 0.86)),
                 (Token::Text, rgb(0x18181b)),
                 (Token::TextSecondary, rgb(0x3f3f46)),
                 (Token::TextMuted, rgb(0x52525b)),
@@ -387,7 +394,7 @@ mod tests {
     /// Text and the backgrounds it is drawn on, which must reach 4.5:1
     /// (WCAG AA for body text) in every theme and for every accent the
     /// settings offer.
-    const PAIRS: [(Token, Token); 20] = [
+    const PAIRS: [(Token, Token); 21] = [
         (Token::Danger, Token::ControlHover),
         (Token::Danger, Token::ControlActive),
         (Token::Text, Token::PanelBg),
@@ -402,6 +409,7 @@ mod tests {
         (Token::TextSubtle, Token::ControlHover),
         (Token::AccentInk, Token::PanelBg),
         (Token::AccentInk, Token::ControlActive),
+        (Token::AccentInk, Token::AccentSoft),
         (Token::OnAccent, Token::Accent),
         (Token::OnAccent, Token::AccentHover),
         (Token::OnAccent, Token::AccentPressed),
