@@ -84,6 +84,8 @@ pub(crate) struct Chrome {
     /// The pill's save state, filled again when it changes
     /// ([`save_state`]).
     pub(crate) save_slot: WidgetId,
+    /// The board's name in the pill.
+    pub(crate) title: WidgetId,
 }
 
 /// What the document pill says about the file (`shell.md` §3.1, the
@@ -181,7 +183,7 @@ pub(crate) fn save_state(
                         border: Some(Token::AccentLine.into()),
                         ..ButtonColors::quiet()
                     },
-                    explain(asks, Placeholder::Save),
+                    run(asks, "file.save"),
                 )
                 .height(28.0)
                 .padding(10.0, 10.0)
@@ -282,7 +284,7 @@ pub(crate) fn chrome(
 ) -> Chrome {
     let [keymap, shell_keys] = keymaps;
     let mut anchors = HashMap::new();
-    let (pill, save_slot) = pill(ui, name, asks, &mut anchors);
+    let (pill, save_slot, title) = pill(ui, name, asks, &mut anchors);
     let top_right = top_right(ui, shell_keys, asks, &mut anchors);
     let spring = ui.add(through(taffy::FlexDirection::Row).grow(1.0));
     let top = ui.add_with_children(
@@ -379,6 +381,7 @@ pub(crate) fn chrome(
         zoom,
         corners: [pill, top_right, bottom_left, help],
         save_slot,
+        title,
     }
 }
 
@@ -388,14 +391,13 @@ fn pill(
     name: &str,
     asks: &Asks,
     anchors: &mut HashMap<Placeholder, WidgetId>,
-) -> (WidgetId, WidgetId) {
+) -> (WidgetId, WidgetId, WidgetId) {
     let logo = ui.add(Logo);
+    let menu_asks = asks.clone();
     let menu = ui.add_with_children(
-        ButtonBox::new(
-            "Main menu",
-            ButtonColors::quiet(),
-            explain(asks, Placeholder::MainMenu),
-        )
+        ButtonBox::new("Main menu", ButtonColors::quiet(), move || {
+            menu_asks.borrow_mut().push(Ask::MainMenu);
+        })
         .size(34.0, 34.0)
         .radius(9.0)
         .keep_focus(),
@@ -412,7 +414,7 @@ fn pill(
         ButtonBox::new(
             "Rename or move the board",
             ButtonColors::quiet(),
-            explain(asks, Placeholder::Title),
+            run(asks, "file.move"),
         )
         .height(32.0)
         .padding(6.0, 6.0)
@@ -438,7 +440,7 @@ fn pill(
             }),
         &[menu, rename, line, state],
     );
-    (pill, state)
+    (pill, state, title)
 }
 
 /// Search, the AI assistant and Share.
@@ -545,6 +547,13 @@ fn mod_key(keymap: &Keymap, key: &str) -> String {
 /// The note a placeholder opens: what is coming.
 pub(crate) fn note(ui: &mut Ui, placeholder: Placeholder) -> WidgetId {
     let (title, text) = placeholder.note();
+    message(ui, title, text)
+}
+
+/// A short message next to what it is about (a file that couldn't be
+/// opened or saved): `title` in bold, then `text`.
+pub(crate) fn message(ui: &mut Ui, title: &str, text: &str) -> WidgetId {
+    let name = title.to_owned();
     let title = ui.add(
         Label::new(title, body().weight(600.0))
             .color(Token::Text)
@@ -560,7 +569,7 @@ pub(crate) fn note(ui: &mut Ui, placeholder: Placeholder) -> WidgetId {
             .border(1.0, Token::PanelBorder)
             .radius(12.0)
             .shadow()
-            .role(Role::Dialog, placeholder.note().0),
+            .role(Role::Dialog, name),
         &[title, text],
     )
 }

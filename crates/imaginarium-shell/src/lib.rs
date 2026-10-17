@@ -46,6 +46,7 @@ mod app;
 mod chrome;
 mod commands;
 mod contextbar;
+mod files;
 mod inspector;
 mod menu;
 mod palette;
@@ -58,6 +59,7 @@ mod window;
 mod tests;
 
 pub use app::{App, SHOW_START_WINDOW};
+pub use files::{Dialogs, SystemDialogs};
 pub use settings::SettingsWindow;
 pub use start::StartWindow;
 pub use toolbar::{Dock, TOOLBAR_POSITION};

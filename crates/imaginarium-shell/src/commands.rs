@@ -17,6 +17,34 @@ pub(crate) struct ShellCx {
     pub(crate) asks: Vec<Ask>,
     /// The window is one of the app's (it can open and close windows).
     pub(crate) in_app: bool,
+    /// Where the board is kept.
+    pub(crate) file: FileState,
+    /// A file dialog or file work runs for this window.
+    pub(crate) busy: bool,
+}
+
+/// Where a board is kept, for the file commands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FileState {
+    /// No place of its own yet (untitled; maybe kept for recovery).
+    #[default]
+    Untitled,
+    /// In a file, which every change goes into.
+    Saved,
+    /// Read only: open elsewhere or not writable (a copy can be saved).
+    ReadOnly,
+    /// Made with a newer version: nothing is written, not even a copy
+    /// (it could lose what this version doesn't know).
+    Newer,
+}
+
+/// File commands that put up a dialog: one at a time.
+fn file_work(cx: &ShellCx) -> Option<Availability> {
+    if !cx.in_app {
+        return Some(Availability::Hidden);
+    }
+    cx.busy
+        .then_some(Availability::Disabled("a file dialog is open"))
 }
 
 /// Window commands need the app's windows (not a window in a test).
@@ -214,6 +242,90 @@ pub(crate) static OPEN_SETTINGS: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
 )
 .availability(in_app);
 
+/// `file.open`.
+pub(crate) static OPEN_FILE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "file.open",
+    CommandMeta::new(
+        "Open…",
+        "Choose a board file (.imag) and open it in a window of its own; every change to it is saved into the file.",
+    )
+    .category("File")
+    .synonyms(&["open", "open file", "load", "öffnen"])
+    .icon("folder-open"),
+    |cx, _args| {
+        cx.asks.push(Ask::OpenFile);
+        Ok(Outcome::Done)
+    },
+)
+.availability(|cx| file_work(cx).unwrap_or(Availability::Enabled));
+
+/// `file.save`.
+pub(crate) static SAVE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "file.save",
+    CommandMeta::new(
+        "Save…",
+        "Give a new board its place: choose a name and folder for its file. From then on every change is saved into it on its own.",
+    )
+    .category("File")
+    .synonyms(&["save", "save as", "keep", "speichern"])
+    .icon("save"),
+    |cx, _args| {
+        cx.asks.push(Ask::Place);
+        Ok(Outcome::Done)
+    },
+)
+.availability(|cx| {
+    file_work(cx).unwrap_or(match cx.file {
+        FileState::Untitled => Availability::Enabled,
+        FileState::Saved => Availability::Disabled("every change is already saved on its own"),
+        FileState::ReadOnly | FileState::Newer => Availability::Hidden,
+    })
+});
+
+/// `file.move`.
+pub(crate) static MOVE: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "file.move",
+    CommandMeta::new(
+        "Rename or move…",
+        "Choose a new name or folder for the board's file; the board goes on saving there. For a new board, this saves it.",
+    )
+    .category("File")
+    .synonyms(&["rename", "move", "move to", "save as", "umbenennen", "verschieben"])
+    .icon("folder-input"),
+    |cx, _args| {
+        cx.asks.push(Ask::Place);
+        Ok(Outcome::Done)
+    },
+)
+.availability(|cx| {
+    file_work(cx).unwrap_or(match cx.file {
+        FileState::Untitled | FileState::Saved => Availability::Enabled,
+        FileState::ReadOnly | FileState::Newer => Availability::Hidden,
+    })
+});
+
+/// `file.save_copy`.
+pub(crate) static SAVE_COPY: FnCommand<ShellCx> = FnCommand::<ShellCx>::new(
+    "file.save_copy",
+    CommandMeta::new(
+        "Save a copy…",
+        "Save the board as it is now into a new file; this window goes on with the board where it was.",
+    )
+    .category("File")
+    .synonyms(&["copy", "duplicate file", "export", "backup", "kopie"])
+    .icon("copy"),
+    |cx, _args| {
+        cx.asks.push(Ask::SaveCopy);
+        Ok(Outcome::Done)
+    },
+)
+.availability(|cx| {
+    file_work(cx).unwrap_or(match cx.file {
+        FileState::Newer => Availability::Hidden,
+        _ => Availability::Enabled,
+    })
+});
+
 /// The shell's shortcuts (the board has its own keymap).
 pub(crate) fn shell_keymap(
     platform: imaginarium_commands::Platform,
@@ -236,6 +348,12 @@ pub(crate) fn shell_keymap(
         "Mod+N",
         imaginarium_commands::CommandId::new("file.new_board"),
     );
+    let _ = keymap.bind("Mod+O", imaginarium_commands::CommandId::new("file.open"));
+    let _ = keymap.bind("Mod+S", imaginarium_commands::CommandId::new("file.save"));
+    let _ = keymap.bind(
+        "Mod+Shift+S",
+        imaginarium_commands::CommandId::new("file.save_copy"),
+    );
     let _ = keymap.bind(
         "Mod+W",
         imaginarium_commands::CommandId::new("window.close"),
@@ -257,8 +375,12 @@ pub(crate) fn shell_commands() -> &'static [&'static FnCommand<ShellCx>] {
     &SHELL_COMMANDS
 }
 
-static SHELL_COMMANDS: [&FnCommand<ShellCx>; 10] = [
+static SHELL_COMMANDS: [&FnCommand<ShellCx>; 14] = [
     &NEW_BOARD,
+    &OPEN_FILE,
+    &SAVE,
+    &MOVE,
+    &SAVE_COPY,
     &CLOSE_WINDOW,
     &OPEN_SETTINGS,
     &TOGGLE_INSPECTOR,

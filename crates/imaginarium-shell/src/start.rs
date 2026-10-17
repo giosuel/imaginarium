@@ -4,9 +4,9 @@
 //! version, New board and Open… on the left, recent boards on the right.
 //!
 //! After a crash, a notice on the right offers the boards that were kept
-//! (`App::look_for_kept_boards`). Open… and the recent boards come with
-//! the rest of files (M3.6); until then Open… is disabled and the recent
-//! list says so. The "Start
+//! (`App::look_for_kept_boards`). Open… asks for a board file on a thread
+//! of its own (`crate::files`). The recent boards come with M3.6 part 5;
+//! until then the recent list says so. The "Start
 //! from" templates come with M4's shape libraries, the Settings, Shortcuts
 //! and What's new links with the windows they open.
 
@@ -24,8 +24,8 @@ use imaginarium_render::Scene;
 use imaginarium_render::kurbo::{Rect, Size};
 use imaginarium_text::{Fonts, TextStyle};
 use imaginarium_ui::{
-    AccessTree, ButtonBox, ButtonColors, Flex, FrameInfo, Icon, Input, Label, Logo, Placement,
-    Switch, Token, Ui, View, WidgetId, WindowOptions, WindowRequest, theme,
+    AccessTree, ButtonBox, ButtonColors, Flex, FrameInfo, Icon, Input, Label, Logo, Switch, Token,
+    Ui, View, WidgetId, WindowOptions, WindowRequest, theme,
 };
 use taffy::prelude::length;
 
@@ -36,6 +36,8 @@ use crate::toolbar::shortcut;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StartAsk {
     NewBoard,
+    /// Choose a board file and open it.
+    Open,
     /// Open the boards kept after a crash.
     OpenKept,
     /// Open Settings at this section.
@@ -67,6 +69,10 @@ pub struct StartWindow {
     notice: Option<WidgetId>,
     /// It asked to be woken when the search for kept boards is done.
     waiting_for_kept: bool,
+    /// The open dialog, then the file, while they run.
+    opening: Option<crate::files::Pending<Option<crate::files::OpenedFile>>>,
+    /// Why the last file couldn't be opened, while it shows.
+    error: Option<(WidgetId, String)>,
     close_after: Option<u64>,
     frames: u64,
 }
@@ -87,6 +93,7 @@ impl StartWindow {
             "Mod+,",
             imaginarium_commands::CommandId::new("settings.open"),
         );
+        let _ = keymap.bind("Mod+O", imaginarium_commands::CommandId::new("file.open"));
         let shown = signal(app.shows_start_window());
         let (side, new_board) = side(&mut ui, &app, &keymap, &asks, shown);
         // Show at startup changed elsewhere (Settings): the switch follows.
@@ -126,6 +133,8 @@ impl StartWindow {
             recent,
             notice: None,
             waiting_for_kept: false,
+            opening: None,
+            error: None,
             close_after: None,
             frames: 0,
         }
@@ -147,13 +156,64 @@ impl StartWindow {
         if let Some(notice) = self.notice.take() {
             self.ui.remove(notice);
         }
-        let mut children = self.recent.to_vec();
         if let Some((count, name)) = kept {
-            let notice = notice(&mut self.ui, count, &name, &self.asks);
-            children.insert(0, notice);
-            self.notice = Some(notice);
+            self.notice = Some(notice(&mut self.ui, count, &name, &self.asks));
         }
+        self.lay_out_right();
+    }
+
+    /// The right side: an error, the crash notice, then Recent.
+    fn lay_out_right(&mut self) {
+        let children: Vec<WidgetId> = self
+            .error
+            .as_ref()
+            .map(|(error, _)| *error)
+            .into_iter()
+            .chain(self.notice)
+            .chain(self.recent)
+            .collect();
         self.ui.set_children(self.right, &children);
+    }
+
+    /// Asks for a board file to open, on a thread of its own (once at a
+    /// time).
+    pub fn open_file(&mut self) {
+        if self.closing || self.opening.is_some() {
+            return;
+        }
+        let dialogs = self.app.dialogs();
+        self.opening = Some(crate::files::Pending::spawn(
+            "open-dialog",
+            move || dialogs.open_board().map(crate::files::open_file),
+            Some(Err("no thread to open with".into())),
+        ));
+    }
+
+    /// Opens the board the dialog chose, and closes this window; or says
+    /// why it can't be opened.
+    fn poll_opening(&mut self) {
+        let Some(result) = self.opening.as_ref().and_then(crate::files::Pending::take) else {
+            return;
+        };
+        self.opening = None;
+        if let Some((error, _)) = self.error.take() {
+            self.ui.remove(error);
+        }
+        match result {
+            None => {}
+            Some(Ok((path, opening))) => {
+                let window = self.app.opened_board(&path, opening);
+                self.requests
+                    .push(WindowRequest::Open(window.options(), Box::new(window)));
+                self.requests.push(WindowRequest::Close);
+                self.closing = true;
+            }
+            Some(Err(reason)) => {
+                let error = error_notice(&mut self.ui, &reason);
+                self.error = Some((error, reason));
+            }
+        }
+        self.lay_out_right();
     }
 
     /// Opens the boards kept after a crash, each in its window. The start
@@ -228,6 +288,7 @@ impl StartWindow {
         for ask in asks {
             match ask {
                 StartAsk::NewBoard => self.new_board(),
+                StartAsk::Open => self.open_file(),
                 StartAsk::OpenKept => self.open_kept_boards(),
                 StartAsk::Settings(section) => self.open_settings(section),
             }
@@ -279,17 +340,20 @@ fn side(
         "New board",
         keys,
         ButtonColors::primary(),
-        Some(Box::new(move || {
+        Box::new(move || {
             asks_new.borrow_mut().push(StartAsk::NewBoard);
-        })),
+        }),
     );
+    let asks_open = asks.clone();
     let open = big_button(
         ui,
         "folder-open",
         "Open…",
-        Some(primary_key("O")),
+        shortcut(keymap, "file.open"),
         ButtonColors::secondary(),
-        None,
+        Box::new(move || {
+            asks_open.borrow_mut().push(StartAsk::Open);
+        }),
     );
     let buttons = ui.add_with_children(Flex::column().gap(6.0), &[new_board, open]);
 
@@ -358,29 +422,20 @@ fn link(ui: &mut Ui, title: &str, asks: &StartAsks, ask: StartAsk) -> WidgetId {
     .add_to(ui, &[text])
 }
 
-/// `Ctrl+<key>`, or `⌘<key>` on macOS, as the menus show shortcuts.
-fn primary_key(key: &str) -> String {
-    match Platform::current() {
-        Platform::MacOs => format!("⌘{key}"),
-        _ => format!("Ctrl+{key}"),
-    }
-}
-
-/// A 40 px button with an icon, a title and its shortcut. Without an
-/// action it is disabled (Open… until files come).
+/// A 40 px button with an icon, a title and its shortcut.
 fn big_button(
     ui: &mut Ui,
     icon: &str,
     title: &str,
     keys: Option<String>,
     colors: ButtonColors,
-    action: Option<Box<dyn FnMut()>>,
+    action: Box<dyn FnMut()>,
 ) -> WidgetId {
-    let primary = action.is_some() && colors.border.is_none();
-    let (ink, icon_ink, keys_ink) = match (&action, primary) {
-        (None, _) => (Token::TextSubtle, Token::TextSubtle, Token::TextSubtle),
-        (Some(_), true) => (Token::OnAccent, Token::OnAccent, Token::OnAccent),
-        (Some(_), false) => (Token::Text, Token::TextMuted, Token::TextSubtle),
+    let primary = colors.border.is_none();
+    let (ink, icon_ink, keys_ink) = if primary {
+        (Token::OnAccent, Token::OnAccent, Token::OnAccent)
+    } else {
+        (Token::Text, Token::TextMuted, Token::TextSubtle)
     };
     let icon = ui.add(Icon::named(icon, 17.0, icon_ink));
     let weight = if primary { 600.0 } else { 500.0 };
@@ -400,28 +455,33 @@ fn big_button(
             ),
         );
     }
-    let enabled = action.is_some();
-    let mut action = action;
-    let name = if enabled {
-        title.to_owned()
-    } else {
-        format!("{title}, unavailable: opening files comes in a later preview")
-    };
-    let mut button = ButtonBox::new(name, colors, move || {
-        if let Some(action) = &mut action {
-            action();
-        }
-    })
-    .height(40.0)
-    .padding(12.0, 12.0)
-    .gap(10.0)
-    .start()
-    .radius(10.0)
-    .disabled(!enabled);
-    if !enabled {
-        button = button.tooltip("Opening files comes in a later preview", Placement::Right);
-    }
-    button.add_to(ui, &children)
+    ButtonBox::new(title, colors, action)
+        .height(40.0)
+        .padding(12.0, 12.0)
+        .gap(10.0)
+        .start()
+        .radius(10.0)
+        .add_to(ui, &children)
+}
+
+/// Why a board couldn't be opened, above the rest of the right side.
+fn error_notice(ui: &mut Ui, text: &str) -> WidgetId {
+    let icon = ui.add(Icon::named("triangle-alert", 16.0, Token::OnWarningSoft));
+    let label = ui.add(
+        Label::new(text, TextStyle::new(13.0))
+            .color(Token::OnWarningSoft)
+            .grow(1.0),
+    );
+    ui.add_with_children(
+        Flex::row()
+            .gap(10.0)
+            .align_center()
+            .padding(12.0, 10.0)
+            .radius(10.0)
+            .background(Token::WarningSoft)
+            .role(Role::Alert, text),
+        &[icon, label],
+    )
 }
 
 /// The notice after a crash (the Start mockup): which boards were kept,
@@ -498,7 +558,7 @@ fn recent(ui: &mut Ui) -> (WidgetId, [WidgetId; 2]) {
     );
     let later = ui.add(
         Label::new(
-            "Saving and opening files come in a later preview.",
+            "Listing them comes in a later preview.",
             TextStyle::new(12.0),
         )
         .color(Token::TextSubtle)
@@ -530,6 +590,7 @@ fn recent(ui: &mut Ui) -> (WidgetId, [WidgetId; 2]) {
 impl View for StartWindow {
     fn paint(&mut self, scene: &mut Scene, size: Size) {
         self.handle_asks();
+        self.poll_opening();
         self.sync_notice();
         self.ui
             .layout(&mut self.fonts, Rect::from_origin_size((0.0, 0.0), size));
@@ -551,6 +612,7 @@ impl View for StartWindow {
             self.ui.note_keyboard();
             match command.as_str() {
                 "file.new_board" => self.new_board(),
+                "file.open" => self.open_file(),
                 "settings.open" => self.open_settings(crate::settings::Section::General),
                 _ => {}
             }

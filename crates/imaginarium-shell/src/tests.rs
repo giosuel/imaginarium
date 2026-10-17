@@ -224,11 +224,7 @@ fn zoom_buttons_and_the_zoom_menu_change_the_view() {
 #[test]
 fn placeholders_say_what_is_coming() {
     let mut window = Harness::new();
-    for (button, words) in [
-        ("Share", "Hub in M8"),
-        ("Save…", "M3.6"),
-        ("Help and shortcuts", "M3.9"),
-    ] {
+    for (button, words) in [("Share", "Hub in M8"), ("Help and shortcuts", "M3.9")] {
         let id = window.named(button);
         let at = window.bounds(id).center();
         window.click(at);

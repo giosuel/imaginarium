@@ -7,7 +7,6 @@
 //! applies and greyed when it can't run now.
 
 use accesskit::Role;
-use imaginarium_canvas::BoardCanvas;
 use imaginarium_commands::{Availability, Keymap, Registry};
 use imaginarium_text::TextStyle;
 use imaginarium_ui::{
@@ -68,12 +67,21 @@ pub(crate) struct Entry {
     disabled: Option<&'static str>,
 }
 
-/// The rows of `groups` for `board` now: commands that don't apply are
-/// left out, and groups left empty with them.
-pub(crate) fn entries(
+/// The main menu (the pill's app button): files, then settings.
+pub(crate) const MAIN: &[&[&str]] = &[
+    &["file.new_board", "file.open"],
+    &["file.save", "file.move", "file.save_copy"],
+    &["settings.open"],
+    &["window.close"],
+];
+
+/// The rows of `groups` for `cx` now (the board, or the shell's context):
+/// commands that don't apply are left out, and groups left empty with
+/// them.
+pub(crate) fn entries<Cx>(
     groups: &[&[&'static str]],
-    commands: &Registry<BoardCanvas>,
-    board: &BoardCanvas,
+    commands: &Registry<Cx>,
+    cx: &Cx,
     keymap: &Keymap,
 ) -> Vec<Vec<Entry>> {
     groups
@@ -83,7 +91,7 @@ pub(crate) fn entries(
                 .iter()
                 .filter_map(|&id| {
                     let command = commands.get(id)?;
-                    let disabled = match command.availability(board) {
+                    let disabled = match command.availability(cx) {
                         Availability::Hidden => return None,
                         Availability::Disabled(reason) => Some(reason),
                         Availability::Enabled => None,

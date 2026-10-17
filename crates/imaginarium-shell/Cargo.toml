@@ -20,6 +20,7 @@ imaginarium-render.workspace = true
 imaginarium-settings.workspace = true
 imaginarium-text.workspace = true
 imaginarium-ui.workspace = true
+rfd.workspace = true
 taffy.workspace = true
 
 [lints]

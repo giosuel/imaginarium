@@ -25,8 +25,9 @@ use taffy::prelude::length;
 
 use crate::app::App;
 use crate::chrome::{self, Chrome, Placeholder};
-use crate::commands::{ShellCx, shell_commands, shell_keymap};
+use crate::commands::{FileState, ShellCx, shell_commands, shell_keymap};
 use crate::contextbar::{self, ContextBar, Control};
+use crate::files::{NotPlaced, OpenedFile, Pending, Placed};
 use crate::inspector::{self, Field, Inspector, Popup};
 use crate::palette::{self, Catalog, Kind, Palette, Sources};
 use crate::toolbar::{self, Dock, DropZones, TOOLBAR_POSITION, ToolBar};
@@ -76,6 +77,20 @@ struct FileLink {
     waker: SaveWaker,
 }
 
+/// File work a thread does for the window: a dialog, then the file.
+enum FileWork {
+    /// The open dialog, then the file opened (`None`: cancelled).
+    Open(Pending<Option<OpenedFile>>),
+    /// Where to put the board (`None`: cancelled).
+    PlaceWhere(Pending<Option<PathBuf>>),
+    /// The board's file going there; whether it was untitled before.
+    Placing(Pending<Result<Placed, NotPlaced>>, bool),
+    /// Where to save a copy (`None`: cancelled).
+    CopyWhere(Pending<Option<PathBuf>>),
+    /// The copy being written.
+    Copying(Pending<Result<(), String>>),
+}
+
 /// What a panel's button asked for. The window does it after the input
 /// that asked, when it can reach the board and the tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +99,15 @@ pub(crate) enum Ask {
     Run(&'static str),
     /// Open a window on a new board.
     NewBoard,
+    /// Choose a board file and open it.
+    OpenFile,
+    /// Choose a place for the board's file and move it there (Save…,
+    /// Rename or move…).
+    Place,
+    /// Choose where to save a copy of the board.
+    SaveCopy,
+    /// Open the main menu (the pill's app button).
+    MainMenu,
     /// Close this window.
     CloseWindow,
     /// Open the Settings window.
@@ -242,6 +266,8 @@ pub struct BoardWindow {
     shown: chrome::SaveShown,
     /// Why an untitled board's recovery file fails, once said.
     kept_failure: Option<String>,
+    /// A dialog or file work running for this window.
+    file_work: Option<FileWork>,
     /// What Settings sees of this board ("This board").
     link: Rc<crate::app::BoardLink>,
     /// The board's revision `link` was last brought up to date at.
@@ -400,6 +426,7 @@ impl BoardWindow {
             file: None,
             shown: chrome::SaveShown::Draft,
             kept_failure: None,
+            file_work: None,
             link: Rc::default(),
             link_seen: None,
             requests: Vec::new(),
@@ -489,6 +516,19 @@ impl BoardWindow {
         let saved = document
             .version_at_open()
             .unwrap_or_else(|| document.version());
+        self.link_with(path, session, untitled, saved);
+        self
+    }
+
+    /// Saves into `session`, the file at `path`, which holds the document
+    /// up to `saved`: what the board has beyond it goes out at once.
+    fn link_with(
+        &mut self,
+        path: PathBuf,
+        session: imaginarium_io_native::Session,
+        untitled: bool,
+        saved: imaginarium_model::Version,
+    ) {
         let revision = self.board_revision();
         let waker: SaveWaker = Arc::default();
         let id = imaginarium_io_native::FileId {
@@ -508,7 +548,231 @@ impl BoardWindow {
         });
         self.save_changes(true);
         self.update_save_state();
-        self
+    }
+
+    /// What the shell's commands see of this window.
+    fn shell_cx(&self) -> ShellCx {
+        let mode = self.board().map(|board| board.document().mode().clone());
+        let file = match &mode {
+            Some(imaginarium_model::Mode::ReadOnly(imaginarium_model::ReadOnlyReason::File(_))) => {
+                FileState::ReadOnly
+            }
+            Some(imaginarium_model::Mode::ReadOnly(_)) => FileState::Newer,
+            _ => match &self.file {
+                Some(file) if !file.untitled => FileState::Saved,
+                _ => FileState::Untitled,
+            },
+        };
+        ShellCx {
+            in_app: self.app.is_some(),
+            file,
+            busy: self.file_work.is_some(),
+            ..ShellCx::default()
+        }
+    }
+
+    /// The board's name changed (saved, renamed): the pill, the window's
+    /// title and Settings' This board follow.
+    fn rename(&mut self, name: String) {
+        if name == self.name {
+            return;
+        }
+        if let Some(label) = self.ui.widget_mut::<Label>(self.chrome.title) {
+            label.set_text(name.clone());
+        }
+        self.ui.refresh(self.chrome.title);
+        self.requests
+            .push(WindowRequest::SetTitle(format!("{name} — Imaginarium")));
+        self.name = name;
+        // Settings' This board shows the new name.
+        self.link_seen = None;
+    }
+
+    /// Shows `text` under `title` next to the board's name.
+    fn show_message(&mut self, title: &str, text: &str) {
+        let Some(&anchor) = self.chrome.anchors.get(&Placeholder::Title) else {
+            return;
+        };
+        let content = chrome::message(&mut self.ui, title, text);
+        self.open_popup(content, anchor, Placement::Below);
+    }
+
+    /// Starts a dialog for `ask` on a thread of its own, unless one runs.
+    fn start_file_work(&mut self, ask: &Ask) {
+        let Some(app) = self.app.clone() else {
+            return;
+        };
+        if self.file_work.is_some() {
+            return;
+        }
+        let dialogs = app.dialogs();
+        let folder = self
+            .file
+            .as_ref()
+            .filter(|file| !file.untitled)
+            .and_then(|file| file.path.parent().map(ToOwned::to_owned));
+        let name = self.name.clone();
+        self.file_work = Some(match ask {
+            Ask::OpenFile => FileWork::Open(Pending::spawn(
+                "open-dialog",
+                move || dialogs.open_board().map(crate::files::open_file),
+                Some(Err("no thread to open with".into())),
+            )),
+            Ask::Place => {
+                let untitled = self.shell_cx().file == FileState::Untitled;
+                let title = if untitled {
+                    "Save the board"
+                } else {
+                    "Rename or move the board"
+                };
+                FileWork::PlaceWhere(Pending::spawn(
+                    "save-dialog",
+                    move || dialogs.save_board(title, folder.as_deref(), &format!("{name}.imag")),
+                    None,
+                ))
+            }
+            _ => FileWork::CopyWhere(Pending::spawn(
+                "save-dialog",
+                move || {
+                    dialogs.save_board(
+                        "Save a copy",
+                        folder.as_deref(),
+                        &format!("{name} copy.imag"),
+                    )
+                },
+                None,
+            )),
+        });
+    }
+
+    /// Takes what a file thread finished, and goes on with it.
+    fn poll_file_work(&mut self) {
+        let Some(work) = self.file_work.take() else {
+            return;
+        };
+        match work {
+            FileWork::Open(pending) => match pending.take() {
+                None => self.file_work = Some(FileWork::Open(pending)),
+                Some(None) => {}
+                Some(Some(Ok((path, opening)))) => {
+                    if let Some(app) = &self.app {
+                        let window = app.opened_board(&path, opening);
+                        self.requests
+                            .push(WindowRequest::Open(window.options(), Box::new(window)));
+                    }
+                }
+                Some(Some(Err(reason))) => self.show_message("Can't open the board", &reason),
+            },
+            FileWork::PlaceWhere(pending) => match pending.take() {
+                None => self.file_work = Some(FileWork::PlaceWhere(pending)),
+                Some(None) => {}
+                Some(Some(path)) => self.place_at(crate::files::with_extension(path)),
+            },
+            FileWork::Placing(pending, untitled) => match pending.take() {
+                None => self.file_work = Some(FileWork::Placing(pending, untitled)),
+                Some(Ok(placed)) => {
+                    let name = crate::files::board_name(&placed.path);
+                    self.link_with(placed.path, placed.session, false, placed.saved);
+                    self.rename(name);
+                }
+                Some(Err(not)) => {
+                    self.file = None;
+                    if let Some(back) = not.back {
+                        let (path, session, saved) = *back;
+                        self.link_with(path, session, untitled, saved);
+                    }
+                    self.update_save_state();
+                    self.show_message("Can't save the board there", &not.reason);
+                }
+            },
+            FileWork::CopyWhere(pending) => match pending.take() {
+                None => self.file_work = Some(FileWork::CopyWhere(pending)),
+                Some(None) => {}
+                Some(Some(path)) => {
+                    let path = crate::files::with_extension(path);
+                    let snapshot = self.board().map(|board| board.document().export_snapshot());
+                    let Some(Ok(snapshot)) = snapshot else {
+                        self.show_message("Can't save a copy", "The board can't be copied.");
+                        return;
+                    };
+                    let created_with = self
+                        .app
+                        .as_ref()
+                        .map(|app| app.created_with())
+                        .unwrap_or_default();
+                    self.file_work = Some(FileWork::Copying(Pending::spawn(
+                        "save-copy",
+                        move || crate::files::write_copy(&snapshot, &path, &created_with),
+                        Err("no thread to save with".into()),
+                    )));
+                }
+            },
+            FileWork::Copying(pending) => match pending.take() {
+                None => self.file_work = Some(FileWork::Copying(pending)),
+                Some(Ok(())) => {}
+                Some(Err(reason)) => self.show_message("Can't save a copy", &reason),
+            },
+        }
+    }
+
+    /// Puts the board's file at `to` (or writes one there, for a board
+    /// that has none), on a thread of its own: what the board has goes out
+    /// first, its saving finishes, then the file moves.
+    fn place_at(&mut self, to: PathBuf) {
+        self.save_changes(true);
+        let created_with = self
+            .app
+            .as_ref()
+            .map(|app| app.created_with())
+            .unwrap_or_default();
+        let link = self
+            .file
+            .as_mut()
+            .and_then(|file| Some((file.path.clone(), file.untitled, file.autosave.take()?)));
+        let work = match link {
+            Some((from, untitled, autosave)) => (
+                Pending::spawn(
+                    "move-board",
+                    move || {
+                        // Moved only once the file holds every change sent.
+                        if let Some(reason) = autosave.finish() {
+                            return Err(NotPlaced {
+                                reason: format!("The board's last changes aren't saved: {reason}"),
+                                back: crate::files::reopen(&from),
+                            });
+                        }
+                        crate::files::move_file(&from, &to)
+                    },
+                    Err(NotPlaced {
+                        reason: "no thread to save with".into(),
+                        back: None,
+                    }),
+                ),
+                untitled,
+            ),
+            None => {
+                let snapshot = self.board().map(|board| board.document().export_snapshot());
+                let Some(Ok(snapshot)) = snapshot else {
+                    self.show_message("Can't save the board", "The board can't be written.");
+                    return;
+                };
+                (
+                    Pending::spawn(
+                        "save-board",
+                        move || {
+                            crate::files::write_file(&snapshot, &to, &created_with)
+                                .map_err(|reason| NotPlaced { reason, back: None })
+                        },
+                        Err(NotPlaced {
+                            reason: "no thread to save with".into(),
+                            back: None,
+                        }),
+                    ),
+                    true,
+                )
+            }
+        };
+        self.file_work = Some(FileWork::Placing(work.0, work.1));
     }
 
     /// The file the board is saved into, if it has one (an untitled
@@ -772,10 +1036,7 @@ impl BoardWindow {
     /// board's, as the palette and the AI do.
     pub fn execute(&mut self, id: &str, args: &Args) -> Result<Outcome, CommandError> {
         let outcome = if self.commands.get(id).is_some() {
-            let mut cx = ShellCx {
-                in_app: self.app.is_some(),
-                ..ShellCx::default()
-            };
+            let mut cx = self.shell_cx();
             let outcome = self.commands.execute(&mut cx, id, args)?;
             self.asks.borrow_mut().extend(cx.asks);
             outcome
@@ -844,6 +1105,7 @@ impl BoardWindow {
     /// Lays the window out and draws it into `scene` at `size`.
     pub fn draw(&mut self, scene: &mut Scene, size: Size) {
         self.size = size;
+        self.poll_file_work();
         self.sync_link();
         // This window wakes when its save's state changes.
         if let Some(file) = &self.file
@@ -1130,6 +1392,8 @@ impl BoardWindow {
                 self.refresh_inspector();
             }
             Ask::FocusStep(forward) => self.ui.focus_next(&mut self.fonts, forward),
+            Ask::OpenFile | Ask::Place | Ask::SaveCopy => self.start_file_work(&ask),
+            Ask::MainMenu => self.open_main_menu(),
             Ask::NewBoard => {
                 let Some(app) = &self.app else {
                     return;
@@ -1471,6 +1735,18 @@ impl BoardWindow {
         self.popup = Some(self.ui.open_layer(content, options));
     }
 
+    /// Opens the main menu under the pill's app button: the file commands
+    /// and Settings.
+    fn open_main_menu(&mut self) {
+        let Some(&anchor) = self.chrome.anchors.get(&Placeholder::MainMenu) else {
+            return;
+        };
+        let cx = self.shell_cx();
+        let entries = crate::menu::entries(crate::menu::MAIN, &self.commands, &cx, &self.keymap);
+        let content = crate::menu::menu(&mut self.ui, "Main menu", entries, &self.asks);
+        self.open_popup(content, anchor, Placement::Below);
+    }
+
     /// Opens the popover of a contextual toolbar control.
     fn open_bar_popup(&mut self, control: Control) {
         let Some(anchor) = self.bar.button(control) else {
@@ -1543,10 +1819,7 @@ impl BoardWindow {
             return;
         };
         let board_keys = board.keymap().clone();
-        let shell = ShellCx {
-            in_app: self.app.is_some(),
-            ..ShellCx::default()
-        };
+        let shell = self.shell_cx();
         let availability = self
             .board_commands
             .availability(board)

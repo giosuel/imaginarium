@@ -52,6 +52,8 @@ pub struct App {
     recovery: RefCell<Option<std::path::PathBuf>>,
     /// The boards a crashed app left there, once looked for.
     kept: Arc<Mutex<KeptScan>>,
+    /// The file dialogs.
+    dialogs: RefCell<Arc<dyn crate::files::Dialogs>>,
 }
 
 /// A closed board's saving thread finishing, and what its failure means.
@@ -168,7 +170,23 @@ impl App {
             saving: RefCell::default(),
             recovery: RefCell::default(),
             kept: Arc::default(),
+            dialogs: RefCell::new(Arc::new(crate::files::SystemDialogs)),
         })
+    }
+
+    /// Uses `dialogs` instead of the system's (tests).
+    pub fn set_dialogs(&self, dialogs: Arc<dyn crate::files::Dialogs>) {
+        *self.dialogs.borrow_mut() = dialogs;
+    }
+
+    /// The file dialogs, for a thread to call.
+    pub(crate) fn dialogs(&self) -> Arc<dyn crate::files::Dialogs> {
+        self.dialogs.borrow().clone()
+    }
+
+    /// What new files say made them.
+    pub(crate) fn created_with(&self) -> String {
+        format!("Imaginarium {}", self.version)
     }
 
     /// Keeps untitled boards in `folder` from now on, so they survive a
@@ -354,7 +372,7 @@ impl App {
         let document = Document::new(DocumentKind::Board)?;
         let window = self.board_window(document, UNTITLED);
         Ok(match self.next_kept_path() {
-            Some(path) => window.kept_in(path, &format!("Imaginarium {}", self.version)),
+            Some(path) => window.kept_in(path, &self.created_with()),
             None => window,
         })
     }
@@ -366,13 +384,19 @@ impl App {
     /// # Errors
     /// If the file can't be opened or read, as a sentence to show.
     pub fn open_board(self: &Rc<Self>, path: &std::path::Path) -> Result<BoardWindow, String> {
-        let name = path.file_stem().map_or_else(
-            || "Board".to_owned(),
-            |stem| stem.to_string_lossy().into_owned(),
-        );
         let opening = imaginarium_io_native::Session::open(path)
             .map_err(|err| format!("{} can't be opened: {err}", path.display()))?;
-        Ok(match opening {
+        Ok(self.opened_board(path, opening))
+    }
+
+    /// A window on the board opened (on another thread) from `path`.
+    pub(crate) fn opened_board(
+        self: &Rc<Self>,
+        path: &std::path::Path,
+        opening: imaginarium_io_native::Opening,
+    ) -> BoardWindow {
+        let name = crate::files::board_name(path);
+        match opening {
             imaginarium_io_native::Opening::Editable(opened, session) => self
                 .board_window(opened.document, &name)
                 .saved_in(path.to_owned(), *session),
@@ -380,7 +404,7 @@ impl App {
             imaginarium_io_native::Opening::ReadOnly(opened) => {
                 self.board_window(opened.document, &name)
             }
-        })
+        }
     }
 
     /// A closed board's saving thread finishing (the app waits for it
@@ -688,19 +712,376 @@ mod tests {
         );
     }
 
+    /// Dialogs that answer at once: the board to open, and where to save
+    /// (each answer used once); what they were asked is kept.
+    #[derive(Default)]
+    struct Answers {
+        open: std::sync::Mutex<Option<std::path::PathBuf>>,
+        save: std::sync::Mutex<Option<std::path::PathBuf>>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::files::Dialogs for Answers {
+        fn open_board(&self) -> Option<std::path::PathBuf> {
+            self.asked.lock().unwrap().push("open".into());
+            self.open.lock().unwrap().take()
+        }
+
+        fn save_board(
+            &self,
+            title: &str,
+            folder: Option<&std::path::Path>,
+            name: &str,
+        ) -> Option<std::path::PathBuf> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(format!("{title} | {folder:?} | {name}"));
+            self.save.lock().unwrap().take()
+        }
+    }
+
+    fn answering(app: &App) -> Arc<Answers> {
+        let answers = Arc::new(Answers::default());
+        app.set_dialogs(answers.clone());
+        answers
+    }
+
+    /// A board file with `frames` frames in it.
+    fn board_file(path: &std::path::Path, frames: usize) {
+        let mut document = Document::new(DocumentKind::Board).unwrap();
+        for _ in 0..frames {
+            document
+                .transact(&imaginarium_model::Actor::User, |t| {
+                    t.create_node(
+                        imaginarium_model::Parent::Root,
+                        None,
+                        &imaginarium_model::NodeKind::Frame,
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        }
+        imaginarium_io_native::save_new_path(
+            path,
+            &document,
+            &imaginarium_io_native::SaveOptions {
+                protection: imaginarium_io_native::Protection::None,
+                created_with: "imaginarium tests".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn nodes_in(path: &std::path::Path) -> usize {
+        imaginarium_io_native::open_path(path, imaginarium_io_native::Credentials::None)
+            .map_or(0, |opened| opened.document.view().node_count())
+    }
+
+    /// Draws `board` (which runs its timers and takes what its threads
+    /// finished) until `done`, at most 10 s.
+    fn run_until(board: &mut BoardWindow, mut done: impl FnMut(&mut BoardWindow) -> bool) {
+        until(|| {
+            let now = std::time::Instant::now();
+            if board.wake_at().is_some_and(|at| at <= now) {
+                board.wake(now);
+            }
+            board_draw(board);
+            done(board)
+        });
+    }
+
     #[test]
-    fn open_waits_for_files() {
+    fn open_in_the_start_window_opens_the_board_and_closes_it() {
+        let dir = scratch("start-open");
+        let path = dir.join("Launch plan.imag");
+        board_file(&path, 2);
         let app = app();
+        let answers = answering(&app);
+        *answers.open.lock().unwrap() = Some(path.clone());
         let mut start = app.start_window();
         frame(&mut start);
         let (ui, fonts) = start.ui();
-        assert!(
-            ui.find_by_label(
-                fonts,
-                "Open…, unavailable: opening files comes in a later preview"
-            )
-            .is_some()
+        let button = ui.find_by_label(fonts, "Open…").unwrap();
+        let at = ui.bounds(button).unwrap().center();
+        for pressed in [true, false] {
+            start.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        let mut requests = Vec::new();
+        until(|| {
+            frame(&mut start);
+            requests.extend(start.take_requests());
+            !requests.is_empty()
+        });
+        assert_eq!(
+            names(&requests),
+            ["Open(\"Launch plan — Imaginarium\")", "Close"]
         );
+        // A file that isn't a board: said in the window, which stays.
+        let junk = dir.join("notes.imag");
+        std::fs::write(&junk, "not a board").unwrap();
+        *answers.open.lock().unwrap() = Some(junk);
+        let mut start = app.start_window();
+        start.input(&ctrl("o"));
+        until(|| {
+            frame(&mut start);
+            start_has_prefix(&mut start, "notes can't be opened")
+        });
+        assert!(start_has_prefix(&mut start, "notes can't be opened"));
+        assert!(start.take_requests().is_empty());
+        // Cancelled: nothing happens.
+        start.input(&ctrl("o"));
+        until(|| answers.asked.lock().unwrap().len() == 3);
+        frame(&mut start);
+        assert!(start.take_requests().is_empty());
+    }
+
+    fn start_has_prefix(start: &mut StartWindow, prefix: &str) -> bool {
+        let (ui, fonts) = start.ui();
+        let mut tree = imaginarium_ui::AccessTree::default();
+        ui.access(fonts, &mut tree);
+        tree.nodes()
+            .iter()
+            .any(|(_, node)| node.label().is_some_and(|label| label.starts_with(prefix)))
+    }
+
+    fn requests_of(board: &mut BoardWindow) -> Vec<String> {
+        names(&board.take_requests())
+    }
+
+    #[test]
+    fn open_in_a_board_opens_another_window() {
+        let dir = scratch("board-open");
+        let path = dir.join("Plan.imag");
+        board_file(&path, 1);
+        let app = app();
+        let answers = answering(&app);
+        *answers.open.lock().unwrap() = Some(path);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board.input(&ctrl("o"));
+        let mut seen = Vec::new();
+        run_until(&mut board, |board| {
+            seen.extend(requests_of(board));
+            !seen.is_empty()
+        });
+        assert_eq!(seen, ["Open(\"Plan — Imaginarium\")"]);
+    }
+
+    #[test]
+    fn save_gives_an_untitled_board_its_file_and_saving_goes_on_there() {
+        let dir = scratch("save");
+        let recovery = dir.join("recovery");
+        let app = app();
+        app.keep_untitled_in(recovery.clone());
+        let answers = answering(&app);
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        board_draw(&mut board);
+        let kept = board.kept_path().unwrap().to_owned();
+        // Without the extension: it gets it.
+        *answers.save.lock().unwrap() = Some(dir.join("Roadmap"));
+        board.input(&ctrl("s"));
+        let target = dir.join("Roadmap.imag");
+        let mut seen = Vec::new();
+        run_until(&mut board, |board| {
+            seen.extend(requests_of(board));
+            board.path() == Some(target.as_path())
+        });
+        assert_eq!(board.path(), Some(target.as_path()));
+        assert_eq!(seen, ["SetTitle(\"Roadmap — Imaginarium\")"]);
+        assert_eq!(board.options().title, "Roadmap — Imaginarium");
+        assert!(status_named(&mut board, "Saved"));
+        assert_eq!(nodes_in(&target), 1);
+        // The recovery file became the board's file.
+        assert!(!kept.exists());
+        assert_eq!(
+            answers.asked.lock().unwrap()[0],
+            "Save the board | None | Untitled board.imag"
+        );
+        // Later changes go into it.
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |_| nodes_in(&target) == 2);
+        assert_eq!(nodes_in(&target), 2);
+        // Saving again has nothing to do.
+        assert!(
+            board
+                .execute("file.save", &imaginarium_commands::Args::new())
+                .is_err()
+        );
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+        assert_eq!(nodes_in(&target), 2);
+    }
+
+    #[test]
+    fn save_writes_a_board_that_has_no_file_at_all() {
+        let dir = scratch("save-new");
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.new_board().unwrap();
+        assert!(board.kept_path().is_none());
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        let target = dir.join("Plan.imag");
+        *answers.save.lock().unwrap() = Some(target.clone());
+        board
+            .execute("file.save", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| board.path().is_some());
+        assert_eq!(nodes_in(&target), 1);
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+    }
+
+    #[test]
+    fn rename_or_move_takes_the_file_along() {
+        let dir = scratch("move");
+        let from = dir.join("Plan.imag");
+        board_file(&from, 1);
+        let id = imaginarium_io_native::open_reader(
+            std::fs::File::open(&from).unwrap(),
+            imaginarium_io_native::Credentials::None,
+        )
+        .unwrap()
+        .header()
+        .doc_id;
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        board_draw(&mut board);
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        std::fs::create_dir_all(dir.join("Work")).unwrap();
+        let to = dir.join("Work/Plan 2027.imag");
+        *answers.save.lock().unwrap() = Some(to.clone());
+        // The pill's name is the button.
+        let (ui, fonts) = board.ui();
+        let name = ui.find_by_label(fonts, "Rename or move the board").unwrap();
+        let at = ui.bounds(name).unwrap().center();
+        for pressed in [true, false] {
+            board.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        run_until(&mut board, |board| board.path() == Some(to.as_path()));
+        assert!(!from.exists());
+        assert_eq!(nodes_in(&to), 2);
+        // The same document: it moved, it wasn't copied.
+        let moved = imaginarium_io_native::open_reader(
+            std::fs::File::open(&to).unwrap(),
+            imaginarium_io_native::Credentials::None,
+        )
+        .unwrap()
+        .header()
+        .doc_id;
+        assert_eq!(moved, id);
+        assert_eq!(
+            answers.asked.lock().unwrap()[0],
+            format!("Rename or move the board | Some({dir:?}) | Plan.imag")
+        );
+        drop(board);
+        assert!(app.wait_for_saves().is_empty());
+    }
+
+    #[test]
+    fn a_board_open_elsewhere_is_never_replaced() {
+        let dir = scratch("move-onto-open");
+        let from = dir.join("Plan.imag");
+        let other = dir.join("Other.imag");
+        board_file(&from, 1);
+        board_file(&other, 3);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        let _open = app.open_board(&other).unwrap();
+        board_draw(&mut board);
+        *answers.save.lock().unwrap() = Some(other.clone());
+        board
+            .execute("file.move", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |board| {
+            let (ui, fonts) = board.ui();
+            ui.find_by_label(fonts, "Can't save the board there")
+                .is_some()
+        });
+        assert_eq!(nodes_in(&other), 3);
+        // It goes on saving where it was.
+        assert_eq!(board.path(), Some(from.as_path()));
+        board
+            .execute("board.insert_frame", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |_| nodes_in(&from) == 2);
+        assert_eq!(nodes_in(&from), 2);
+    }
+
+    #[test]
+    fn save_a_copy_leaves_the_board_where_it_is() {
+        let dir = scratch("copy");
+        let from = dir.join("Plan.imag");
+        board_file(&from, 2);
+        let app = app();
+        let answers = answering(&app);
+        let mut board = app.open_board(&from).unwrap();
+        board_draw(&mut board);
+        let copy = dir.join("Plan copy.imag");
+        *answers.save.lock().unwrap() = Some(copy.clone());
+        board
+            .execute("file.save_copy", &imaginarium_commands::Args::new())
+            .unwrap();
+        run_until(&mut board, |_| nodes_in(&copy) == 2);
+        assert_eq!(nodes_in(&copy), 2);
+        assert_eq!(board.path(), Some(from.as_path()));
+        assert_eq!(
+            answers.asked.lock().unwrap()[0],
+            format!("Save a copy | Some({dir:?}) | Plan copy.imag")
+        );
+    }
+
+    #[test]
+    fn the_main_menu_has_the_file_commands() {
+        let app = app();
+        let mut board = app.new_board().unwrap();
+        board_draw(&mut board);
+        let (ui, fonts) = board.ui();
+        let button = ui.find_by_label(fonts, "Main menu").unwrap();
+        let at = ui.bounds(button).unwrap().center();
+        for pressed in [true, false] {
+            board.input(&Input::PointerButton {
+                primary: true,
+                pressed,
+                position: at,
+                clicks: 1,
+                modifiers: Modifiers::default(),
+            });
+        }
+        board_draw(&mut board);
+        for row in [
+            "New board",
+            "Open…",
+            "Save…",
+            "Rename or move…",
+            "Save a copy…",
+        ] {
+            assert!(status_named(&mut board, row), "{row}");
+        }
     }
 
     /// The middle of the control a screen reader calls `label`.
