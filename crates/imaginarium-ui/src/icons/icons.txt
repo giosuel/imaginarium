@@ -18,6 +18,10 @@ sheet
 square-plus
 
 # The contextual toolbar and the context menu
+arrow-up
+arrow-down
+move
+square
 palette
 layers
 copy

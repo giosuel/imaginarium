@@ -177,6 +177,13 @@ impl LayerOptions {
         self
     }
 
+    /// Places it at `anchor` instead (a dialog near the top, like the
+    /// command palette).
+    pub fn anchored(mut self, anchor: Anchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
     /// Dims the window behind a dialog this much (0 to 1) instead of the
     /// theme's [`Token::Scrim`](crate::Token::Scrim): the command palette
     /// dims less than a question does.
