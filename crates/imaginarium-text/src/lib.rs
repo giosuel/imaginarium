@@ -36,4 +36,4 @@ mod layout;
 
 pub use editor::{AccessLine, Edit, Editor, Motion};
 pub use fonts::{Brush, Fonts, UI_FAMILY};
-pub use layout::{Align, TextBlock, TextStyle};
+pub use layout::{Align, Span, TextBlock, TextStyle};

@@ -61,6 +61,15 @@ impl Fonts {
         }
     }
 
+    /// Fonts for another window on this thread: the same database (no
+    /// second scan of the system's fonts), scratch space of its own.
+    pub fn share(&self) -> Self {
+        Self {
+            font_cx: self.font_cx.clone(),
+            layout_cx: LayoutContext::new(),
+        }
+    }
+
     /// The number of font families known (bundled and system).
     pub fn family_count(&mut self) -> usize {
         self.font_cx.collection.family_names().count()

@@ -8,6 +8,9 @@
 //! - [`run`] opens a window and shows a [`View`] in it. Each frame is one
 //!   scene, built by the view in logical pixels and drawn at the window's
 //!   scale factor.
+//! - **Several windows:** a view asks for more windows, or to close its
+//!   own ([`WindowRequest`]); the run ends with the last one. They share
+//!   the first window's GPU.
 //! - **No frame without a reason:** a frame is drawn when the window
 //!   appears, is resized or moves to a monitor with another scale, when
 //!   [`View::input`], [`View::presented`] or the view's timer
@@ -30,6 +33,17 @@
 //!   shadow), [`Label`], [`Button`], [`TextInput`]; [`TextField`] is the
 //!   editing core they and canvas items use. [`Clipboard`]: the system
 //!   clipboard.
+//! - **Layers** above the root: popovers and menus (closed by `Esc` or a
+//!   click outside), modal dialogs (all input, Tab kept inside) and
+//!   tooltips (no input), placed next to an anchor and kept in the
+//!   window ([`Ui::open_layer`], [`LayerOptions`]); the focus returns to
+//!   where it was when one closes.
+//! - **Scrolling:** [`Scroll`] scrolls its content (wheel, touchpad, keys,
+//!   a scroll bar, the focus kept in view); [`VirtualList`] has widgets
+//!   only for the rows in view ([`Ui::add_virtual_list`]).
+//! - **Animation** ([`animation`]): short transitions with easing for
+//!   hover and press colors, layers fading in and keyboard scrolling, all
+//!   instant with reduced motion; nothing redraws once they arrive.
 //! - Accessibility: views describe themselves in an [`AccessTree`]; the
 //!   widget tree does it for its widgets ([`Widget::accessibility`]).
 //! - **Themes:** the interface's colors are [`Token`]s of a [`Theme`]
@@ -39,10 +53,17 @@
 //!   inside effects and memos.
 //!
 //! # Not here yet
-//! Scrolling containers, menus, drag and drop, and animation.
+//! Drag and drop.
 
 mod access;
+pub mod animation;
+pub mod appearance;
 mod clipboard;
+mod controls;
+pub mod icons;
+mod layers;
+mod logo;
+mod scroll;
 #[cfg(test)]
 mod tests;
 mod text_field;
@@ -52,14 +73,23 @@ mod widgets;
 mod window;
 
 pub use clipboard::Clipboard;
-pub use tree::{Cx, TreeStats, Ui, Widget, WidgetId, invalidate};
-pub use widgets::{Button, ButtonColors, Flex, InputColors, Label, TextInput, label};
+pub use layers::{Align, Anchor, LayerId, LayerKind, LayerOptions, Placement};
+pub use scroll::{RowBuilder, Scroll, VirtualList};
+pub use tree::{ACCESS_LOCAL_IDS, Cx, TOOLTIP_DELAY, TreeStats, Ui, Widget, WidgetId, invalidate};
+pub use widgets::{
+    Button, ButtonBox, ButtonColors, Flex, Icon, IconButton, InputColors, Label, Slider, Swatch,
+    SwatchShape, Switch, TextInput, label,
+};
 
 pub use access::{AccessTree, ROOT, rect as access_rect};
+pub use controls::{Segmented, badge, dropdown};
+pub use logo::Logo;
 pub use text_field::{FieldResponse, TextField};
 pub use theme::{DEFAULT_ACCENT, Paint, Theme, ThemeKind, Token, contrast, mix, set_theme, theme};
 
 pub use window::{
     FrameCauses, FrameInfo, Ime, Input, Key, Modifiers, MonitorInfo, RunStats, UiError, View,
-    WindowOptions, request_frame, run, run_with_gpu, scale_factor,
+    WindowOptions, WindowRequest, file_drops_supported, frame_waker, interface_scale,
+    request_frame, request_frame_everywhere, run, run_with_gpu, scale_factor, set_interface_scale,
+    window_waker,
 };

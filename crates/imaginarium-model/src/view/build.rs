@@ -121,6 +121,15 @@ pub(crate) fn read_meta(doc: &LoroDoc) -> MetaView {
                 view.language = Some(Arc::from(s.as_str()))
             }
             (meta::CREATED, ValueOrContainer::Value(LoroValue::I64(v))) => view.created = Some(v),
+            (meta::SETTINGS, ValueOrContainer::Container(Container::Map(map))) => {
+                let mut settings = BTreeMap::new();
+                for key in map.keys() {
+                    if let Some(item) = map.get(&key) {
+                        settings.insert(key.to_string(), deep(&item));
+                    }
+                }
+                view.settings = props(settings);
+            }
             (meta::REQUIRED_FEATURES, ValueOrContainer::Container(Container::List(list))) => {
                 view.required_features = list
                     .get_deep_value()

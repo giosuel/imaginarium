@@ -88,6 +88,25 @@ fn bench_container(c: &mut Criterion) {
         );
     });
 
+    // An autosave's snapshot: the 10,000-update head leaves the index, so
+    // the commit's index is small again (and stays small after it).
+    group.bench_function("append_snapshot_and_commit", |b| {
+        let snapshot = RecordBuilder::new(RecordType::SNAP, ObjectId([8; 32]))
+            .stream(pb::Stream::Main)
+            .codec("loro-1")
+            .build(&DOC, vec![3; 256 * 1024], None)
+            .unwrap();
+        b.iter_batched(
+            || Writer::resume(Reader::open(Cursor::new(file.clone())).unwrap()).unwrap(),
+            |mut writer| {
+                writer.append(&snapshot).unwrap();
+                writer.commit(None).unwrap();
+                black_box(writer)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
     group.bench_function("recover_forward_scan", |b| {
         let mut broken = file.clone();
         let last = broken.len() - 1;
