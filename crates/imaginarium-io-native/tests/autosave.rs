@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Saving into an opened file: updates appended and committed, snapshots,
-//! recovery of a torn append, and the saving thread.
+//! compaction, recovery, locking and read-only files, and the saving
+//! thread with its retries.
 
 // Test helpers panic on failure by design.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use imaginarium_format::{ObjectId, RecordBuilder, RecordFlags, RecordType, Writer};
 use imaginarium_io_native::{
-    Autosave, Credentials, NativeError, Protection, SaveOptions, SaveState, Session, open_path,
-    save_new_path,
+    Autosave, Credentials, FileId, NativeError, Opening, Protection, SaveOptions, SaveState,
+    Session, Storage, open_path, save_new, save_new_path,
 };
-use imaginarium_model::{Actor, Document, DocumentKind, Geometry, NodeKind, Parent};
+use imaginarium_model::{Actor, Document, DocumentKind, Geometry, Mode, NodeKind, Parent};
 
+/// A fresh directory under the workspace's `target/` (never `/tmp`).
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/test-scratch")
@@ -25,19 +30,37 @@ fn scratch_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn new_file(dir: &std::path::Path) -> PathBuf {
+fn options() -> SaveOptions {
+    SaveOptions {
+        protection: Protection::None,
+        created_with: "imaginarium tests".into(),
+    }
+}
+
+fn new_file(dir: &Path) -> PathBuf {
     let path = dir.join("board.imag");
-    let document = Document::new(DocumentKind::Board).unwrap();
     save_new_path(
         &path,
-        &document,
-        &SaveOptions {
-            protection: Protection::None,
-            created_with: "imaginarium tests".into(),
-        },
+        &Document::new(DocumentKind::Board).unwrap(),
+        &options(),
     )
     .unwrap();
     path
+}
+
+/// Opens `path` to edit it; panics if it opens read-only.
+fn editable(path: &Path) -> (Document, Session) {
+    match Session::open(path).unwrap() {
+        Opening::Editable(opened, session) => (opened.document, session),
+        Opening::ReadOnly(opened) => panic!("read-only: {:?}", opened.document.mode()),
+    }
+}
+
+fn file_id(path: &Path, session: &Session) -> FileId {
+    FileId {
+        path: path.to_owned(),
+        doc_id: session.doc_id(),
+    }
 }
 
 /// Adds a shape; returns the update bytes of that change.
@@ -52,66 +75,145 @@ fn add_shape(document: &mut Document, x: f64) -> Vec<u8> {
     document.export_updates_since(&before).unwrap()
 }
 
+fn reopened(path: &Path) -> Document {
+    open_path(path, Credentials::None).unwrap().document
+}
+
+fn wait_for(autosave: &Autosave, want: impl Fn(&SaveState) -> bool) -> SaveState {
+    let start = Instant::now();
+    loop {
+        let state = autosave.state();
+        if want(&state) || start.elapsed() > Duration::from_secs(10) {
+            return state;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
-fn every_change_reaches_the_file() {
+fn every_change_reaches_the_file_and_a_snapshot_shortens_the_head() {
     let dir = scratch_dir("changes");
     let path = new_file(&dir);
-    let (opened, mut session) = Session::open(&path).unwrap();
-    let mut document = opened.document;
+    let (mut document, mut session) = editable(&path);
     for n in 0..5 {
-        let update = add_shape(&mut document, f64::from(n));
-        session.append_update(update).unwrap();
+        session
+            .append_update(add_shape(&mut document, f64::from(n)))
+            .unwrap();
         session.commit().unwrap();
     }
     assert_eq!(session.head_len(), 6, "the snapshot and five updates");
-    let reopened = open_path(&path, Credentials::None).unwrap();
-    assert_eq!(reopened.document.view(), document.view());
-    assert!(reopened.recovery.is_none());
-    // A snapshot starts the head again.
+    assert_eq!(reopened(&path).view(), document.view());
     session
         .append_snapshot(document.export_snapshot().unwrap())
         .unwrap();
     session.commit().unwrap();
     assert_eq!(session.head_len(), 1);
-    assert_eq!(
-        open_path(&path, Credentials::None).unwrap().document.view(),
-        document.view()
-    );
+    // The old head left the index: it lists only what is live.
+    let (live, total) = session.live_and_total();
+    assert!(live < total, "{live} of {total}");
+    drop(session);
+    assert_eq!(reopened(&path).view(), document.view());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn a_torn_append_is_recovered_and_saving_goes_on() {
-    let dir = scratch_dir("torn");
+fn a_file_open_elsewhere_opens_read_only() {
+    let dir = scratch_dir("locked");
     let path = new_file(&dir);
-    let (opened, mut session) = Session::open(&path).unwrap();
-    let mut document = opened.document;
+    let (_document, session) = editable(&path);
+    let Opening::ReadOnly(second) = Session::open(&path).unwrap() else {
+        panic!("a second writer");
+    };
+    assert!(matches!(second.document.mode(), Mode::ReadOnly(_)));
+    // Free again once the first one is closed.
+    drop(session);
+    let _ = editable(&path);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_cant_be_written_opens_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir("permission");
+    let path = new_file(&dir);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let opening = Session::open(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // (Root may write anyway.)
+    if let Opening::ReadOnly(opened) = opening {
+        assert!(matches!(opened.document.mode(), Mode::ReadOnly(_)));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_file_with_records_this_version_doesnt_know_opens_read_only() {
+    let dir = scratch_dir("unknown");
+    let path = new_file(&dir);
+    let (_, session) = editable(&path);
+    drop(session);
+    // A newer version wrote a record type this one doesn't know, which
+    // readers must understand to edit (CRITICAL, spec §10.2).
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let reader = imaginarium_format::Reader::open(file).unwrap();
+    let doc_id = reader.header().doc_id;
+    let mut writer = Writer::resume(reader).unwrap();
+    let record = RecordBuilder::new(RecordType(0x4100), ObjectId::random().unwrap())
+        .extension_id("org.example.newer")
+        .flags(RecordFlags::CRITICAL)
+        .build(&doc_id, b"newer data".to_vec(), None)
+        .unwrap();
+    writer.append(&record).unwrap();
+    writer.commit(None).unwrap();
+    drop(writer);
+    let before = std::fs::read(&path).unwrap();
+    let Opening::ReadOnly(opened) = Session::open(&path).unwrap() else {
+        panic!("opened for writing");
+    };
+    assert!(matches!(opened.document.mode(), Mode::ReadOnly(_)));
+    drop(opened);
+    assert_eq!(std::fs::read(&path).unwrap(), before, "never written");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_change_appended_but_not_committed_survives_a_crash() {
+    let dir = scratch_dir("uncommitted");
+    let path = new_file(&dir);
+    let (mut document, mut session) = editable(&path);
     session
         .append_update(add_shape(&mut document, 1.0))
         .unwrap();
     session.commit().unwrap();
-    // A crash in the middle of the next append: half a record, no commit.
+    // A crash after the record, before its commit: the record is
+    // complete, the index doesn't list it.
+    session
+        .append_update(add_shape(&mut document, 2.0))
+        .unwrap();
     drop(session);
+    let (recovered, mut session) = editable(&path);
+    assert!(session.recovered());
+    assert_eq!(
+        recovered.view(),
+        document.view(),
+        "the newest change is kept"
+    );
+    session.commit().unwrap();
+    drop(session);
+    // And a torn half record after it is dropped.
     std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
         .unwrap()
         .write_all(b"IMG\x01half a record")
         .unwrap();
-    let (opened, mut session) = Session::open(&path).unwrap();
-    assert!(opened.recovery.is_some());
-    let mut document = opened.document;
-    // As the spec asks, a recovered file goes on from a snapshot.
-    session
-        .append_snapshot(document.export_snapshot().unwrap())
-        .unwrap();
-    session
-        .append_update(add_shape(&mut document, 2.0))
-        .unwrap();
-    session.commit().unwrap();
-    let reopened = open_path(&path, Credentials::None).unwrap();
-    assert!(reopened.recovery.is_none());
-    assert_eq!(reopened.document.view(), document.view());
+    let (again, _) = editable(&path);
+    assert_eq!(again.view(), document.view());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -142,27 +244,16 @@ fn encrypted_files_cant_be_saved_into_yet() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-fn wait_for(autosave: &Autosave, want: impl Fn(&SaveState) -> bool) -> SaveState {
-    let start = Instant::now();
-    loop {
-        let state = autosave.state();
-        if want(&state) || start.elapsed() > Duration::from_secs(10) {
-            return state;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 #[test]
 fn the_saving_thread_writes_updates_and_says_when_it_is_done() {
     let dir = scratch_dir("thread");
     let path = new_file(&dir);
-    let (opened, session) = Session::open(&path).unwrap();
-    let mut document = opened.document;
-    let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut document, session) = editable(&path);
+    let woken = Arc::new(AtomicUsize::new(0));
     let count = woken.clone();
-    let autosave = Autosave::start(session, path.clone(), move || {
-        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let id = file_id(&path, &session);
+    let autosave = Autosave::start(session, id, move || {
+        count.fetch_add(1, Ordering::Relaxed);
     });
     for n in 0..20 {
         autosave.update(add_shape(&mut document, f64::from(n)));
@@ -171,31 +262,102 @@ fn the_saving_thread_writes_updates_and_says_when_it_is_done() {
         wait_for(&autosave, |state| *state == SaveState::Saved),
         SaveState::Saved
     );
-    assert!(woken.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    assert!(woken.load(Ordering::Relaxed) >= 1);
     // What's sent just before finishing is written too.
     autosave.update(add_shape(&mut document, 99.0));
-    assert_eq!(autosave.finish(), None);
-    assert_eq!(
-        open_path(&path, Credentials::None).unwrap().document.view(),
-        document.view()
-    );
+    assert_eq!(autosave.finish_in_background().join().unwrap(), None);
+    assert_eq!(reopened(&path).view(), document.view());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Storage that fails every write while `failing` is set (a full disk).
+#[test]
+fn many_saves_keep_the_file_small_and_quick_to_open() {
+    let dir = scratch_dir("growth");
+    let path = new_file(&dir);
+    let (mut document, session) = editable(&path);
+    let id = file_id(&path, &session);
+    let autosave = Autosave::start(session, id, || {});
+    // A thousand changes, each saved on its own (as when edits come
+    // slowly): snapshots keep the head short, compaction the file small.
+    for n in 0..1000 {
+        autosave.update(add_shape(&mut document, f64::from(n % 50)));
+        wait_for(&autosave, |state| *state == SaveState::Saved);
+    }
+    assert_eq!(autosave.finish(), None);
+    let size = std::fs::metadata(&path).unwrap().len();
+    let snapshot = document.export_snapshot().unwrap().len() as u64;
+    assert!(
+        size < 2 * 1024 * 1024,
+        "{size} bytes (a snapshot is {snapshot})"
+    );
+    let (opened, session) = editable(&path);
+    assert_eq!(opened.view(), document.view());
+    assert!(session.head_len() <= imaginarium_io_native::SNAPSHOT_AFTER + 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_deleted_file_is_a_failed_save_not_a_silent_one() {
+    let dir = scratch_dir("deleted");
+    let path = new_file(&dir);
+    let (mut document, session) = editable(&path);
+    let id = file_id(&path, &session);
+    let autosave = Autosave::start(session, id, || {});
+    std::fs::remove_file(&path).unwrap();
+    autosave.update(add_shape(&mut document, 1.0));
+    assert!(matches!(
+        wait_for(&autosave, |state| matches!(state, SaveState::Failed(_))),
+        SaveState::Failed(_)
+    ));
+    assert!(autosave.finish().is_some(), "closing says it failed");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn another_document_in_the_files_place_is_never_written() {
+    let dir = scratch_dir("replaced");
+    let path = new_file(&dir);
+    let (_, session) = editable(&path);
+    let id = file_id(&path, &session);
+    drop(session);
+    // Something else saved another board over it.
+    save_new_path(
+        &path,
+        &Document::new(DocumentKind::Board).unwrap(),
+        &options(),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        Session::reopen(&id.path, &id.doc_id),
+        Err(NativeError::CantSave(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Storage in memory that fails writes while `failing` is set, after
+/// `fail_after` more bytes (a disk that fills up in the middle of a write).
 struct Flaky {
-    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    bytes: Arc<Mutex<Vec<u8>>>,
     at: u64,
-    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    failing: Arc<AtomicBool>,
+    fail_after: Arc<AtomicU64>,
 }
 
 impl Flaky {
-    fn check(&self) -> std::io::Result<()> {
-        if self.failing.load(std::sync::atomic::Ordering::Relaxed) {
-            Err(std::io::Error::other("the disk is full"))
-        } else {
-            Ok(())
+    fn check(&self, len: usize) -> std::io::Result<usize> {
+        if !self.failing.load(Ordering::Relaxed) {
+            return Ok(len);
         }
+        let room = self.fail_after.load(Ordering::Relaxed);
+        if room == 0 {
+            return Err(std::io::Error::other("the disk is full"));
+        }
+        let n = len.min(usize::try_from(room).unwrap());
+        self.fail_after.fetch_sub(n as u64, Ordering::Relaxed);
+        Ok(n)
     }
 }
 
@@ -212,18 +374,18 @@ impl std::io::Read for Flaky {
 
 impl std::io::Write for Flaky {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.check()?;
+        let n = self.check(buf.len())?;
         let mut bytes = self.bytes.lock().unwrap();
         let start = usize::try_from(self.at).unwrap();
-        if bytes.len() < start + buf.len() {
-            bytes.resize(start + buf.len(), 0);
+        if bytes.len() < start + n {
+            bytes.resize(start + n, 0);
         }
-        bytes[start..start + buf.len()].copy_from_slice(buf);
-        self.at += buf.len() as u64;
-        Ok(buf.len())
+        bytes[start..start + n].copy_from_slice(&buf[..n]);
+        self.at += n as u64;
+        Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.check()
+        self.check(0).map(|_| ())
     }
 }
 
@@ -241,10 +403,10 @@ impl std::io::Seek for Flaky {
 
 impl imaginarium_format::Durable for Flaky {
     fn sync(&mut self) -> std::io::Result<()> {
-        self.check()
+        self.check(0).map(|_| ())
     }
     fn set_len(&mut self, len: u64) -> std::io::Result<()> {
-        self.check()?;
+        self.check(0)?;
         self.bytes
             .lock()
             .unwrap()
@@ -253,53 +415,62 @@ impl imaginarium_format::Durable for Flaky {
     }
 }
 
+impl Storage for Flaky {
+    fn gone(_session: &Session<Self>) -> bool {
+        false
+    }
+}
+
 #[test]
-fn a_failed_save_is_retried_until_it_works() {
-    let document = Document::new(DocumentKind::Board).unwrap();
-    let saved = imaginarium_io_native::save_new(
+fn a_save_that_breaks_off_halfway_is_retried_as_one_snapshot() {
+    let saved = save_new(
         std::io::Cursor::new(Vec::new()),
-        &document,
-        &SaveOptions {
-            protection: Protection::None,
-            created_with: "imaginarium tests".into(),
-        },
+        &Document::new(DocumentKind::Board).unwrap(),
+        &options(),
     )
     .unwrap()
     .into_inner();
-    let bytes = std::sync::Arc::new(std::sync::Mutex::new(saved));
-    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let bytes = Arc::new(Mutex::new(saved));
+    let failing = Arc::new(AtomicBool::new(true));
+    // The disk fills up 100 bytes into the next write.
+    let fail_after = Arc::new(AtomicU64::new(100));
     let storage = {
-        let (bytes, failing) = (bytes.clone(), failing.clone());
+        let (bytes, failing, fail_after) = (bytes.clone(), failing.clone(), fail_after.clone());
         move || Flaky {
             bytes: bytes.clone(),
             at: 0,
             failing: failing.clone(),
+            fail_after: fail_after.clone(),
         }
     };
     let (opened, session) = Session::from_file(storage()).unwrap();
     let mut document = opened.document;
-    let reopens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = session.unwrap();
+    let reopens = Arc::new(AtomicUsize::new(0));
     let counted = reopens.clone();
     let autosave = Autosave::start_with(
         session,
         move || {
-            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Session::from_file(storage()).map(|(_, session)| session)
+            counted.fetch_add(1, Ordering::Relaxed);
+            Session::from_file(storage()).map(|(_, session)| session.unwrap())
         },
+        None,
         || {},
     );
-    autosave.update(add_shape(&mut document, 1.0));
+    for n in 0..3 {
+        autosave.update(add_shape(&mut document, f64::from(n)));
+    }
     assert!(matches!(
         wait_for(&autosave, |state| matches!(state, SaveState::Failed(_))),
         SaveState::Failed(_)
     ));
-    // The disk has room again: the next try writes the change.
-    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+    // The disk has room again: the retry writes everything.
+    failing.store(false, Ordering::Relaxed);
     assert_eq!(
         wait_for(&autosave, |state| *state == SaveState::Saved),
         SaveState::Saved
     );
-    assert!(reopens.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    assert!(reopens.load(Ordering::Relaxed) >= 1);
     assert_eq!(autosave.finish(), None);
     let reopened = imaginarium_io_native::open(
         std::io::Cursor::new(bytes.lock().unwrap().clone()),
@@ -319,10 +490,7 @@ fn write_a_sample() {
     save_new_path(
         &path,
         &Document::new(DocumentKind::Board).unwrap(),
-        &SaveOptions {
-            protection: Protection::None,
-            created_with: "imaginarium tests".into(),
-        },
+        &options(),
     )
     .unwrap();
 }
