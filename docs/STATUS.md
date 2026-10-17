@@ -1188,7 +1188,8 @@ What M3 builds on:
   - the owner's run on the laptop;
   - the review of all M3 code;
   - **docs:** user docs on the website (getting started, the palette,
-    shortcuts, files) and developer docs;
+    shortcuts, files): written 2026-10-17 (the guide's six pages); the
+    developer docs still to update;
   - the tag `v0.0.4-m3`, with a Linux package.
 
 **Order:**
