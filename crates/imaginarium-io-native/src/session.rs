@@ -78,6 +78,10 @@ impl Drop for Lock {
 /// ([`imaginarium_model::ReadOnlyReason::File`]).
 pub const IN_USE: &str = "it is open in another window or app";
 
+/// Why a file opens read-only when it can't be written (permissions, a
+/// read-only file system).
+pub const CANT_WRITE: &str = "the file can't be written";
+
 /// Locks the file at `path` (open as `file`) against other writers.
 /// `Err(IN_USE)` if another writer has it.
 fn lock(file: &File, path: &Path) -> std::result::Result<Lock, &'static str> {
@@ -141,7 +145,7 @@ impl Session<File> {
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
                 ) =>
             {
-                (File::open(path)?, Err("the file can't be written"))
+                (File::open(path)?, Err(CANT_WRITE))
             }
             Err(err) => return Err(err.into()),
         };
