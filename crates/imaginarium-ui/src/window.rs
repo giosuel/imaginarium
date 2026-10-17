@@ -220,6 +220,18 @@ pub enum Input {
     Paste(String),
     /// The window gained (`true`) or lost the keyboard focus.
     WindowFocus(bool),
+    /// A file was dropped on the window (see [`file_drops_supported`]).
+    FileDropped(std::path::PathBuf),
+}
+
+/// Whether dropped files reach the windows ([`Input::FileDropped`]): on
+/// Windows, macOS and X11, but not on Wayland, where winit 0.30 doesn't
+/// report drops yet (it is used when `WAYLAND_DISPLAY` is set).
+pub fn file_drops_supported() -> bool {
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        return true;
+    }
+    std::env::var_os("WAYLAND_DISPLAY").is_none_or(|display| display.is_empty())
 }
 
 /// One presented frame, for statistics.
@@ -1199,6 +1211,7 @@ impl ApplicationHandler<UserEvent> for Shell<'_> {
                 state.deliver(Input::PointerMoved(at));
             }
             WindowEvent::CursorLeft { .. } => state.deliver(Input::PointerLeft),
+            WindowEvent::DroppedFile(path) => state.deliver(Input::FileDropped(path)),
             // The left button is `primary`; `primary: false` is the right
             // one. The others (middle, back, forward) aren't delivered yet,
             // so they don't open context menus.

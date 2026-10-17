@@ -1923,6 +1923,8 @@ impl Ui {
                 self.drop_capture(fonts);
                 handled
             }
+            // The view's to handle (a board file to open), not a widget's.
+            Input::FileDropped(_) => false,
             Input::Key { .. } | Input::Ime(_) | Input::Paste(_) | Input::WindowFocus(_) => {
                 if let Input::Key { pressed: true, .. } = input {
                     // Typing hides a tooltip; it comes back on the next rest.
