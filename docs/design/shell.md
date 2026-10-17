@@ -139,10 +139,19 @@ the board's place.
 - The saving thread makes the file, and its folder, with the **first
   change** (`Autosave::create`), so an empty board leaves nothing.
 - **Closing** the board deletes the file (`Autosave::discard_in_background`;
-  the close dialog that asks first comes with part 4).
+  the close dialog that asks first comes with part 4), while the saving
+  thread still holds its lock, so no other app takes it in between. A
+  window that goes away without being closed (it failed, the app ended
+  with an error or a panic) keeps it, with its last changes.
+- The file is made locked (`Session::create`): another app looking for
+  kept boards never takes it half made. On a file system that can't lock,
+  kept boards aren't offered (nothing would say whether another app still
+  has them). A recovery file that can't be written is said on standard
+  error; the pill says Not saved either way.
 - **At startup** a thread looks for files there that no running app holds
   (`imaginarium_io_native::kept_boards`): their lock is free, so the app
-  that wrote them is gone. It keeps them open (and locked), so a second
+  that wrote them is gone. Files that can't be read are left there (known
+  issue: they aren't cleaned up yet). It keeps them open (and locked), so a second
   app doesn't offer them too. The start window then shows the mockup's
   notice above Recent, **"Imaginarium closed unexpectedly. *Untitled
   board* was kept, with every change."** with **Open it** (or "*2
