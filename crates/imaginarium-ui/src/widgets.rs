@@ -2001,6 +2001,10 @@ pub struct TextInput {
     placeholder: Label,
     on_change: TextCallback,
     on_submit: TextCallback,
+    /// Called when the focus leaves, unless Esc sent it away.
+    on_blur: Option<TextCallback>,
+    /// Esc moved the focus away: not a commit.
+    escaped: bool,
     /// Keys the field leaves to its ancestors (a list's ↑/↓, Escape).
     passes: Vec<Key>,
     /// Drawn without its box and focus line (the palette's field).
@@ -2054,6 +2058,8 @@ impl TextInput {
             placeholder: Label::new(placeholder, style).color(colors.placeholder),
             on_change: Box::new(|_| {}),
             on_submit: Box::new(|_| {}),
+            on_blur: None,
+            escaped: false,
             passes: Vec::new(),
             bare: false,
             colors,
@@ -2070,6 +2076,14 @@ impl TextInput {
     /// Called with the text on Enter.
     pub fn on_submit(mut self, action: impl FnMut(&str) + 'static) -> Self {
         self.on_submit = Box::new(action);
+        self
+    }
+
+    /// Called with the text when the focus leaves the field (a click
+    /// elsewhere, Tab), as Enter does: the field's value is kept. Not
+    /// after Esc, which leaves without keeping it.
+    pub fn on_blur(mut self, action: impl FnMut(&str) + 'static) -> Self {
+        self.on_blur = Some(Box::new(action));
         self
     }
 
@@ -2159,6 +2173,13 @@ impl Widget for TextInput {
             (self.on_submit)(&text);
         }
         if response.blurred {
+            self.escaped = matches!(
+                input,
+                Input::Key {
+                    key: Key::Escape,
+                    ..
+                }
+            );
             cx.resign_focus();
         }
         if response.repaint || response.changed {
@@ -2173,9 +2194,16 @@ impl Widget for TextInput {
 
     fn focus_changed(&mut self, cx: &mut Cx<'_>, focused: bool) {
         if focused {
+            self.escaped = false;
             self.field.focus();
         } else {
             self.field.blur(cx.fonts());
+            if !std::mem::take(&mut self.escaped)
+                && let Some(on_blur) = &mut self.on_blur
+            {
+                let text = self.field.text();
+                on_blur(&text);
+            }
         }
         cx.request_paint();
     }

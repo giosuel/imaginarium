@@ -123,3 +123,6 @@ sigma
 text-wrap
 table-cells-merge
 grid-3x3
+
+# Settings
+code
