@@ -4,21 +4,53 @@
 > Continue at **"Next step"**. Update this file at the end of every work
 > step and commit it.
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 ## Current position
 
 - **Phase:** **Phase A, M3 (shell and canvas)**. M0, M1 and M2 are done
   (tags `v0.0.1-m0`, `v0.0.2-m1`, `v0.0.3-m2`). M2 closed on 2026-10-16
   without its manual checklist, which the owner runs later (Known issues).
-- **Next step:** **M3.1 Toolkit additions**, the next piece: layers for
-  popovers and menus (outside clicks, Esc, focus return), then scroll
-  containers, icons and animation. Theme tokens are done (#38). M3.2 (the
-  canvas crate) can start alongside, in another crate.
+- **Next step:** **M3.7 part 3, high contrast**, once its design is
+  approved (below); M3.7 parts 1 and 2, the theme, the accent and the
+  interface size, are done (2026-10-17). M3.6 is done (2026-10-17),
+  in five stacked parts, each reviewed by a fresh agent: saving every
+  change into a board's file
+  (https://github.com/giosuel/imaginarium/pull/66), crash recovery for
+  untitled boards (https://github.com/giosuel/imaginarium/pull/67), the
+  open and save dialogs (https://github.com/giosuel/imaginarium/pull/68),
+  the close dialog (https://github.com/giosuel/imaginarium/pull/69) and
+  recent boards (https://github.com/giosuel/imaginarium/pull/70). M3.7
+  parts 1 and 2: https://github.com/giosuel/imaginarium/pull/71 and
+  https://github.com/giosuel/imaginarium/pull/72. All stacked: merge in
+  order after https://github.com/giosuel/imaginarium/pull/65 (CI's deps
+  job fails until it is in: AccessKit's unmaintained zbus crates). M3.5 is
+  done (2026-10-17), in four stacked parts, each reviewed
+  by a fresh agent: the settings file
+  (https://github.com/giosuel/imaginarium/pull/61), the Settings window
+  (https://github.com/giosuel/imaginarium/pull/62), the board background
+  and This board. M3.4 is done (2026-10-17), in
+  six parts, each reviewed by a fresh agent and stacked: the board window
+  (https://github.com/giosuel/imaginarium/pull/56), the command palette
+  (https://github.com/giosuel/imaginarium/pull/57), the contextual
+  toolbar and the context menu
+  (https://github.com/giosuel/imaginarium/pull/58), the inspector
+  (https://github.com/giosuel/imaginarium/pull/59), and the start window
+  with one window per document (part 6).
+  M3.3 is done (2026-10-17): the board's commands, tools and
+  clipboard, with shortcuts from a keymap. M3.2 is done (2026-10-16/17):
+  `imaginarium-canvas` shows and edits a board. Each part was reviewed by
+  a fresh agent; the PRs are stacked on M3.1's
+  (https://github.com/giosuel/imaginarium/pull/44), M3.2's on
+  https://github.com/giosuel/imaginarium/pull/45 to /52, M3.3's after.
+  - **The component gallery** (owner, 2026-10-16): every component in its
+    states, dark and light, before the shell uses it
+    (`crates/imaginarium-ui/examples/gallery.rs`). New components get a
+    section there, and their screenshots go to the owner.
   - M3.0 is done: the mockups (owner's design canvas, not committed),
     `shell.md`, `canvas.md`, ADR-0020 and ADR-0021 (accepted), schema
     §5.6 (#37).
-- **Code status:** Cargo workspace with 16 crates. Working: `xtask` (repo
+- **Code status:** Cargo workspace with 18 crates. Working: `xtask` (repo
   checks and dev-profile generator), `imaginarium-profiling` (tracing,
   Tracy, frame stats), `imaginarium-test-utils` (fixtures),
   `imaginarium-settings` (typed registry, TOML), `imaginarium-commands`
@@ -32,7 +64,12 @@ Last updated: 2026-10-16
   `vello_cpu`, glyphs), `imaginarium-text` (Parley: fonts, layout,
   editing), `imaginarium-ui` (window, input, IME, text field, AccessKit,
   frame pipeline, the widget tree on Taffy with signals, widgets,
-  clipboard) and `imaginarium-gate` (the M2 gate app: a board with text,
+  clipboard, layers, scrolling, icons, animation), `imaginarium-canvas`
+  (the board: a document's nodes on the tile canvas, selection, handles,
+  text in place, the board's commands), `imaginarium-shell` (the board
+  window with its panels, palette, contextual toolbar, context menu and
+  inspector; the start window), `imaginarium-app` (the start window,
+  one window per board) and `imaginarium-gate` (the M2 gate app: a board with text,
   search, in-place editing, a command palette, measurements,
   `gate-report.json`). The app only prints its version.
 - **Remote:** <https://github.com/giosuel/imaginarium> (public). All work
@@ -982,17 +1019,34 @@ What M3 builds on:
     - Newer files open read-only (`Mode`).
   - **Dependency research** for new crates (file dialogs through the
     desktop portal on Linux, icons), with the two-week rule.
-- [ ] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
-  - layers for popovers and menus: outside clicks, Esc, focus return;
-  - scroll containers with virtualized rows;
-  - animation (time-based, and off with reduced motion);
-  - vector icons;
+- [x] **M3.1 Toolkit additions** (`imaginarium-ui`, `imaginarium-render`):
+  - layers for popovers and menus: outside clicks, Esc, focus return
+    (done 2026-10-16: popovers, modal dialogs and tooltips, placed by
+    anchor with flipping, focus in and back, Tab kept inside; the gallery
+    example shows them);
+  - scroll containers with virtualized rows (done 2026-10-16: `Scroll`
+    and `VirtualList`, a wheel step on 100,000 rows in 0.12 ms);
+  - animation (time-based, and off with reduced motion; done
+    2026-10-16: `Transition`, buttons fade between states, layers fade
+    in, keyboard scrolls glide; reduced motion is a switch until M3.7
+    reads `ui.reduce_motion`);
+  - vector icons (done 2026-10-16: `cargo xtask icons` vendors the 98
+    listed Lucide 1.50.0 icons, `Icon::named`);
   - theme tokens as signals, so a theme switches live (done 2026-10-16:
     `Theme`, `Token` and `Paint` in `imaginarium-ui`, dark first, the
     widgets on tokens, a contrast test; the counter example switches
     themes live);
-  - access ids with generations (from M2.9).
-- [ ] **M3.2 `imaginarium-canvas`**: the document on the tile canvas.
+  - access ids with generations (from M2.9; done 2026-10-16: a late
+    screen reader request about a removed widget is refused).
+- [x] **M3.2 `imaginarium-canvas`**: the document on the tile canvas
+  (done 2026-10-17: `BoardCanvas`, `canvas.md` "As built" notes;
+  benchmarks on this VM, release: a drag step 0.03 ms, hit testing
+  0.009 ms, a style used by 1,000 of 10,000 nodes 5.5 ms, a paste of
+  1,000 shapes 8 ms on the canvas plus 105 ms in the model; opening
+  10,000 nodes 282 ms in the model and 44 ms for the items and the first
+  frame, 512 ms and 200 ms with a label each). Not done: reading the
+  nodes in bulk on open (below, Known issues); the drag lift wasn't
+  needed (a drag redraws 1 to 4 tiles a frame).
   - **Painting:**
     - shapes: rectangle (also rounded), ellipse, line, triangle and
       diamond, each as a path (M3.0's vector model), with fill, stroke,
@@ -1011,7 +1065,11 @@ What M3 builds on:
     - a 10,000-node board from the model: opening, the first frame, drag
       latency, `ChangeSet` to tiles;
     - opening such a board took 339 ms in M1; read the nodes in bulk.
-- [ ] **M3.3 Commands and keymaps:**
+- [x] **M3.3 Commands and keymaps** (done 2026-10-17, in
+  `imaginarium-canvas`: 46 commands in `commands::board_commands()`,
+  the default keymap in `keys.rs`, tools, copy and paste; `canvas.md`
+  "As built" notes. **File commands moved to M3.6**, which builds files:
+  they need the window and its dialogs):
   - **Board commands:**
     - insert each shape and text;
     - delete, duplicate, copy, cut and paste nodes;
@@ -1022,22 +1080,82 @@ What M3 builds on:
   - **Shortcuts** come from the keymaps of `imaginarium-commands`, replacing
     the gate's hard-coded ones.
   - **The command context:** the document, the selection and the view.
-- [ ] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`):
-  - the pill (mode, zoom; share and AI as placeholders);
+- [x] **M3.4 The shell** (`imaginarium-shell`, `imaginarium-app`), done 2026-10-17:
+  - [x] **part 1, the board window** (2026-10-17, `shell.md` §3 "As
+    built"): the pill, search, AI and share (placeholders that say what
+    is coming), zoom and undo, help, and the tool bar, docked left,
+    dragged to any edge or floating (`ui.toolbar.position`). Toolkit:
+    hover tooltips, `IconButton`, `ButtonBox`, overlays that let the
+    pointer through, clicks that keep the focus, the window's app ID
+    (`ch.giosuel.Imaginarium`). Left for later parts: arrow keys in the
+    tool bar, `F6`, double-click to keep a tool;
+  - [x] **part 2, the command palette** (2026-10-17, `shell.md` §3.7
+    "As built"): commands and settings in one search, highlighted
+    matches, availability with reasons, settings changed in place,
+    recent first. Not yet: arguments typed inline;
+  - [x] **parts 3 and 4, the contextual toolbar and the context menu**
+    (2026-10-17, `shell.md` §3.5 and §3.8 "As built"): style commands on
+    the selection (fill, outline, width, radius, text color), the bar
+    above the selection with its popovers, menus of commands for More,
+    Arrange and right-clicks;
+  - [x] **part 5, the inspector** (2026-10-17, `shell.md` §3.6 "As
+    built"), with its commands (opacity, text size, Reset to style, named
+    styles, rename, hide, shape type) and a slider in the toolkit;
+  - [x] **part 6, the start window and windows** (2026-10-17, `shell.md`
+    §4 "As built"): New board, Show at startup
+    (`startup.show_start_window`), Open… and Recent waiting for files
+    (M3.6); several windows in one event loop sharing the GPU and fonts,
+    `Ctrl+N` and `Ctrl+W`, the start window again after the last board;
+    the first frame 240–255 ms after start on llvmpipe (budget 400 ms);
   - the palette on the real registry, with commands and settings;
   - the contextual toolbar, built from the commands available for the
     selection;
   - the inspector (`Ctrl+I`: geometry and style);
+  - the context menu as in its mockup: items with an icon, a label and
+    the shortcut, separators, Delete in the danger color, built from the
+    commands (the gallery's menu is a stand-in that shows the layer);
   - the start window, like Blender's splash: new boards, recent files,
     open;
   - one window per document;
   - the app's startup: settings, commands, fonts and the GPU in parallel,
     under 400 ms to an interactive empty board (PLAN §10).
-- [ ] **M3.5 Settings UI**, generated from the registry:
+- [x] **M3.5 Settings UI**, generated from the registry, done 2026-10-17, in parts:
+  - [x] **part 1, the settings file** (2026-10-17, `shell.md` §5 "As
+    built"): read at startup, written after every change on a thread of
+    its own, an unreadable file moved aside instead of overwritten;
+  - [x] **part 2, the Settings window** (2026-10-17, `shell.md` §5 "As
+    built"): `Ctrl+,`, sections, search, an editor for every kind of
+    value, Changed and Reset, the keyboard shortcuts (to read);
+  - [x] **part 3, the board background** (2026-10-17): dots, grid or
+    plain, followed by every board window at once. The theme settings
+    (theme, accent, reduce motion, interface size) and the mockup's theme
+    cards and swatches go with M3.7, which has following the system,
+    light, high contrast and reduced motion;
+  - [x] **part 4, This board** (2026-10-17, `shell.md` §5 "As built"):
+    a board's own settings in the document (`meta.settings`, additive in
+    schema v1), set with `board.set_setting`, in Settings' This board
+    tab;
   - search, scopes and every kind of setting;
   - changes apply at once;
   - `Ctrl+,`, and settings in the palette.
-- [ ] **M3.6 Files:**
+- [x] **M3.6 Files**, done 2026-10-17, in parts:
+  - [x] **part 1, saving** (2026-10-17, `shell.md` §3.1 "As built"):
+    every change of a board opened from a file goes into the file on a
+    saving thread, with the pill's states; read-only for newer files;
+  - [x] **part 2, crash recovery** (2026-10-17, `shell.md` §3.1 "As
+    built"): untitled boards kept in the recovery folder from their
+    first change, deleted when they close; the start window's notice
+    offers the ones a crashed app left;
+  - [x] **part 3, the open and save dialogs** (2026-10-17, `shell.md`
+    §3.1 "As built"): Open…, Save…, Rename or move… (moving the file),
+    Save a copy…, the main menu; `rfd` on threads of their own;
+  - [x] **part 4, closing a board with unsaved changes** (2026-10-17,
+    `shell.md` §3.9 "As built"): the SaveClose dialog for untitled boards
+    with work and boards whose file fails;
+  - [x] **part 5, recent boards** (2026-10-17, `shell.md` §4 "As
+    built"): tiles with pictures, the filter, Open another board…,
+    dropping a file (not on Wayland yet: winit);
+  The plan, as first written:
   - autosave of every change on a worker, and crash recovery;
   - native open and save dialogs; closing an unsaved board asks Save…,
     Don't save or Cancel; rename, move, save a copy;
@@ -1047,13 +1165,23 @@ What M3 builds on:
 - [ ] **M3.7 Themes:** dark comes first and is what M3.1 to M3.6 build
   and test (owner, 2026-10-16); then light and high contrast on the same
   tokens, following the system, reduced motion, and their settings.
+  - [x] **part 1, the theme and the accent** (2026-10-17, `shell.md` §7
+    "As built"): `ui.theme`, `ui.accent`, `ui.reduce_motion` with the
+    Settings mockup's cards, swatches and dropdown, live; following the
+    system (winit, the desktop portal); soft shadows;
+  - [x] **part 2, interface size** (2026-10-17, `shell.md` §7 "As
+    built"): `ui.scale`, 80 to 200 %, panels and menus, not the board;
+  - part 3, high contrast, once its design is mocked up and approved.
 - [ ] **M3.8 From M2:**
   - **the board's opening:** cover the fill, maybe with an animation
     (owner);
   - the cards' text layout off the UI thread;
   - **the iGPU:** its slow frames and upload stalls;
   - **tiles:**
-    - a window-wide memory budget for tile pages;
+    - a window-wide memory budget for tile pages: done 2026-10-18 (pages
+      left empty are given back while two pages' worth of free slots
+      stay, uploads fill the first pages; the canvas's 1,000-tile cache
+      stays the cap);
     - rendering the next zoom level ahead, if needed;
     - a shape shown twice as a drag starts, if seen.
 - [ ] **M3.9 Measure and wrap up:**
@@ -1063,7 +1191,9 @@ What M3 builds on:
   - the owner's run on the laptop;
   - the review of all M3 code;
   - **docs:** user docs on the website (getting started, the palette,
-    shortcuts, files) and developer docs;
+    shortcuts, files): written 2026-10-17 (the guide's six pages); the
+    developer docs too (2026-10-18: a page for the app's shell, the UI
+    toolkit's look and input), both in PR #73;
   - the tag `v0.0.4-m3`, with a Linux package.
 
 **Order:**
@@ -1092,6 +1222,33 @@ What M3 builds on:
 
 ## Known issues and notes
 
+- **Two render tests are timing-sensitive**: `canvas::tests::
+  the_budget_owes_tiles_and_stand_ins_fill_them` and
+  `uploads_follow_what_they_cost` failed once in a full workspace run
+  while other sessions loaded the machine (load average about 5), and
+  passed on their own and in the next full run (2026-10-17).
+
+- **Opening a big board is slow in the model** (M3.2 benchmarks): 282 ms
+  for 10,000 shapes (Loro import and reading the view key by key), and
+  the canvas lays out every label on the UI thread at open (200 ms for
+  10,000). To do before boards that big are common: read the nodes in
+  bulk on the opening worker (`LoroTree::get_value_with_meta`, ADR-0020),
+  and lay out off-screen labels lazily or on a worker.
+- **A gesture right after another edit undoes together with it**: the
+  model merges undo steps within 500 ms (`UndoConfig`), groups included.
+- **The demo board can be undone** (M3.4): `--demo` builds the Launch
+  plan board as the user's edits, so undo takes it apart. Opened files
+  (M3.6) start without history.
+- **Pasting big copies parses on the UI thread** (M3.3): a payload is
+  capped at 64 MB; moving the parsing to a worker is left for when
+  pastes get that big. Also not yet: a paste doesn't remap references
+  inside the copy (connectors' ends, `gen.inputs`; connectors come in
+  M4), carries asset ids to boards without those blobs (images come in
+  M4), and leaves a paragraph style (`ps`) dangling on another board.
+- **Text editing**: a collaborator typing before the caret moves it by
+  their text's length; with tile workers the edited text shows twice for
+  a frame when editing starts.
+
 - **The M2 gate's manual checklist hasn't been run** (deferred by the
   owner, 2026-10-16). So criterion 4 (text input with an input method,
   and Orca) and criterion 5 (HiDPI, fractional and mixed scales) are
@@ -1100,6 +1257,12 @@ What M3 builds on:
   the desktop integration. The owner runs it later
   (`docs/design/m2-gate.md`, "Manual checklist"); what it finds is fixed
   in the milestone then under way.
+
+- **Third-party notices don't ship yet.** The licenses of what the app
+  bundles (the Lucide icons' ISC and MIT notices in `LICENSE-lucide`, the
+  bundled fonts, the Rust dependencies) must reach users with the
+  binaries: a notices file in the packages or an About screen, before the
+  first release with the shell.
 
 - **Signatures are verified on open** (since M1.8: every record a document
   with an ACL chain is read from), but that is slow for big shared

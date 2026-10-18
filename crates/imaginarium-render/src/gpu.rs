@@ -78,10 +78,19 @@ impl GpuInfo {
     }
 }
 
+#[derive(Clone)]
 struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+}
+
+/// A device and queue for tests, if a GPU (or lavapipe) opens.
+#[cfg(test)]
+pub(crate) fn device_for_tests() -> Option<(wgpu::Device, wgpu::Queue)> {
+    pollster::block_on(open(&instance(), &GpuOptions::default(), None))
+        .ok()
+        .map(|gpu| (gpu.device, gpu.queue))
 }
 
 fn instance() -> wgpu::Instance {
@@ -394,6 +403,8 @@ pub struct WindowRenderer {
     bitmap_fonts: BitmapFonts,
     startup: GpuStartup,
     timer: Option<GpuTimer>,
+    /// What it was opened with, for windows that share its GPU.
+    options: GpuOptions,
 }
 
 /// Which fonts have bitmap glyphs (color emoji in CBDT or sbix, EBDT), by
@@ -462,7 +473,7 @@ impl Textures {
 
     fn free(&mut self, key: TextureKey) {
         self.drop_own(key);
-        self.pages.free(key);
+        self.pages.free(key, &mut self.bindings);
         self.placed.remove(&key);
     }
 
@@ -571,7 +582,7 @@ impl Textures {
                                 .upload(&mut self.bindings, *key, pixmap, &mut stats.pages);
                         self.placed.insert(*key, placed);
                     } else {
-                        self.pages.free(*key);
+                        self.pages.free(*key, &mut self.bindings);
                         let texture =
                             self.own_texture(&gpu.device, *key, size, UPLOAD_FORMAT, &mut stats);
                         gpu.queue.write_texture(
@@ -595,7 +606,7 @@ impl Textures {
                     scene,
                 } => {
                     let (w, h) = ((*width).max(1), (*height).max(1));
-                    self.pages.free(*key);
+                    self.pages.free(*key, &mut self.bindings);
                     let texture =
                         self.own_texture(&gpu.device, *key, (w, h), self.format, &mut stats);
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -851,7 +862,19 @@ impl WindowRenderer {
             textures,
             bitmap_fonts: BitmapFonts::default(),
             startup,
+            options: options.clone(),
         })
+    }
+
+    /// The GPU it draws with, for more windows on it (one window per
+    /// document): they share the device instead of opening the GPU again.
+    pub fn shared_gpu(&self) -> SharedGpu {
+        SharedGpu {
+            instance: self.instance.clone(),
+            gpu: self.gpu.clone(),
+            options: self.options.clone(),
+            spare: None,
+        }
     }
 
     /// The GPU in use.
@@ -1067,6 +1090,106 @@ impl WindowRenderer {
             self.gpu.queue.submit([encoder.finish()]);
             timer.submitted();
         }
+    }
+}
+
+/// A GPU that windows share (from [`WindowRenderer::shared_gpu`]), with
+/// a Vello renderer ready for the next window if asked for: building one
+/// compiles its pipelines, which takes a while (130 ms on llvmpipe) and so
+/// happens off the UI thread ([`SharedGpu::prepare`]).
+pub struct SharedGpu {
+    instance: wgpu::Instance,
+    gpu: Gpu,
+    options: GpuOptions,
+    /// The next window's Vello renderer, being built.
+    spare: Option<std::thread::JoinHandle<(vello_gpu::Renderer, vello_gpu::Resources)>>,
+}
+
+impl Drop for SharedGpu {
+    fn drop(&mut self) {
+        // A build still in the driver when the program exits could crash
+        // it (lavapipe, LLVM): wait for it.
+        if let Some(thread) = self.spare.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl std::fmt::Debug for SharedGpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedGpu")
+            .field("adapter", &self.gpu.adapter.get_info().name)
+            .field("spare", &self.spare.is_some())
+            .finish()
+    }
+}
+
+impl SharedGpu {
+    /// Starts building the next window's Vello renderer on a thread of its
+    /// own, unless one is ready or on its way.
+    pub fn prepare(&mut self) {
+        if self.spare.is_some() {
+            return;
+        }
+        let device = self.gpu.device.clone();
+        if let Ok(thread) = std::thread::Builder::new()
+            .name("gpu-renderer".into())
+            .spawn(move || new_renderer(&device, LIKELY_FORMAT, 1, 1))
+        {
+            self.spare = Some(thread);
+        }
+    }
+
+    /// A renderer for `window`: its own surface, the shared device, and
+    /// the spare Vello renderer if there is one (waiting for it if it is
+    /// still being built). A window the GPU can't draw to (another
+    /// display's GPU) gets one of its own.
+    ///
+    /// # Errors
+    /// If the window's surface can't be made, or its own GPU opened.
+    pub fn window(
+        &mut self,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        width: u32,
+        height: u32,
+    ) -> Result<WindowRenderer, RenderError> {
+        let creating = Instant::now();
+        let surface = self
+            .instance
+            .create_surface(window)
+            .map_err(|err| RenderError::Surface(err.to_string()))?;
+        if !self.gpu.adapter.is_surface_supported(&surface) {
+            let instance = self.instance.clone();
+            let gpu = pollster::block_on(open(&instance, &self.options, Some(&surface)))?;
+            return WindowRenderer::finish(
+                instance,
+                surface,
+                gpu,
+                None,
+                width,
+                height,
+                &self.options,
+                GpuStartup::default(),
+            );
+        }
+        let surface_time = creating.elapsed();
+        let waiting = Instant::now();
+        let built = self.spare.take().and_then(|thread| thread.join().ok());
+        let startup = GpuStartup {
+            surface: surface_time,
+            waited: waiting.elapsed(),
+            ..GpuStartup::default()
+        };
+        WindowRenderer::finish(
+            self.instance.clone(),
+            surface,
+            self.gpu.clone(),
+            built,
+            width,
+            height,
+            &self.options,
+            startup,
+        )
     }
 }
 

@@ -22,6 +22,7 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Members depend on each other via `name.workspace = true`.
+imaginarium-canvas = { path = "crates/imaginarium-canvas" }
 imaginarium-cli = { path = "crates/imaginarium-cli" }
 imaginarium-commands = { path = "crates/imaginarium-commands" }
 imaginarium-crypto = { path = "crates/imaginarium-crypto" }
@@ -32,6 +33,7 @@ imaginarium-profiling = { path = "crates/imaginarium-profiling" }
 imaginarium-reactive = { path = "crates/imaginarium-reactive" }
 imaginarium-render = { path = "crates/imaginarium-render" }
 imaginarium-settings = { path = "crates/imaginarium-settings" }
+imaginarium-shell = { path = "crates/imaginarium-shell" }
 imaginarium-test-utils = { path = "crates/imaginarium-test-utils" }
 imaginarium-text = { path = "crates/imaginarium-text" }
 imaginarium-ui = { path = "crates/imaginarium-ui" }
@@ -68,6 +70,9 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 protox = "0.9.1"
 rand_core = "0.10.1"
+# Native open and save dialogs: the desktop portal on Linux (Hyprland, GNOME,
+# KDE and Flatpak alike), the system's own on Windows and macOS.
+rfd = "0.17.2"
 serde = "1.0.229"
 serde_json = "1.0.151"
 skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
@@ -82,6 +87,9 @@ vello_common = "0.3.0"
 vello_cpu = "0.3.0"
 vello_gpu = "0.3.0"
 wgpu = "30.0.1"
+# The desktop portal's settings (light or dark, reduced motion) on Linux;
+# already in the tree through AccessKit.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 # Without `wayland-csd-adwaita`: its title text pulls in `ttf-parser`, which
 # is unmaintained (RUSTSEC-2026-0192). The fallback decorations on
 # compositors without server-side ones (GNOME) have no title text; the app

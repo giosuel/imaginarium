@@ -20,20 +20,19 @@ Imaginarium puts every kind of office work on **one surface**:
 Because they share one document model, anything can go anywhere: a diagram
 from a board can be dropped into a slide or a document as it is.
 
-## Finding features
+This preview has the **board**. The guide:
 
-The interface stays out of your way. Instead of menus:
-
-- **Command palette** (`Ctrl+K` / `⌘K`): type what you want ("align
-  center", "insert table", "dark mode"). It also finds settings, and it
-  learns what you use often.
-- **Contextual toolbar**: appears next to your selection, with only what
-  applies to it.
-- **Quick insert**: type `/` in text, or double-click the canvas.
-- **Inspector** (`Ctrl+I` / `⌘I`): every property of the selection, when you
-  need the details.
+- [Getting started](/guide/getting-started/): the start window, drawing,
+  selecting and moving around the board.
+- [Finding features](/guide/finding-features/): the command palette, the
+  contextual toolbar, the context menu and the inspector.
+- [Files](/guide/files/): saving, opening, recent boards and what happens
+  after a crash.
+- [Settings](/guide/settings/): the theme, the accent color, the interface
+  size and more.
+- [Shortcuts](/guide/shortcuts/): every key.
 
 :::note
-These guides are being written alongside the features. Pages appear here as
+These guides are written alongside the features. Pages appear here as
 each part ships.
 :::
