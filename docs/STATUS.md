@@ -1178,7 +1178,9 @@ What M3 builds on:
   - the cards' text layout off the UI thread;
   - **the iGPU:** its slow frames and upload stalls;
   - **tiles:**
-    - a window-wide memory budget for tile pages;
+    - a window-wide memory budget for tile pages: done 2026-10-18 (pages
+      left empty are given back, uploads fill the first pages; the
+      canvas's 1,000-tile cache stays the cap);
     - rendering the next zoom level ahead, if needed;
     - a shape shown twice as a drag starts, if seen.
 - [ ] **M3.9 Measure and wrap up:**

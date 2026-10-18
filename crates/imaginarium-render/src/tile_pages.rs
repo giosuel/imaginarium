@@ -9,6 +9,11 @@
 //! thread of their own and cleared there, so that work is done before a
 //! frame needs the page: when the canvas hands tiles to its workers, it
 //! says how many will come ([`crate::Scene::expect_uploads`]).
+//!
+//! Uploads take the lowest page with room, so the later pages empty as
+//! tiles go; a page left empty is given back (its 16 MB freed) while
+//! another page's worth of free slots stays in reserve. The window's tile
+//! memory follows what it shows, not the most it ever showed.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -63,9 +68,13 @@ impl Slot {
 pub(crate) struct TilePages {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pages: Vec<Page>,
-    /// Free slots, the last taken first.
-    free: Vec<Slot>,
+    /// The pages by index; `None` where one was given back (its index is
+    /// reused by the next).
+    pages: Vec<Option<Page>>,
+    /// Each page's free slots, the last taken first.
+    free: Vec<Vec<u16>>,
+    /// Free slots in all pages.
+    free_count: usize,
     used: HashMap<TextureKey, Slot>,
     made: mpsc::Receiver<Page>,
     make: mpsc::Sender<Page>,
@@ -90,6 +99,7 @@ impl TilePages {
             queue: queue.clone(),
             pages: Vec::new(),
             free: Vec::new(),
+            free_count: 0,
             used: HashMap::new(),
             made,
             make,
@@ -111,14 +121,28 @@ impl TilePages {
             page.texture
                 .create_view(&wgpu::TextureViewDescriptor::default()),
         );
-        let index = self.pages.len();
         // Reversed, so slots are taken in order: tiles uploaded together
         // share a page, and a frame draws them with one binding.
-        self.free.extend((0..SLOTS).rev().map(|slot| Slot {
-            page: index,
-            index: slot,
-        }));
-        self.pages.push(page);
+        let slots: Vec<u16> = (0..SLOTS).rev().collect();
+        self.free_count += slots.len();
+        match self.pages.iter().position(Option::is_none) {
+            Some(index) => {
+                self.pages[index] = Some(page);
+                self.free[index] = slots;
+            }
+            None => {
+                self.pages.push(Some(page));
+                self.free.push(slots);
+            }
+        }
+    }
+
+    /// A free slot of the lowest page with room (so the later ones empty).
+    fn take_slot(&mut self) -> Option<Slot> {
+        let page = self.free.iter().position(|slots| !slots.is_empty())?;
+        let index = self.free[page].pop()?;
+        self.free_count -= 1;
+        Some(Slot { page, index })
     }
 
     /// Starts making `count` pages on a thread of their own.
@@ -145,7 +169,7 @@ impl TilePages {
     /// Makes room ahead for `count` uploads of tiles without a slot, and a
     /// page more in reserve ([`crate::Scene::expect_uploads`]).
     pub(crate) fn expect(&mut self, count: usize) {
-        self.make_ahead(pages_to_make(self.free.len(), self.coming, count));
+        self.make_ahead(pages_to_make(self.free_count, self.coming, count));
     }
 
     /// Pages being made on their thread.
@@ -165,7 +189,7 @@ impl TilePages {
         let slot = match self.used.get(&key) {
             Some(slot) => *slot,
             None => {
-                if self.free.is_empty() {
+                if self.free_count == 0 {
                     stats.made += 1;
                     // Waiting for a page on its way costs at most what
                     // making another would, and doesn't make one too many.
@@ -184,12 +208,12 @@ impl TilePages {
                     };
                     self.add(page, bindings);
                 }
-                let Some(slot) = self.free.pop() else {
+                let Some(slot) = self.take_slot() else {
                     unreachable!("a page was just added");
                 };
                 // A page in reserve, so the next one is made before it is
                 // needed.
-                if self.free.len() + self.coming * usize::from(SLOTS) < usize::from(SLOTS) {
+                if self.free_count + self.coming * usize::from(SLOTS) < usize::from(SLOTS) {
                     self.make_ahead(1);
                 }
                 self.used.insert(key, slot);
@@ -197,9 +221,12 @@ impl TilePages {
             }
         };
         let region = slot.region();
+        let Some(page) = &self.pages[slot.page] else {
+            unreachable!("a slot in use is on a page that is there");
+        };
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.pages[slot.page].texture,
+                texture: &page.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: u32::from(region.x0),
@@ -221,21 +248,33 @@ impl TilePages {
             },
         );
         Placed {
-            id: self.pages[slot.page].id,
+            id: page.id,
             region,
         }
     }
 
-    /// Frees `key`'s slot, if it has one.
-    pub(crate) fn free(&mut self, key: TextureKey) {
-        if let Some(slot) = self.used.remove(&key) {
-            self.free.push(slot);
+    /// Frees `key`'s slot, if it has one; a page left empty is given back
+    /// while another page's worth of free slots stays.
+    pub(crate) fn free(&mut self, key: TextureKey, bindings: &mut vello_gpu::TextureBindings) {
+        let Some(slot) = self.used.remove(&key) else {
+            return;
+        };
+        self.free[slot.page].push(slot.index);
+        self.free_count += 1;
+        let slots = usize::from(SLOTS);
+        if self.free[slot.page].len() == slots && self.free_count - slots >= slots {
+            if let Some(page) = self.pages[slot.page].take() {
+                bindings.remove(page.id);
+                // The texture goes with it.
+            }
+            self.free[slot.page].clear();
+            self.free_count -= slots;
         }
     }
 
-    /// Pages made so far.
+    /// Pages there are now.
     pub(crate) fn len(&self) -> usize {
-        self.pages.len()
+        self.pages.iter().flatten().count()
     }
 }
 
@@ -326,6 +365,47 @@ mod tests {
                 assert!(a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0);
             }
         }
+    }
+
+    #[test]
+    fn empty_pages_are_given_back_and_uploads_fill_the_first_pages() {
+        let Some((device, queue)) = crate::gpu::device_for_tests() else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let mut pages = TilePages::new(&device, &queue);
+        let mut bindings = vello_gpu::TextureBindings::new();
+        let pixmap = Pixmap::new(SLOT, SLOT);
+        let mut stats = PageStats::default();
+        let keys: Vec<TextureKey> = (0..3 * usize::from(SLOTS))
+            .map(|_| TextureKey::unique())
+            .collect();
+        for key in &keys {
+            pages.upload(&mut bindings, *key, &pixmap, &mut stats);
+        }
+        // Three pages full, and pages in reserve on their way.
+        pages.receive(&mut bindings);
+        assert!(pages.len() >= 3, "{}", pages.len());
+        // Two pages' tiles go: their pages are given back but one, which
+        // stays in reserve.
+        for key in &keys[usize::from(SLOTS)..] {
+            pages.free(*key, &mut bindings);
+        }
+        pages.receive(&mut bindings);
+        let reserve = pages.len();
+        assert!(reserve <= 3, "{reserve} pages for one page of tiles");
+        // New tiles fill the first page with room, not a fresh one.
+        let more: Vec<TextureKey> = (0..10).map(|_| TextureKey::unique()).collect();
+        for key in &more {
+            let placed = pages.upload(&mut bindings, *key, &pixmap, &mut stats);
+            assert_eq!(pages.used[key].page, pages.used[&more[0]].page);
+            let _ = placed;
+        }
+        // All gone: only the reserve is left.
+        for key in keys[..usize::from(SLOTS)].iter().chain(&more) {
+            pages.free(*key, &mut bindings);
+        }
+        assert!(pages.len() <= 2, "{} pages for nothing", pages.len());
     }
 
     #[test]

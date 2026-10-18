@@ -85,6 +85,14 @@ struct Gpu {
     queue: wgpu::Queue,
 }
 
+/// A device and queue for tests, if a GPU (or lavapipe) opens.
+#[cfg(test)]
+pub(crate) fn device_for_tests() -> Option<(wgpu::Device, wgpu::Queue)> {
+    pollster::block_on(open(&instance(), &GpuOptions::default(), None))
+        .ok()
+        .map(|gpu| (gpu.device, gpu.queue))
+}
+
 fn instance() -> wgpu::Instance {
     // The primary APIs only (Vulkan, Metal, DirectX 12): enabling OpenGL
     // too loads its drivers at startup (EGL), which costs time on every
@@ -465,7 +473,7 @@ impl Textures {
 
     fn free(&mut self, key: TextureKey) {
         self.drop_own(key);
-        self.pages.free(key);
+        self.pages.free(key, &mut self.bindings);
         self.placed.remove(&key);
     }
 
@@ -574,7 +582,7 @@ impl Textures {
                                 .upload(&mut self.bindings, *key, pixmap, &mut stats.pages);
                         self.placed.insert(*key, placed);
                     } else {
-                        self.pages.free(*key);
+                        self.pages.free(*key, &mut self.bindings);
                         let texture =
                             self.own_texture(&gpu.device, *key, size, UPLOAD_FORMAT, &mut stats);
                         gpu.queue.write_texture(
@@ -598,7 +606,7 @@ impl Textures {
                     scene,
                 } => {
                     let (w, h) = ((*width).max(1), (*height).max(1));
-                    self.pages.free(*key);
+                    self.pages.free(*key, &mut self.bindings);
                     let texture =
                         self.own_texture(&gpu.device, *key, (w, h), self.format, &mut stats);
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
