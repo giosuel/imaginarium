@@ -48,15 +48,15 @@ command's shortcut too.
 | `Delete`, `Backspace` | Delete |
 | `Ctrl+A` | Select all |
 | `Ctrl+G` / `Ctrl+Shift+G` | Group / ungroup |
-| `Ctrl+Shift+L` | Lock |
+| `Ctrl+Shift+L` | Lock (unlock: right-click the board, **Unlock**) |
 | `Ctrl+]` / `Ctrl+[` | Bring to front / send to back |
 | `Ctrl+Alt+]` / `Ctrl+Alt+[` | Bring forward / send backward |
 | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` | Bring to front / send to back |
 | `Ctrl+↑` / `Ctrl+↓` | Bring forward / send backward |
 | Arrow keys | Nudge by 1 point (`Shift`: 10) |
-| `Enter` | Edit the text, or enter a group |
-| `Esc` | End editing, leave a group, then clear the selection |
-| `Tab` | The next shape |
+| `Enter` | Edit the text |
+| `Esc` | End editing, go back to the Select tool, leave a group, then clear the selection |
+| `Tab` / `Shift+Tab` | The next / previous shape (after the last one, on to the next control) |
 
 ## Zoom
 

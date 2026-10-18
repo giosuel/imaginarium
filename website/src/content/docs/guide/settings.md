@@ -16,7 +16,8 @@ puts it back.
   pick **Light** or **Dark**. High contrast is coming.
 - **Accent color**: used for the selection, the active tool and buttons.
 - **Board background**: dots, a grid or plain.
-- **Reduce motion**: follow the system, or turn animations off or on.
+- **Reduce motion**: follow the system, or choose: **On** turns
+  animations off, **Off** keeps them.
 - **Interface size**: 80 to 200 %. It scales panels, menus and dialogs,
   not the board: at 100 % zoom a shape keeps its size.
 - **Tool bar position**: the edge it is docked to, or floating (dragging

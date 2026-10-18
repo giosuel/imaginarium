@@ -15,6 +15,8 @@ Imaginarium opens with its **start window**:
 - **Recent** shows the boards you opened lately, with a picture of each;
   click one to open it. See [Files](/guide/files/).
 - Turn off **Show at startup** to go straight to a new board.
+- **Settings** (`Ctrl+,` / `⌘,`) and **Shortcuts** are linked at the
+  bottom.
 
 Every board has a **window of its own**: `Ctrl+N` in a board opens
 another one, and `Ctrl+W` / `⌘W` closes it. When the last board closes,
@@ -47,9 +49,10 @@ A **frame** holds what you draw inside it.
 - **Click** a shape to select it; **Shift+click** adds or removes one.
   Drag on empty board to select everything inside a box.
 - **Drag** a selection to move it. Its **handles** resize it (hold
-  **Shift** to keep its proportions), the one above it **turns** it (hold
-  **Shift** to snap to 15°), and the small one inside a rectangle's
-  corner rounds its corners.
+  **Shift** as you start dragging a corner to keep its proportions), the
+  one above it **turns** it (hold **Shift** as you start to snap one shape
+  to 15°), and the small one inside a rectangle's corner rounds its
+  corners.
 - **Arrow keys** nudge the selection by a point, by ten with **Shift**.
 - **Double-click** a shape or a text box (or press **Enter**) to edit its
   text; **Esc** ends editing.
@@ -64,4 +67,5 @@ A **frame** holds what you draw inside it.
 - `Ctrl` + scroll / `⌘` + scroll zooms around the pointer.
 - The **zoom** at the bottom left: − and +, and the percentage, which
   offers *Zoom to fit* (`Ctrl+1`), *Zoom to 100 %* (`Ctrl+0`) and *Zoom to
-  selection* (`Ctrl+2`).
+  selection* (`Ctrl+2`). Next to it are *Zoom to fit*, **Undo** and
+  **Redo**.

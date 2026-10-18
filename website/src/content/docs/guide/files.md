@@ -16,7 +16,8 @@ A file opens **read-only**, and says why at the top left, when:
 
 - it is already open in another window or in another Imaginarium;
 - you may not change it;
-- it was made with a newer version of Imaginarium.
+- it was made with a newer version of Imaginarium;
+- it couldn't be brought up to date for this version.
 
 ## New boards
 
@@ -27,8 +28,9 @@ was kept, with every change"), and **Open it** brings it back.
 
 - **Save…** (`Ctrl+S` / `⌘S`, or the Save… button next to Not saved)
   gives it a name and a folder. From then on it saves itself there.
-- Closing a new board with something on it asks first: **Save…**, **Don't
-  save** or **Cancel**.
+- Closing a new board you changed asks first: **Save…**, **Don't save**
+  or **Cancel**. So does closing a board whose last changes couldn't be
+  saved, so you can save it somewhere else.
 
 ## Opening, renaming, copies
 
