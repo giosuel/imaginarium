@@ -298,6 +298,15 @@ settings offer, and the focus ring at 3:1; a new token pair belongs in
 it. Don't call `set_theme` from an effect that reads `theme()`: the
 switch runs that effect again.
 
+An app sets the user's choice rather than a theme:
+`appearance::set_appearance(Appearance { theme, accent, motion })` picks
+the theme (following the system where the choice says so: winit's window
+theme on Windows and macOS, the desktop portal on Linux) and reduced
+motion, and keeps following the system live. `set_interface_scale(1.25)`
+makes every logical pixel 25 % bigger in every window (the interface
+size); content that keeps its own size divides by `interface_scale()`.
+Panels' shadows are soft (`Scene::shadow`, a blurred rounded rectangle).
+
 ## Input and focus
 
 - **Pointer:** input goes to the deepest widget under the pointer, later
@@ -313,9 +322,12 @@ switch runs that effect again.
   go to a field nobody sees.
 - **Shortcuts** are matched by their Latin letters. With Ctrl or ⌘ held,
   a key on a Cyrillic or Greek layout stands for the Latin letter on the
-  same key, as in other apps. App-wide shortcuts (the gate's Ctrl+K and
-  Ctrl+F) are handled by the view before the tree for now. The command
-  system's keymaps (`imaginarium-commands`) take them over in M3.
+  same key, as in other apps. The app's shortcuts come from the command
+  system's keymaps (`imaginarium-commands`); a view matches app-wide ones
+  (Ctrl+K) before the tree, so they work wherever the keys are.
+- **Files dropped** on a window arrive as `Input::FileDropped` for the
+  view (`file_drops_supported()` says whether they can: not on Wayland
+  with winit 0.30).
 
 ## Text
 

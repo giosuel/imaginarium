@@ -9,7 +9,7 @@ The interface stays out of your way: there is no menu bar. Instead:
 
 ## The command palette
 
-**Search** at the top right, or `Ctrl+K` / `⌘K` anywhere, opens the
+**Search** at the top right, or `Ctrl+K` / `⌘K` anywhere on a board, opens the
 **command palette**. Type what you want ("group", "bring to front",
 "dark", "tool bar"): it finds every command and setting by name and by
 other words for it, and shows each one's shortcut.
@@ -23,24 +23,30 @@ other words for it, and shows each one's shortcut.
 ## The contextual toolbar
 
 When something is selected, a small toolbar appears above it with what
-applies to it: fill, outline and its width, corner radius, text color,
-arrange (front and back, group), duplicate, delete, and **More** for the
-rest. It steps aside while you drag.
+applies to it: fill, outline and its width, corner radius, text color
+(for text boxes), arrange (front and back, group), duplicate, delete,
+**AI actions** (a note for now: the AI comes in a later version) and
+**More** for the rest. It steps aside while you drag.
 
 ## The context menu
 
 **Right-click** a shape (or the board) for its commands, with their
-shortcuts: cut, copy and paste, order and grouping, edit text, lock and
-delete. On the board: paste, select all, zoom and undo. `Shift+F10` or
-the Menu key opens it from the keyboard.
+shortcuts: cut, copy and paste, duplicate, order and grouping, edit text,
+lock and unlock, and delete. On the board: paste, select all, *Zoom to
+fit* and *Zoom to 100 %*, undo, **Unlock** and **Show hidden**.
+`Shift+F10` or the Menu key opens it from the keyboard.
+
+A **locked** shape can't be selected by clicking. To get it back,
+right-click the empty board and choose **Unlock**: it unlocks every locked
+shape. A **hidden** shape comes back the same way, with **Show hidden**.
 
 ## The inspector
 
 `Ctrl+I` / `⌘I` opens the **inspector** on the right, with every detail
 of the selection: its name and kind, the shape type and corner radius,
-position, size and rotation, fill, outline and text, opacity, lock and
-hide, and its named style. Type a value and press Enter; what you type
-applies at once.
+position, size and rotation (with **Keep proportions**), fill, stroke,
+text and its size, opacity, lock and hide, and its named style. Type a
+value and press Enter to apply it.
 
 ## The keyboard
 

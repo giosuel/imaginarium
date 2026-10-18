@@ -36,6 +36,7 @@ export default defineConfig({
             { label: 'Contributing', link: '/developers/contributing/' },
             { label: 'The UI toolkit', link: '/developers/ui-toolkit/' },
             { label: 'The board', link: '/developers/board/' },
+            { label: "The app's shell", link: '/developers/shell/' },
             { label: 'The imag tool', link: '/developers/imag/' },
             { label: 'Project plan', link: '/developers/reference/plan/' },
             { label: '.imag spec (v1)', link: '/developers/reference/format/spec-v1/' },
