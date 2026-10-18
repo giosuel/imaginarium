@@ -324,8 +324,11 @@ run):**
   instead of a draw and a bind group per tile. Pages are made ahead of
   need on a thread of their own and cleared there: a screenful at the
   first upload, then one in reserve. A canvas that goes away while the
-  renderer stays frees its textures with `Canvas::release`. Pages aren't
-  given back yet: a window-wide memory budget for them is M3's.
+  renderer stays frees its textures with `Canvas::release`. Uploads take
+  a slot on the lowest page with room, and a page left empty is given
+  back while two pages' worth of free slots stay (with one, a long pan
+  made and gave back a page every few frames). So an empty board keeps
+  two pages (32 MB); the canvas's 1,000-tile cache caps the rest.
 - **Smaller GPU memory blocks** (wgpu's `MemoryUsage` hint: 8–64 MB
   rather than 128–256 MB). The laptop's Intel GPU stalled in single tile
   submissions for 58–117 ms. The likely cause is new memory blocks backed

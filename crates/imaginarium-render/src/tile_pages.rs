@@ -80,6 +80,9 @@ pub(crate) struct TilePages {
     make: mpsc::Sender<Page>,
     /// Pages asked for that haven't come yet.
     coming: usize,
+    /// Pages added so far (tests).
+    #[cfg(test)]
+    added: usize,
 }
 
 /// What a frame's uploads cost in pages.
@@ -104,6 +107,8 @@ impl TilePages {
             made,
             make,
             coming: 0,
+            #[cfg(test)]
+            added: 0,
         }
     }
 
@@ -116,6 +121,10 @@ impl TilePages {
     }
 
     fn add(&mut self, page: Page, bindings: &mut vello_gpu::TextureBindings) {
+        #[cfg(test)]
+        {
+            self.added += 1;
+        }
         bindings.insert(
             page.id,
             page.texture
@@ -254,7 +263,12 @@ impl TilePages {
     }
 
     /// Frees `key`'s slot, if it has one; a page left empty is given back
-    /// while another page's worth of free slots stays.
+    /// while two pages' worth of free slots stay (with those on their
+    /// way). A page's worth would be one slot from making a page again
+    /// ([`Self::upload`] keeps one in reserve): on a long pan, the last
+    /// page draining while new tiles fill the first would make and give
+    /// back a page every few frames. So two empty pages stay when every
+    /// tile is gone.
     pub(crate) fn free(&mut self, key: TextureKey, bindings: &mut vello_gpu::TextureBindings) {
         let Some(slot) = self.used.remove(&key) else {
             return;
@@ -262,7 +276,8 @@ impl TilePages {
         self.free[slot.page].push(slot.index);
         self.free_count += 1;
         let slots = usize::from(SLOTS);
-        if self.free[slot.page].len() == slots && self.free_count - slots >= slots {
+        let others = self.free_count - slots + self.coming * slots;
+        if self.free[slot.page].len() == slots && others >= 2 * slots {
             if let Some(page) = self.pages[slot.page].take() {
                 bindings.remove(page.id);
                 // The texture goes with it.
@@ -373,39 +388,93 @@ mod tests {
             eprintln!("no GPU: skipped");
             return;
         };
+        let slots = usize::from(SLOTS);
         let mut pages = TilePages::new(&device, &queue);
         let mut bindings = vello_gpu::TextureBindings::new();
         let pixmap = Pixmap::new(SLOT, SLOT);
         let mut stats = PageStats::default();
-        let keys: Vec<TextureKey> = (0..3 * usize::from(SLOTS))
-            .map(|_| TextureKey::unique())
-            .collect();
+        // The pages on their way, all here, so the counts are exact.
+        let arrive = |pages: &mut TilePages, bindings: &mut vello_gpu::TextureBindings| {
+            let started = std::time::Instant::now();
+            while pages.coming() > 0 && started.elapsed() < std::time::Duration::from_secs(30) {
+                pages.receive(bindings);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(pages.coming(), 0, "pages still on their way");
+        };
+        let keys: Vec<TextureKey> = (0..3 * slots).map(|_| TextureKey::unique()).collect();
         for key in &keys {
             pages.upload(&mut bindings, *key, &pixmap, &mut stats);
         }
-        // Three pages full, and pages in reserve on their way.
-        pages.receive(&mut bindings);
-        assert!(pages.len() >= 3, "{}", pages.len());
-        // Two pages' tiles go: their pages are given back but one, which
-        // stays in reserve.
-        for key in &keys[usize::from(SLOTS)..] {
+        arrive(&mut pages, &mut bindings);
+        // Three pages full, in order, and one in reserve.
+        assert_eq!(pages.len(), 4);
+        assert_eq!(pages.free_count, slots);
+        for (at, key) in keys.iter().enumerate() {
+            assert_eq!(pages.used[key].page, at / slots);
+        }
+        // The second and third pages' tiles go. The second stays (the
+        // reserve's and its own free slots are only two pages' worth with
+        // it); the third is given back, with its binding.
+        let third = pages.pages[2].as_ref().map(|page| page.id);
+        for key in &keys[slots..] {
             pages.free(*key, &mut bindings);
         }
-        pages.receive(&mut bindings);
-        let reserve = pages.len();
-        assert!(reserve <= 3, "{reserve} pages for one page of tiles");
-        // New tiles fill the first page with room, not a fresh one.
+        assert_eq!(pages.len(), 3);
+        assert!(pages.pages[2].is_none());
+        assert!(third.is_some_and(|id| bindings.remove(id).is_none()));
+        // New tiles fill the lowest page with room (the second), not the
+        // reserve.
         let more: Vec<TextureKey> = (0..10).map(|_| TextureKey::unique()).collect();
         for key in &more {
-            let placed = pages.upload(&mut bindings, *key, &pixmap, &mut stats);
-            assert_eq!(pages.used[key].page, pages.used[&more[0]].page);
-            let _ = placed;
+            pages.upload(&mut bindings, *key, &pixmap, &mut stats);
+            assert_eq!(pages.used[key].page, 1);
         }
-        // All gone: only the reserve is left.
-        for key in keys[..usize::from(SLOTS)].iter().chain(&more) {
+        arrive(&mut pages, &mut bindings);
+        assert_eq!(pages.len(), 3);
+        // All gone: two pages' worth of free slots stay.
+        for key in keys[..slots].iter().chain(&more) {
             pages.free(*key, &mut bindings);
         }
-        assert!(pages.len() <= 2, "{} pages for nothing", pages.len());
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages.free_count, 2 * slots);
+    }
+
+    #[test]
+    fn a_page_given_back_is_not_made_again_at_once() {
+        let Some((device, queue)) = crate::gpu::device_for_tests() else {
+            eprintln!("no GPU: skipped");
+            return;
+        };
+        let slots = usize::from(SLOTS);
+        let mut pages = TilePages::new(&device, &queue);
+        let mut bindings = vello_gpu::TextureBindings::new();
+        let pixmap = Pixmap::new(SLOT, SLOT);
+        let mut stats = PageStats::default();
+        // A long pan: tiles come in at the front and go at the back, a
+        // few a frame, with about three pages' worth on screen.
+        let mut shown: std::collections::VecDeque<TextureKey> = std::collections::VecDeque::new();
+        for _ in 0..3 * slots {
+            let key = TextureKey::unique();
+            pages.upload(&mut bindings, key, &pixmap, &mut stats);
+            shown.push_back(key);
+        }
+        let started = pages.added + pages.coming();
+        let mut made_since = 0;
+        for _ in 0..40 * slots {
+            pages.receive(&mut bindings);
+            let key = TextureKey::unique();
+            pages.upload(&mut bindings, key, &pixmap, &mut stats);
+            shown.push_back(key);
+            if let Some(gone) = shown.pop_front() {
+                pages.free(gone, &mut bindings);
+            }
+            made_since = pages.added + pages.coming() - started;
+        }
+        // Without room to spare, each page given back is made again a
+        // slot later: about one page per page of uploads.
+        assert!(made_since <= 2, "{made_since} pages made on the pan");
+        assert!(pages.len() <= 6, "{} pages", pages.len());
     }
 
     #[test]
