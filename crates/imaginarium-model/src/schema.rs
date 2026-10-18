@@ -34,6 +34,9 @@ pub(crate) mod meta {
     pub(crate) const LANGUAGE: &str = "language";
     pub(crate) const CREATED: &str = "created";
     pub(crate) const REQUIRED_FEATURES: &str = "required_features";
+    /// The document's own values of settings that have a document scope
+    /// (`board.background`), by setting key.
+    pub(crate) const SETTINGS: &str = "settings";
 }
 
 /// Keys of a node's meta map (schema-v1.md §5).

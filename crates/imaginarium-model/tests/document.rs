@@ -921,3 +921,127 @@ fn a_failed_transaction_inside_an_undo_group_splits_it_cleanly() {
     assert_eq!(x(&doc), 0.0);
     assert_consistent(&doc);
 }
+
+#[test]
+fn a_document_keeps_its_own_settings_and_peers_merge_them() {
+    let mut a = board();
+    let changes = a
+        .transact(&Actor::User, |t| {
+            t.set_document_setting("board.background", Value::String("grid".into()))
+        })
+        .unwrap()
+        .1;
+    assert!(changes.meta);
+    assert_eq!(
+        a.view().meta().settings().get("board.background"),
+        Some(&Value::String("grid".into()))
+    );
+    // Saved and opened again.
+    let mut b = open(&a.export_snapshot().unwrap());
+    assert_eq!(a.view(), b.view());
+    // Two peers set two settings at once: both stay (a mergeable map).
+    let (va, vb) = (a.version(), b.version());
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.snap", Value::Bool(true))
+    })
+    .unwrap();
+    b.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::Null)
+    })
+    .unwrap();
+    let from_a = a.export_updates_since(&va).unwrap();
+    let from_b = b.export_updates_since(&vb).unwrap();
+    a.apply_remote(&[&from_b]).unwrap();
+    let remote = b.apply_remote(&[&from_a]).unwrap();
+    assert!(remote.meta);
+    assert_eq!(a.view(), b.view());
+    let settings = a.view().meta().settings().clone();
+    assert_eq!(settings.get("board.snap"), Some(&Value::Bool(true)));
+    assert_eq!(settings.get("board.background"), None);
+    assert_consistent(&a);
+}
+
+#[test]
+fn document_settings_take_setting_keys_and_plain_values() {
+    let mut a = board();
+    for key in [
+        "background",
+        "Board.background",
+        "board..x",
+        "",
+        "_a.1",
+        "board.9x",
+    ] {
+        assert!(
+            a.transact(&Actor::User, |t| t
+                .set_document_setting(key, Value::Bool(true)))
+                .is_err(),
+            "{key:?}"
+        );
+    }
+    assert!(
+        a.transact(&Actor::User, |t| {
+            t.set_document_setting("board.x", Value::Binary(std::sync::Arc::from(&[1u8][..])))
+        })
+        .is_err()
+    );
+    let list = Value::List(std::sync::Arc::from(vec![Value::Bool(true)]));
+    assert!(
+        a.transact(&Actor::User, |t| t.set_document_setting("board.x", list))
+            .is_err()
+    );
+    // Removing from a document without settings adds nothing to it.
+    let before = a.to_value();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.x", Value::Null)
+    })
+    .unwrap();
+    assert_eq!(a.to_value(), before);
+}
+
+#[test]
+fn undo_takes_a_document_setting_back() {
+    let mut a = board();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::String("grid".into()))
+    })
+    .unwrap();
+    a.transact(&Actor::User, |t| {
+        t.set_document_setting("board.background", Value::String("plain".into()))
+    })
+    .unwrap();
+    let undone = a.undo(UndoScope::User, &Actor::User).unwrap().unwrap();
+    assert!(undone.meta);
+    assert_eq!(
+        a.view().meta().settings().get("board.background"),
+        Some(&Value::String("grid".into()))
+    );
+    a.undo(UndoScope::User, &Actor::User).unwrap();
+    assert_eq!(a.view().meta().settings().get("board.background"), None);
+    assert_consistent(&a);
+}
+
+#[test]
+fn a_document_remembers_its_version_at_open_and_can_be_made_read_only() {
+    let mut a = board();
+    assert_eq!(a.version_at_open(), None, "a new document wasn't opened");
+    let x = shape(&mut a, Parent::Root, 1.0);
+    let mut b = open(&a.export_snapshot().unwrap());
+    assert_eq!(b.version_at_open(), Some(b.version()));
+    shape(&mut b, Parent::Root, 2.0);
+    // What the file doesn't hold yet: everything since it was opened.
+    let since = b
+        .export_updates_since(&b.version_at_open().unwrap())
+        .unwrap();
+    a.apply_remote(&[&since]).unwrap();
+    assert_eq!(a.view(), b.view());
+    assert!(a.view().node(x).is_some());
+    b.set_read_only(ReadOnlyReason::File(
+        "it is open in another window or app".into(),
+    ));
+    assert!(matches!(b.mode(), Mode::ReadOnly(ReadOnlyReason::File(_))));
+    assert!(
+        b.transact(&Actor::User, |t| t.set_title("x")).is_err(),
+        "nothing changes a read-only document"
+    );
+}
